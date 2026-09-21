@@ -1,1 +1,1 @@
-# sri-automation
+# idc-automation
