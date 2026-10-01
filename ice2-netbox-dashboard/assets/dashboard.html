@@ -833,7 +833,7 @@ function renderCab(err) {
   const box = document.getElementById('cab-body'), meta = document.getElementById('cab-meta');
   if (!CAB) { meta.textContent = ''; box.innerHTML = `<div class="cab-empty"><b>No UFM data loaded yet.</b> This check compares every cable with the design topology, using what UFM actually sees. ${SERVICE ? `Press <b>Fetch from UFM</b> to read UFM's current fabric scan, master topology and Topology Compare report (read-only).<div style="margin-top:8px">${fetchUi()}</div>` : 'Open the dashboard through <code>netbox_live_sync.py</code> to use it.'}<div class="small" style="margin-top:8px">Alternative from a terminal: <code>./scripts/fetch_ufm_scan.sh</code></div></div>`; return; }
   const S = CAB.summary, src = CAB.source;
-  meta.innerHTML = `<span class="refs"><span><i style="background:${CB.ok}"></i><b>Expected</b> design topology (expected_topology.csv)</span><span><i style="background:${CB.mis}"></i><b>Current</b> UFM scan ${esc(fmtTime(src.scanned_at))} · ${num(src.lanes)} lanes</span>${CAB.master ? `<span><i style="background:${MCOL}"></i><b>Master</b> UFM master topology saved ${esc(mDate())} ${esc(CAB.master.saved_at.slice(11, 16))} UTC</span>` : '<span class="small">no UFM master topology loaded</span>'}<span><i style="background:${CB.ufm}"></i><b>NetBox</b> for reference</span></span> &nbsp; <a class="btn" href="/api/cabling/findings.csv">⬇ Findings CSV</a> <a class="btn" href="/api/cabling/netbox-import.csv">⬇ NetBox import CSV</a> ${fetchUi()}`;
+  meta.innerHTML = `<span class="refs"><span><i style="background:${CB.ok}"></i><b>Expected</b> design topology (expected_topology.csv)</span><span><i style="background:${CB.mis}"></i><b>Current</b> ${/REST/.test(src.tool || '') ? 'UFM live links' : 'UFM scan'} ${esc(fmtTime(src.scanned_at))} · ${num(src.lanes)} lanes</span>${CAB.master ? `<span><i style="background:${MCOL}"></i><b>Master</b> UFM master topology saved ${esc(mDate())} ${esc(CAB.master.saved_at.slice(11, 16))} UTC</span>` : '<span class="small">no UFM master topology loaded</span>'}<span><i style="background:${CB.ufm}"></i><b>NetBox</b> for reference</span></span> &nbsp; <a class="btn" href="/api/cabling/findings.csv">⬇ Findings CSV</a> <a class="btn" href="/api/cabling/netbox-import.csv">⬇ NetBox import CSV</a> ${fetchUi()}`;
   const tile = (c, n, t, sub) => `<div class="cabt" style="--c:${c}"><b>${n}</b><span>${t}</span>${sub ? `<small>${sub}</small>` : ''}</div>`;
   const att = CAB.sus.reduce((n, su) => n + su.trays.filter(t => t.status !== 'ok').length, 0);
   let h = `<div class="cabtiles">
@@ -923,12 +923,12 @@ loadCab();
 
 // ---- Fetch from UFM (button) ----
 let ufmMsg = '', ufmBusy = false;
-const UFM_STEP = {starting:'Starting…', connecting:'Connecting', reading:'Reading UFM files', saving:'Saving', analysing:'Comparing with the design', done:'Done', failed:'Failed'};
+const UFM_STEP = {starting:'Starting…', connecting:'Connecting', reading:'Reading from UFM', saving:'Saving', analysing:'Comparing with the design', done:'Done', failed:'Failed'};
 function fetchUi() {
   if (!SERVICE) return '';
   const st = LIVE.ufm_fetch || {}, last = st.last;
   if (st.configured === false) return `<span class="ufmfetch"><button class="btn" type="button" disabled>⟳ Fetch from UFM</button><span class="small">Set up once: <code>./scripts/configure_ufm_access.sh</code>, then restart the service.</span></span>`;
-  const msg = ufmMsg || (last ? (last.state === 'complete' ? `Last fetch ${esc(fmtTime(last.finished_at))} from UFM ${esc(last.host || '')}` : last.state === 'failed' ? `<span style="color:${CB.err}">Last fetch failed: ${esc(last.error || '')}</span>` : '') : '');
+  const msg = ufmMsg || (last ? (last.state === 'complete' ? `Last fetch ${esc(fmtTime(last.finished_at))} from UFM ${esc(last.host || '')}${last.source === 'rest' ? ' (live links)' : ' (scan file)'}` : last.state === 'failed' ? `<span style="color:${CB.err}">Last fetch failed: ${esc(last.error || '')}</span>` : '') : '');
   return `<span class="ufmfetch"><button class="btn primary" id="ufm-fetch" type="button" ${ufmBusy || st.running ? 'disabled' : ''}>⟳ Fetch from UFM</button><span id="ufm-fetch-st" class="small">${msg}</span></span>`; }
 function setUfmMsg(html) { ufmMsg = html; const e = document.getElementById('ufm-fetch-st'); if (e) e.innerHTML = html; }
 async function fetchFromUfm() {
@@ -941,7 +941,10 @@ async function fetchFromUfm() {
       if (x.state === 'running') { setUfmMsg(`<span class="step" style="--c:${CB.warn}"><i class="spin"></i><b>${esc(UFM_STEP[x.step] || x.step)}</b> ${esc(x.detail || '')} · ${Math.round((Date.now() - t0)/1000)} s</span>`); setTimeout(poll, 1200); return; }
       ufmBusy = false;
       if (x.state === 'complete') { cabStamp = null; await loadCab();
-        setUfmMsg(`<span style="color:${CB.ok}">✓ Fetched from UFM ${esc(x.host)} in ${x.seconds} s · scan ${esc(fmtTime(x.scanned_at))} · ${x.miscabled} miscabled · ${num(x.trays)} trays${x.files && x.files['master.topo.gz'] ? ' · master ' + esc(x.files['master.topo.gz'].ufm_time.slice(0, 10)) : ''}</span>`); }
+        const what = x.source === 'rest' ? `live links (${num(x.links)}) from UFM ${esc(x.host)}` : `UFM ${esc(x.host)} scan file`;
+        const when = x.source === 'rest' ? 'compared just now' : `scan ${esc(fmtTime(x.scanned_at))}`;
+        const note = (x.skipped || []).filter(m => /live links|master\/report/.test(m)).map(m => `<span style="color:${CB.warn}" title="${esc(m)}"> · ⚠ ${esc(m.split(':')[0])} not used</span>`).join('');
+        setUfmMsg(`<span style="color:${CB.ok}">✓ Fetched ${what} in ${x.seconds} s · ${when} · ${x.miscabled} miscabled · ${num(x.trays)} trays${x.files && x.files['master.topo.gz'] ? ' · master ' + esc(x.files['master.topo.gz'].ufm_time.slice(0, 10)) : ''}</span>${note}`); }
       else setUfmMsg(`<span style="color:${CB.err}">✗ ${esc(x.error || 'UFM fetch failed')}</span>`);
       document.querySelectorAll('#ufm-fetch').forEach(b => b.disabled = false); };
     poll();

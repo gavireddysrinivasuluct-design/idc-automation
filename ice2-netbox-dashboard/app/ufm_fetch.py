@@ -1,19 +1,28 @@
 #!/usr/bin/env python3
-"""Fetch UFM's fabric files for the cabling check, without a terminal.
+"""Fetch UFM's fabric data for the cabling check, without a terminal.
 
 Used by the dashboard's "Fetch from UFM" button (POST /api/cabling/fetch).
+Two read-only sources, both through one `tsh ssh` session to the jump host:
 
-Path: this Mac -> one `tsh ssh` session to the jump host -> a small worker there
--> ssh to the active UFM host -> `docker exec ufm` reads three files UFM already
-writes and returns them as one tar bundle:
+1. Live links (preferred, when a UFM web user is set up): the jump host asks the
+   UFM REST API for /ufmRest/resources/links, UFM's current view of every link.
+   This is what UFM knows right now, so the comparison is current. The answer is
+   converted to the ibdiagnet2.lst layout so the cabling engine is unchanged.
+   The UFM TLS certificate is pinned on first use (local-inputs/ufm/tls-pins.json).
+
+2. UFM's files (needs the UFM host SSH login): ssh to the active UFM host, and
+`docker exec ufm` reads three files UFM already writes, as one tar bundle:
 
   * opt/ufm/tmp/fabric_analysis/ibdiagnet.out/ibdiagnet2.lst      current fabric scan
   * opt/ufm/shared_config_files/periodicTopo/master.topo          UFM master topology
   * opt/ufm/shared_config_files/reports/TopologyCompare/TopologyCompare.json  (link followed)
 
-Read-only: nothing is sent to the fabric and nothing on UFM changes. The UFM host
-password comes from macOS Keychain (scripts/configure_ufm_access.sh) and is written
-only to the worker's stdin, never to argv, the environment or a file.
+With live links, the files are refreshed only for the master topology and the
+report, at most every FILES_EVERY_HOURS (the live links replace the scan).
+
+Read-only: nothing is sent to the fabric and nothing on UFM changes (REST is GET
+only). Passwords come from macOS Keychain (scripts/configure_ufm_access.sh) and
+are written only to the worker's stdin, never to argv, the environment or a file.
 """
 
 from __future__ import annotations
@@ -22,8 +31,10 @@ import base64
 import configparser
 import gzip
 import io
+import hashlib
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -35,6 +46,8 @@ from pathlib import Path
 SCAN = "opt/ufm/tmp/fabric_analysis/ibdiagnet.out/ibdiagnet2.lst"
 MASTER = "opt/ufm/shared_config_files/periodicTopo/master.topo"
 REPORT = "opt/ufm/shared_config_files/reports/TopologyCompare/TopologyCompare.json"
+FILES_EVERY_HOURS = 6
+LINKS_PATH = "/ufmRest/resources/links"
 BEGIN, END = "__ICE2_UFM_BUNDLE_BEGIN__", "__ICE2_UFM_BUNDLE_END__"
 
 # Runs on the jump host. Logs in to each UFM host in turn under a PTY (OpenSSH reads
@@ -94,6 +107,41 @@ emit({"event": "done"})
 '''
 
 
+# Runs on the jump host: one HTTPS GET per UFM host, first good answer wins.
+REST_WORKER = r"""
+import base64, gzip, hashlib, http.client, json, ssl, sys
+cfg = json.loads(sys.stdin.readline())
+auth = "Basic " + base64.b64encode(("%s:%s" % (cfg["user"], cfg.pop("password"))).encode("utf-8")).decode("ascii")
+def emit(o):
+    sys.stdout.write(json.dumps(o) + "\n"); sys.stdout.flush()
+ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT); ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE
+for host in cfg["hosts"]:
+    emit({"event": "trying", "host": host})
+    try:
+        conn = http.client.HTTPSConnection(host, 443, timeout=cfg.get("timeout", 90), context=ctx)
+        conn.connect()
+        fp = hashlib.sha256(conn.sock.getpeercert(binary_form=True)).hexdigest()
+        pin = cfg["pins"].get(host)
+        if pin and pin != fp:
+            emit({"event": "failed", "host": host, "detail": "TLS certificate changed (pinned %s..., now %s...). Verify with the UFM owner, then remove %s from tls-pins.json." % (pin[:16], fp[:16], host)}); conn.close(); continue
+        emit({"event": "authenticating", "host": host})
+        conn.request("GET", cfg["path"], headers={"Authorization": auth, "Accept": "application/json"})
+        resp = conn.getresponse(); body = resp.read(); conn.close()
+    except Exception as error:
+        emit({"event": "failed", "host": host, "detail": "%s: %s" % (type(error).__name__, error)}); continue
+    if resp.status != 200:
+        emit({"event": "failed", "host": host, "detail": "HTTP %s %s" % (resp.status, resp.reason) + (" (wrong UFM web user or password)" if resp.status in (401, 403) else "")}); continue
+    try:
+        data = json.loads(body)
+    except ValueError:
+        emit({"event": "failed", "host": host, "detail": "not JSON (standby UFM or login page?)"}); continue
+    if not isinstance(data, list) or not data:
+        emit({"event": "failed", "host": host, "detail": "no links in the answer (standby UFM?)"}); continue
+    emit({"event": "links", "host": host, "fingerprint": fp, "count": len(data), "data": base64.b64encode(gzip.compress(body)).decode("ascii")}); break
+emit({"event": "done"})
+"""
+
+
 def read_profile(path: Path) -> dict:
     parser = configparser.ConfigParser(interpolation=None)
     if not parser.read(path, encoding="utf-8"):
@@ -102,12 +150,16 @@ def read_profile(path: Path) -> dict:
         raise RuntimeError("UFM access is not set up yet. Run ./scripts/configure_ufm_access.sh, then restart the service.")
     ice2 = dict(parser.items("ice2")) if parser.has_section("ice2") else {}
     ufm = dict(parser.items("ufm"))
-    for key in ("ufm_user", "keychain_service", "keychain_account"):
-        if not ufm.get(key):
-            raise RuntimeError("The [ufm] profile section is missing %s. Run ./scripts/configure_ufm_access.sh again." % key)
+    has_ssh = all(ufm.get(k) for k in ("ufm_user", "keychain_service", "keychain_account"))
+    has_rest = all(ufm.get(k) for k in ("rest_user", "rest_keychain_service", "rest_keychain_account"))
+    if not (has_ssh or has_rest):
+        raise RuntimeError("The [ufm] profile section has no complete login. Run ./scripts/configure_ufm_access.sh again.")
+    hosts = (ufm.get("ufm_hosts") or "10.1.67.190 10.1.67.191").split()
     return {"jump_host": ice2.get("jump_host", "jmp0"), "jump_user": ice2.get("jump_user") or ice2.get("ssh_user", ""),
-            "ufm_user": ufm["ufm_user"], "ufm_hosts": (ufm.get("ufm_hosts") or "10.1.67.190 10.1.67.191").split(),
-            "service": ufm["keychain_service"], "account": ufm["keychain_account"]}
+            "ufm_hosts": hosts, "has_ssh": has_ssh, "has_rest": has_rest,
+            "ufm_user": ufm.get("ufm_user", ""), "service": ufm.get("keychain_service", ""), "account": ufm.get("keychain_account", ""),
+            "rest_user": ufm.get("rest_user", ""), "rest_hosts": (ufm.get("rest_hosts") or " ".join(hosts)).split(),
+            "rest_service": ufm.get("rest_keychain_service", ""), "rest_account": ufm.get("rest_keychain_account", "")}
 
 
 def keychain_password(service: str, account: str) -> str:
@@ -116,11 +168,11 @@ def keychain_password(service: str, account: str) -> str:
     done = subprocess.run(["security", "find-generic-password", "-s", service, "-a", account, "-w"],
                           text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
     if done.returncode or not done.stdout.strip():
-        raise RuntimeError("The UFM password is not in Keychain. Run ./scripts/configure_ufm_access.sh.")
+        raise RuntimeError("The UFM password (Keychain item %s) is missing. Run ./scripts/configure_ufm_access.sh." % service)
     return done.stdout.rstrip("\n")
 
 
-def save_bundle(blob: bytes, target_dir: Path) -> dict:
+def save_bundle(blob: bytes, target_dir: Path, skip: tuple = ()) -> dict:
     """Unpack UFM's tar bundle into target_dir as gzip files, keeping UFM's timestamps."""
     target_dir.mkdir(parents=True, exist_ok=True)
     saved = {}
@@ -130,7 +182,7 @@ def save_bundle(blob: bytes, target_dir: Path) -> dict:
         if SCAN not in members:
             raise RuntimeError("UFM's bundle has no fabric scan.")
         for source, name in names.items():
-            member = members.get(source)
+            member = None if source in skip else members.get(source)
             if not member:
                 continue
             data = tar.extractfile(member).read()
@@ -147,13 +199,8 @@ def save_bundle(blob: bytes, target_dir: Path) -> dict:
     return saved
 
 
-def fetch(profile_path: Path, target_dir: Path, progress: dict, timeout: int = 180) -> dict:
-    """Run the whole fetch; `progress` is updated in place for the dashboard."""
-    prof = read_profile(profile_path)
-    if not shutil.which("tsh"):
-        raise RuntimeError("Teleport CLI (tsh) is required.")
-    if subprocess.run(["tsh", "status"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode:
-        raise RuntimeError("Teleport login expired. Run: tsh login")
+def fetch_files(prof: dict, target_dir: Path, progress: dict, timeout: int = 180, skip: tuple = ()) -> dict:
+    """UFM's three files over SSH to the UFM host (scan, master, report)."""
     password = keychain_password(prof["service"], prof["account"])
     remote = ("echo %s; docker exec ufm test -s /%s && docker exec ufm sh -c %s | base64 -w0; echo; echo %s"
               % (BEGIN, SCAN, shlex.quote("cd / && tar czhf - --ignore-failed-read %s %s %s 2>/dev/null" % (SCAN, MASTER, REPORT)), END))
@@ -200,5 +247,149 @@ def fetch(profile_path: Path, target_dir: Path, progress: dict, timeout: int = 1
         blob = base64.b64decode(bundle, validate=True)
     except ValueError as error:
         raise RuntimeError("UFM returned an unreadable bundle (%s); try again." % error)
-    saved = save_bundle(blob, target_dir)
+    saved = save_bundle(blob, target_dir, skip)
+    (target_dir / ".files-fetched-at").write_text(str(time.time()))
     return {"host": host, "files": saved, "skipped": errors}
+
+
+def _pick(record: dict, *names):
+    for name in names:
+        value = record.get(name)
+        if value not in (None, ""):
+            return value
+    return None
+
+
+def links_to_lst(links: list, host: str) -> tuple[str, int]:
+    """UFM REST links -> ibdiagnet2.lst lines the cabling engine already reads."""
+    import ufm_cabling
+    out = ['# This database file was created by the IDC dashboard from UFM REST %s' % LINKS_PATH,
+           '# Running version: "UFM REST live links (%s)"' % host, '']
+    skipped = 0
+    for link in links:
+        ends = []
+        for side in ("source", "destination"):
+            desc = _pick(link, side + "_port_node_description", side + "_node_description", side + "_description")
+            port = _pick(link, side + "_port", side + "_port_number", side + "_port_num")
+            guid = str(_pick(link, side + "_guid", side + "_node_guid") or "0").lower().replace("0x", "")
+            digits = re.findall(r"\d+", str(port or ""))
+            if not desc or not digits or "{" in str(desc) or "}" in str(desc):
+                ends = None
+                break
+            kind = "SW" if ufm_cabling.SWITCH.match(str(desc).strip()) else "CA"
+            ends.append("{ %s Ports:00 SystemGUID:%s NodeGUID:%s PortGUID:%s VenID:0 DevID:0 Rev:0 {%s} LID:0 PN:%x }"
+                        % (kind, guid, guid, guid, str(desc).strip(), int(digits[-1])))
+        if not ends:
+            skipped += 1
+            continue
+        width = re.findall(r"\d+x", str(link.get("width") or "").lower())
+        speed = re.findall(r"\d+", str(link.get("speed") or ""))
+        out.append("%s %s PHY=%s LOG=ACT SPD=%s" % (ends[0], ends[1], width[0] if width else "?", speed[0] if speed else "?"))
+    if len(out) == 3:
+        fields = sorted(links[0].keys()) if links and isinstance(links[0], dict) else []
+        raise RuntimeError("UFM REST answered with %d links, but none had node descriptions and ports. Fields seen: %s"
+                           % (len(links), ", ".join(fields)[:300]))
+    return "\n".join(out) + "\n", skipped
+
+
+def fetch_rest(prof: dict, target_dir: Path, progress: dict, timeout: int = 120) -> dict:
+    """Live links from the UFM REST API, saved as the current scan."""
+    pins_file = target_dir / "tls-pins.json"
+    try:
+        pins = json.loads(pins_file.read_text())
+    except (OSError, ValueError):
+        pins = {}
+    password = keychain_password(prof["rest_service"], prof["rest_account"])
+    payload = {"password": password, "user": prof["rest_user"], "hosts": prof["rest_hosts"], "path": LINKS_PATH,
+               "pins": pins, "timeout": timeout - 30}
+    del password
+    events = _run_worker(prof, REST_WORKER, payload, progress, timeout,
+                         {"trying": ("connecting", "UFM REST on %s via " + prof["jump_host"]),
+                          "authenticating": ("reading", "reading live links from UFM %s")})
+    got = next((e for e in events if e.get("event") == "links"), None)
+    errors = ["%s: %s" % (e["host"], e.get("detail", "")) for e in events if e.get("event") == "failed"]
+    if not got:
+        raise RuntimeError("No UFM host answered the REST API. " + " | ".join(errors[-2:]))
+    progress.update(step="saving", detail="converting %s live links from UFM %s" % (format(got["count"], ","), got["host"]))
+    raw = gzip.decompress(base64.b64decode(got["data"], validate=True))
+    text, unusable = links_to_lst(json.loads(raw), got["host"])
+    target_dir.mkdir(parents=True, exist_ok=True)
+    if pins.get(got["host"]) != got["fingerprint"]:
+        pins[got["host"]] = got["fingerprint"]
+        pins_file.write_text(json.dumps(pins, indent=1) + "\n")
+        os.chmod(pins_file, 0o600)
+    for name, data in (("links.json.gz", raw), ("ibdiagnet2.lst.gz", text.encode("utf-8"))):
+        target = target_dir / name
+        if name.startswith("ibdiag") and target.is_file():
+            shutil.copy2(target, target.with_name("ibdiagnet2.lst.previous.gz"))
+        partial = target.with_name(name + ".part")
+        with gzip.open(partial, "wb", compresslevel=6) as handle:
+            handle.write(data)
+        os.chmod(partial, 0o600)
+        partial.replace(target)
+    return {"host": got["host"], "links": got["count"], "unusable": unusable, "skipped": errors,
+            "files": {"ibdiagnet2.lst.gz": {"bytes": len(text), "ufm_time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}}}
+
+
+def _run_worker(prof: dict, script: str, payload: dict, progress: dict, timeout: int, steps: dict) -> list:
+    """Run a worker on the jump host with the JSON payload on stdin; return its events."""
+    encoded = base64.b64encode(script.encode("utf-8")).decode("ascii")
+    bootstrap = "import base64,sys;exec(base64.b64decode(sys.argv[1]))"
+    command = ["tsh", "ssh", "--login", prof["jump_user"], prof["jump_host"], "python3 -u -c %s %s" % (shlex.quote(bootstrap), encoded)]
+    progress.update(step="connecting", detail="Teleport session to %s" % prof["jump_host"])
+    child = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    watchdog = threading.Timer(timeout, child.kill)
+    watchdog.daemon = True
+    watchdog.start()
+    events = []
+    try:
+        child.stdin.write(json.dumps(payload) + "\n")
+        child.stdin.close()
+        payload.clear()
+        for line in child.stdout:
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            events.append(event)
+            step = steps.get(event.get("event"))
+            if step:
+                progress.update(step=step[0], detail=step[1] % event.get("host", ""))
+        child.wait()
+        stderr = child.stderr.read()
+    finally:
+        watchdog.cancel()
+    if child.returncode and not any(e.get("event") in ("links", "failed") for e in events):
+        raise RuntimeError("Jump-host worker failed (exit %s): %s" % (child.returncode, stderr.strip()[-200:]))
+    return events
+
+
+def fetch(profile_path: Path, target_dir: Path, progress: dict, timeout: int = 180) -> dict:
+    """Run the whole fetch; `progress` is updated in place for the dashboard."""
+    prof = read_profile(profile_path)
+    if not shutil.which("tsh"):
+        raise RuntimeError("Teleport CLI (tsh) is required.")
+    if subprocess.run(["tsh", "status"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode:
+        raise RuntimeError("Teleport login expired. Run: tsh login")
+    if not prof["has_rest"]:
+        return dict(fetch_files(prof, target_dir, progress, timeout), source="files")
+    try:
+        result = dict(fetch_rest(prof, target_dir, progress), source="rest")
+    except RuntimeError as error:
+        if not prof["has_ssh"]:
+            raise
+        result = dict(fetch_files(prof, target_dir, progress, timeout), source="files")
+        result["skipped"] = ["live links: %s" % error] + result["skipped"]
+        return result
+    marker = target_dir / ".files-fetched-at"
+    try:
+        age_hours = (time.time() - float(marker.read_text())) / 3600
+    except (OSError, ValueError):
+        age_hours = None
+    if prof["has_ssh"] and (age_hours is None or age_hours >= FILES_EVERY_HOURS or not (target_dir / "master.topo.gz").is_file()):
+        try:
+            extra = fetch_files(prof, target_dir, progress, timeout, skip=(SCAN,))
+            result["files"].update(extra["files"])
+        except RuntimeError as error:
+            result["skipped"].append("master/report refresh: %s" % error)
+    return result

@@ -246,17 +246,28 @@ Setup is done.
 
 ### 4.9 Optional: let the dashboard fetch from UFM
 
-The miscabling check ([6.1](#61-cabling-vs-ufm-miscabling-check)) needs UFM's fabric files. To let the dashboard's **⟳ Fetch from UFM** button get them by itself, store the UFM host login once:
+The miscabling check ([6.1](#61-cabling-vs-ufm-miscabling-check)) needs UFM's view of the fabric. To let the dashboard's **⟳ Fetch from UFM** button get it by itself, store one or both UFM logins once:
 
 ```bash
 ./scripts/configure_ufm_access.sh
-# prompts: UFM host login [root], UFM addresses [10.1.67.190 10.1.67.191], then the password (Keychain)
+# prompts: UFM addresses [10.1.67.190 10.1.67.191]
+#          1) UFM web (REST) user   -> live links          (Enter = skip)
+#          2) UFM host SSH login    -> master topology etc. (Enter = skip)
 ```
 
-- The password (from your 1Password vault) goes into the Keychain item `idc-automation-ice2-ufm`. It is never written to a file, a command line or Git.
-- The script adds a `[ufm]` section (login and addresses only) to your private profile `~/.config/idc-automation/device-access.ini`.
-- Prefer a read-only login on the UFM host if one exists. It only needs to run `docker exec ufm`.
-- Your account on `jmp0` must already trust the UFM host keys. Run `ssh <login>@10.1.67.190 hostname` once from `jmp0` (and `10.1.67.191`) and check the fingerprint with the platform owner.
+| Login | What the button gets with it | How fresh |
+| --- | --- | --- |
+| **1. UFM web (REST) user** (recommended) | UFM's live link list, `GET /ufmRest/resources/links` | Live: what UFM sees right now |
+| **2. UFM host SSH login** | UFM's master topology and Topology Compare report, plus UFM's periodic scan file | The scan is as old as UFM's last scan (often hours) |
+
+With both logins, the button uses live links for the comparison and refreshes the master topology and report over SSH at most every 6 hours. With only the web user, it keeps the master topology from your last SSH or terminal fetch.
+
+- Passwords (from your 1Password vault) go into the Keychain items `idc-automation-ice2-ufm-rest` (web) and `idc-automation-ice2-ufm` (SSH). They are never written to a file, a command line or Git.
+- The script adds a `[ufm]` section (users and addresses only) to your private profile `~/.config/idc-automation/device-access.ini`. Run it again to change a login; Enter keeps what is stored.
+- Use read-only logins where they exist. The web user only needs to read resources (the button sends GET requests only). The SSH login only needs to run `docker exec ufm`.
+- `jmp0` must reach the UFM web port (HTTPS 443). Test from `jmp0`: `curl -sk -u <web-user> https://10.1.67.190/ufmRest/resources/links -o /dev/null -w '%{http_code}\n'` should print `200`.
+- UFM uses a self-signed certificate. The first successful fetch records its fingerprint in `local-inputs/ufm/tls-pins.json`, and later fetches refuse a different certificate.
+- For the SSH login, your account on `jmp0` must already trust the UFM host keys. Run `ssh <login>@10.1.67.190 hostname` once from `jmp0` (and `10.1.67.191`) and check the fingerprint with the platform owner.
 
 Restart `netbox_live_sync.py` after running the script. Without this step, use `./scripts/fetch_ufm_scan.sh` in a terminal instead.
 
@@ -373,13 +384,15 @@ The tab's *UFM master topology* section shows:
 
 UFM's report compares only against its master, so it mostly lists trays added after the master was saved, not cabling errors. After fixing the miscabled cables, save a new master in UFM so that its nightly compare becomes meaningful again.
 
-**Load or refresh the scan from the dashboard.** Press **⟳ Fetch from UFM** at the top of the *Cabling vs UFM* tab. UFM rewrites its scan regularly, so this always picks up the latest one.
+**Load or refresh from the dashboard.** Press **⟳ Fetch from UFM** at the top of the *Cabling vs UFM* tab. With a UFM web user ([4.9](#49-optional-let-the-dashboard-fetch-from-ufm)), it reads UFM's **live links**, so the comparison shows what is plugged in right now. Otherwise it reads UFM's latest periodic scan file.
 
 - It needs the one-time setup in [4.9](#49-optional-let-the-dashboard-fetch-from-ufm). Until then, the button shows the command to run.
-- Progress shows next to the button: connecting to `jmp0`, reading UFM files, saving. A fetch usually takes a few seconds.
-- When it is done, the button line shows the UFM host, the time taken, the number of miscabled cables, the trays seen and the master date. The tab, GPU area and inspector update without a page reload.
-- It reads the same three files as the script below, over one Teleport session. The password goes from Keychain to the jump host on standard input only.
-- If the active UFM has no scan (for example it is the standby), it tries the next address.
+- Progress shows next to the button: connecting to `jmp0`, reading from UFM, saving, comparing. A fetch usually takes a few seconds.
+- When it is done, the button line says what was read (*live links* or *scan file*), the UFM host, the time taken, the number of miscabled cables, the trays seen and the master date. The tab, GPU area and inspector update without a page reload.
+- Live links: one HTTPS GET from `jmp0` to the UFM REST API. Scan file: the same three files as the script below. Either way it is one Teleport session, and passwords go from Keychain to the jump host on standard input only.
+- If live links fail (for example a wrong web password) and an SSH login is stored, it falls back to the scan file and shows a ⚠ note.
+- Live links show which ports are connected, not link training states. A cable stuck in *Init* still appears in the **Live link state** tab, which reads the switches.
+- If the first UFM address does not answer (for example it is the standby), it tries the next one.
 - If the fetch fails, the reason is shown and the previous files stay in use.
 - With `--ufm-fetch-every-minutes N`, the service also fetches by itself every N minutes.
 
@@ -477,7 +490,7 @@ Typical timings from a production run: NetBox 1.0 s (incremental, 2 API calls), 
 | Task | Command |
 | --- | --- |
 | Switch password changed | `./scripts/configure_device_access.sh` (overwrites the Keychain item and profile) |
-| UFM host password changed | `./scripts/configure_ufm_access.sh`, then restart the service |
+| UFM web or host password changed | `./scripts/configure_ufm_access.sh`, then restart the service |
 | NetBox token expired or rotated | Create a new token ([4.3](#43-create-a-read-only-netbox-api-token)), then `./scripts/configure_netbox_token.sh` |
 | Switch host keys changed (rebuild, RMA) | Get an updated approved file and rerun `./scripts/configure_known_hosts.sh` |
 | Update the code | `git pull`, then restart the service |
@@ -509,6 +522,10 @@ Typical timings from a production run: NetBox 1.0 s (incremental, 2 API calls), 
 | Fetch from UFM: "UFM access is not set up yet" | No `[ufm]` section in your profile, or the service was not restarted | `./scripts/configure_ufm_access.sh`, then restart the service |
 | Fetch from UFM: "The UFM password is not in Keychain" | Keychain item missing or renamed | `./scripts/configure_ufm_access.sh` |
 | Fetch from UFM: "Teleport login expired" | Teleport session ended | `tsh login`, then press the button again |
+| Fetch from UFM: `HTTP 401 Unauthorized` | Wrong UFM web user or password | `./scripts/configure_ufm_access.sh` with the current web password |
+| Fetch from UFM: `ConnectionRefusedError` or `timed out` for every address | `jmp0` cannot reach the UFM web port | Check the `curl` test in [4.9](#49-optional-let-the-dashboard-fetch-from-ufm); ask for HTTPS from `jmp0` to UFM |
+| Fetch from UFM: `TLS certificate changed` | UFM's certificate was replaced (or something is intercepting) | Confirm the new certificate with the UFM owner, then delete that address from `local-inputs/ufm/tls-pins.json` |
+| Fetch from UFM: "none had node descriptions" | This UFM version names link fields differently | Open an issue with the field list from the message |
 | Fetch from UFM: `Permission denied` | Wrong or changed UFM password | `./scripts/configure_ufm_access.sh` with the current password |
 | Fetch from UFM: `Host key verification failed` | Your `jmp0` account does not yet trust the UFM host key, or the key changed | From `jmp0`, run `ssh <login>@10.1.67.190 hostname` once and check the fingerprint ([4.9](#49-optional-let-the-dashboard-fetch-from-ufm)) |
 | `fetch_ufm_scan.sh`: "No UFM host returned a fabric scan" | Wrong UFM password, both UFM hosts unreachable from `jmp0`, or UFM not running | Check `ssh root@10.1.67.190` from `jmp0` works. Set `UFM_HOSTS` if the UFM addresses changed. |
@@ -526,7 +543,7 @@ To see where the time goes, read the final Sync line (NetBox ‖ IPs ‖ devices
 - **Secrets live only in your Keychain:**
   - `netbox-mcp-token` for the NetBox token
   - `idc-automation-ice2-switch` for the switch password
-  - `idc-automation-ice2-ufm` for the UFM host password (optional, [4.9](#49-optional-let-the-dashboard-fetch-from-ufm))
+  - `idc-automation-ice2-ufm-rest` and `idc-automation-ice2-ufm` for the UFM web and host passwords (optional, [4.9](#49-optional-let-the-dashboard-fetch-from-ufm))
 - **Secrets never reach:**
   - the browser
   - this repository
@@ -549,7 +566,8 @@ To see where the time goes, read the final Sync line (NetBox ‖ IPs ‖ devices
 pkill -f app/netbox_live_sync.py; ./scripts/netbox_proxy.sh stop
 security delete-generic-password -s netbox-mcp-token -a "$(id -un)"
 security delete-generic-password -s idc-automation-ice2-switch -a <switch-user>
-security delete-generic-password -s idc-automation-ice2-ufm -a <ufm-login>   # only if you did 4.9
+security delete-generic-password -s idc-automation-ice2-ufm -a <ufm-login>        # only if you did 4.9
+security delete-generic-password -s idc-automation-ice2-ufm-rest -a <ufm-web-user> # only if you did 4.9
 rm -f ~/.config/idc-automation/device-access.ini
 rm -rf .netbox-live-sync local-inputs            # run inside ice2-netbox-dashboard
 ```
@@ -594,8 +612,8 @@ Also revoke the NetBox API token in NetBox (**API Tokens → delete**).
 | `scripts/configure_known_hosts.sh`, `scripts/collect_known_hosts.py` | Installs approved switch host keys |
 | `scripts/netbox_proxy.sh`, `scripts/netbox_host_proxy.py` | Local NetBox proxy through Teleport |
 | `scripts/fetch_ufm_scan.sh` | Copies UFM's latest fabric scan to `local-inputs/ufm/` (read-only) |
-| `scripts/configure_ufm_access.sh` | Saves the UFM host password to Keychain for the Fetch from UFM button |
-| `app/ufm_fetch.py` | Fetch from UFM: reads UFM's files through `jmp0` (read-only) |
+| `scripts/configure_ufm_access.sh` | Saves the UFM web and/or host password to Keychain for the Fetch from UFM button |
+| `app/ufm_fetch.py` | Fetch from UFM: live links over the UFM REST API, or UFM's files, through `jmp0` (read-only) |
 | `config/device-access.example.ini` | Example profile (no secrets) |
 
 ### Files created on your Mac
@@ -610,3 +628,4 @@ Also revoke the NetBox API token in NetBox (**API Tokens → delete**).
 | `.netbox-live-sync/` | the service | Collected evidence, IP cache, cable cache, device details (`netbox-devices.json`) |
 | `local-inputs/ufm/ibdiagnet2.lst.gz` | Fetch from UFM or `fetch_ufm_scan.sh` | UFM fabric scan for the cabling check. The previous copy is kept as `ibdiagnet2.lst.previous.gz`. |
 | `local-inputs/ufm/master.topo.gz`, `topology-compare.json.gz` | Fetch from UFM or `fetch_ufm_scan.sh` | UFM's master topology and its latest Topology Compare report |
+| `local-inputs/ufm/links.json.gz`, `tls-pins.json` | Fetch from UFM (live links) | UFM's raw live link list, and the pinned UFM certificate fingerprints |

@@ -567,7 +567,7 @@ class SyncState:
         return {"configured": self.ufm_fetch_configured(), "running": any(r["state"] == "running" for r in runs), "last": last}
 
     def start_ufm_fetch(self) -> dict:
-        """Read UFM's three fabric files directly (button "Fetch from UFM")."""
+        """Read UFM directly (button "Fetch from UFM"): live links over REST, or UFM's files."""
         if not self.ufm_fetch_configured():
             raise RuntimeError("UFM access is not set up yet. Run ./scripts/configure_ufm_access.sh, then restart the service.")
         with self.lock:
@@ -591,6 +591,7 @@ class SyncState:
             report = self.cabling()
             summary = report["summary"] if report else {}
             record.update(state="complete", step="done", host=result["host"], files=result["files"], skipped=result["skipped"],
+                          source=result.get("source", "files"), links=result.get("links"),
                           scanned_at=report["source"]["scanned_at"] if report else None,
                           miscabled=summary.get("switch_miscabled"), trays=summary.get("trays"))
         except Exception as error:  # surface every failure on the dashboard
