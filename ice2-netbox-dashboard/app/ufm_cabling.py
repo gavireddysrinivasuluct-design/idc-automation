@@ -336,6 +336,42 @@ def analyse(scan: Path, baseline: list[dict], expected: list[dict] | None = None
                     swap_no += 1
                     f["swap"] = g["swap"] = swap_no
                     break
+    # ---- connectivity graph: how many cables join each leaf and spine -----------------
+    # A miscabling that keeps this graph (only port positions differ) does not change
+    # routing or bandwidth; one that changes it does.
+    exp_adj = collections.Counter((leaf[0], spine[0]) for leaf, spine in exp_switch)
+    cur_adj = collections.Counter()
+    leaf_seen, spine_seen = collections.Counter(), collections.Counter()
+    for (dev, label), item in ports.items():
+        if leaf_no(dev) is None:
+            continue
+        for p in item["peers"]:
+            if p[0] == "SW" and SPINE.search(p[1]):
+                cur_adj[(dev, p[1])] += 1
+                leaf_seen[dev] += 1
+                spine_seen[p[1]] += 1
+    leaf_exp = collections.Counter(l for l, _ in exp_adj.elements())
+    spine_exp = collections.Counter(sp for _, sp in exp_adj.elements())
+    deviations = {k: [exp_adj.get(k, 0), cur_adj.get(k, 0)] for k in set(exp_adj) | set(cur_adj)
+                  if exp_adj.get(k, 0) != cur_adj.get(k, 0) and cur_adj.get(k, 0) > exp_adj.get(k, 0)}
+    deviations.update({k: [exp_adj[k], cur_adj.get(k, 0)] for k in exp_adj
+                       if cur_adj.get(k, 0) < exp_adj[k] and any((k[0], s2) in deviations for s2 in spine_exp)})
+    for f in switch_findings:
+        if f["status"] != "miscabled":
+            continue
+        if len(f["leaf_actual"]) > 1:
+            f["impact"] = "plane-split"
+        elif any(exp_adj.get((f["leaf"][0], sp), 0) != cur_adj.get((f["leaf"][0], sp), 0) for sp in [f["spine"][0]] + [a[0] for a in f["leaf_actual"]]):
+            f["impact"] = "topology"
+        elif f["leaf_actual"] and not SPINE.search(f["leaf_actual"][0][0]):
+            f["impact"] = "topology"
+        else:
+            f["impact"] = "port-swap"
+    uplinks = {
+        "leaves": {l: [leaf_exp[l], leaf_seen.get(l, 0)] for l in sorted(leaf_exp, key=lambda x: leaf_no(x) or 0)},
+        "spines": {sp: [spine_exp[sp], spine_seen.get(sp, 0)] for sp in sorted(spine_exp, key=lambda x: int(SPINE.search(x).group(1)))},
+        "uneven": sorted([[l, sp, e, c] for (l, sp), (e, c) in deviations.items()]),
+    }
     undocumented_switch = []  # links UFM sees between switches that the design does not have
     for (dev, label), item in ports.items():
         for p in item["peers"]:
@@ -496,6 +532,8 @@ def analyse(scan: Path, baseline: list[dict], expected: list[dict] | None = None
         "gpu_not_seen": gpu_not_seen,
         "ufm_links": sorted(ufm_links, key=lambda x: (x["leaf"], x["port"])),
         "rail_adapter": {str(k): v for k, v in sorted(rail_hca.items())},
+        "uplinks": uplinks,
+        "gpu_ports_seen": sorted([f"sys1-ice2-p-swi-bel{ad['leaf']}", ad["port"], code] for code, ads in trays.items() for ad in ads),
         "rdma_adapter": dict(sorted(rdma_hca.items())),
     }
 

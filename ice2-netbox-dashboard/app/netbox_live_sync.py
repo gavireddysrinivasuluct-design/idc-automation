@@ -72,6 +72,7 @@ LATEST = STATE_DIR / "latest-live.json"
 ADDRESS_CACHE = STATE_DIR / "management-addresses.csv"
 CABLE_CACHE = STATE_DIR / "netbox-cables.json"
 DEVICE_CACHE = STATE_DIR / "netbox-devices.json"
+TRAY_HISTORY = STATE_DIR / "tray-history.json"
 DEFAULT_UFM_SCAN = PROJECT_ROOT / "local-inputs" / "ufm" / "ibdiagnet2.lst.gz"
 DEFAULT_EXPECTED = ASSETS_DIR / "expected_topology.csv"
 DEFAULT_UFM_MASTER = PROJECT_ROOT / "local-inputs" / "ufm" / "master.topo.gz"
@@ -427,7 +428,7 @@ class SyncState:
         return len(addresses)
 
     # ---------- live view ----------
-    def live_view(self) -> dict:
+    def live_view(self, with_incidents: bool = True) -> dict:
         with self.lock:
             live = dict(self.live)
             collected_at, source, switches = self.collected_at, self.source, list(self.switches)
@@ -457,7 +458,7 @@ class SyncState:
                     row["endpoint_b_device"], row["endpoint_b_port"], b,
                 ])
         exceptions.sort(key=lambda r: ({"down": 0, "init": 1, "unknown": 2}.get(r[2], 3), r[0]))
-        return {
+        view = {
             "mode": "service",
             "source": source,
             "collected_at": collected_at,
@@ -472,9 +473,18 @@ class SyncState:
             "netbox": self.netbox_sync,
             "cabling": self.cabling_summary(),
             "ufm_fetch": self.ufm_fetch_state(),
+            "incidents": None,
             "refresh_running": any(item.get("state") == "running" for item in self.refreshes.values()),
             "sync_running": any(item.get("state") == "running" for item in self.syncs.values()),
         }
+        if with_incidents:
+            try:
+                found = self.incidents(view)
+                view["incidents"] = {"counts": found["counts"], "generated_at": found["generated_at"],
+                                     "top": [{k: i[k] for k in ("severity", "title", "id")} for i in found["incidents"][:3]]}
+            except Exception as error:  # never break /api/live
+                view["incidents"] = {"error": str(error)}
+        return view
 
     def live_payload(self) -> tuple[str, bytes, bytes]:
         """(etag, json, gzipped json) for /api/live, rebuilt only when state changed."""
@@ -545,10 +555,40 @@ class SyncState:
                                      ufm_cabling.load_expected(design) if design else None, master, ufm_report)
         body = json.dumps(report, separators=(",", ":")).encode("utf-8")
         payload = ('"c%d-%s"' % (key[1] % 10**9, hashlib.sha1(body).hexdigest()[:10]), body, gzip.compress(body, compresslevel=5))
+        try:
+            import incidents  # noqa: E402
+            self._tray_history = incidents.update_tray_history(TRAY_HISTORY, report)
+        except Exception as error:  # history is a nice-to-have
+            print("[netbox-live-sync] tray history not updated:", error)
         with self.lock:
             self._cabling = (key, report, payload)
             self.bump()
         return report
+
+    def incidents(self, live: dict | None = None) -> dict:
+        """Ranked fabric incidents from the cabling report and the live switch view."""
+        live = live if live is not None else self.live_view(with_incidents=False)
+        try:
+            report = self.cabling()
+        except Exception as error:
+            report = None
+            print("[netbox-live-sync] cabling report unavailable for incidents:", error)
+        key = (self._cabling[0] if self._cabling else None, live.get("collected_at"), len(live.get("exceptions") or []),
+               json.dumps((self.ufm_fetch_state().get("last") or {}).get("state")), int(time.time() // 900))
+        cached = getattr(self, "_incidents", None)
+        if cached and cached[0] == key:
+            return cached[1]
+        _sys.path.insert(0, str(APP_DIR))
+        import incidents  # noqa: E402
+        history = getattr(self, "_tray_history", None)
+        if history is None:
+            try:
+                history = json.loads(TRAY_HISTORY.read_text())
+            except (OSError, ValueError):
+                history = {}
+        result = incidents.detect(report, live, history, self.ufm_fetch_state())
+        self._incidents = (key, result)
+        return result
 
     def ufm_fetch_configured(self) -> bool:
         if not self.device_profile or not self.device_profile.is_file():
@@ -1109,6 +1149,8 @@ class Handler(BaseHTTPRequestHandler):
                     self.respond(HTTPStatus.OK, {"available": False, "error": "No UFM data yet. Press Fetch from UFM (or run scripts/fetch_ufm_scan.sh)."})
                     return
                 self.respond_cached(*payload)
+            elif path == "/api/incidents":
+                self.respond(HTTPStatus.OK, self.state.incidents())
             elif path in ("/api/cabling/findings.csv", "/api/cabling/netbox-import.csv"):
                 report = self.state.cabling()
                 if report is None:

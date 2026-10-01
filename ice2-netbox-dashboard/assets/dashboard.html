@@ -224,6 +224,22 @@ svg.ufm .lvlayer circle.lbadge{display:none}
 .tab:hover{color:var(--fg)}
 .tab:focus-visible{outline:2px solid var(--edge);outline-offset:-3px}
 .tabpanel{padding:16px 18px}
+.incbar{display:flex;flex-wrap:wrap;align-items:center;gap:8px 14px;margin-top:10px;padding:10px 14px;border:1px solid var(--line);border-left:4px solid var(--ic,#38d9a0);border-radius:10px;background:var(--panel);font:12.5px var(--mono);color:var(--dim)}
+.incbar b{color:var(--fg)} .incbar .grow{flex:1}
+.sev{display:inline-flex;align-items:center;gap:6px;font:600 11.5px var(--mono);text-transform:uppercase;letter-spacing:.05em;color:var(--sc)}
+.sev::before{content:"";width:9px;height:9px;border-radius:50%;background:var(--sc)}
+.sev.zero{opacity:.45}
+.incs{display:grid;gap:10px}
+.inc{display:grid;grid-template-columns:118px minmax(0,1fr);gap:4px 14px;padding:11px 14px;border:1px solid var(--line);border-left:4px solid var(--sc);border-radius:9px;background:var(--panel2)}
+.inc .sev{grid-row:1 / span 4;align-self:start;padding-top:2px}
+.inc h4{margin:0;font:600 15px var(--display);color:var(--fg)}
+.inc h4 small{font:500 11px var(--mono);color:var(--faint);margin-left:8px;text-transform:uppercase;letter-spacing:.06em}
+.inc p{margin:0;font-size:12.5px;color:var(--dim)} .inc p b{color:var(--fg);font-weight:600}
+.inc details{font:12px var(--mono);color:var(--dim)} .inc summary{cursor:pointer;color:var(--fg)}
+.inc ul{margin:6px 0 0;padding-left:18px;max-height:220px;overflow:auto} .inc li{margin:1px 0}
+.inch{font:600 12px var(--mono);letter-spacing:.14em;text-transform:uppercase;color:#c9b6ff;margin:20px 0 8px}
+.incnone{padding:14px;border:1px dashed var(--line);border-radius:9px;color:var(--dim);font-size:13px}
+.impact{display:inline-block;margin-left:8px;padding:0 7px;border-radius:8px;font:600 10.5px var(--mono);border:1px solid var(--sc);color:var(--sc);vertical-align:1px}
 
 .misrows{display:flex;flex-direction:column;gap:8px;margin:4px 0 8px}
 .misrow{display:grid;grid-template-columns:86px minmax(0,1fr);gap:3px 12px;padding:8px 10px;border:1px solid #3b2d58;border-radius:8px;background:#0e0b1d}
@@ -258,6 +274,7 @@ svg.ufm .lvlayer circle.lbadge{display:none}
   <button class="btn primary" id="sync-btn" type="button">&#x27F3; Sync NetBox + devices</button>
 </div>
 <div class="steps" id="sync-steps" hidden></div>
+<div class="incbar" id="incbar" hidden></div>
 
 <div class="rail" id="rail"></div>
 
@@ -301,10 +318,12 @@ svg.ufm .lvlayer circle.lbadge{display:none}
 </div>
 <div class="card tabs-card">
   <div class="tabs" role="tablist" aria-label="Fabric checks">
-    <button type="button" class="tab" role="tab" id="tab-cab" aria-controls="panel-cab" aria-selected="true" data-tab="cab"><span>Cabling vs UFM</span><em id="tab-cab-n"></em><small>what is actually plugged in, compared with NetBox</small></button>
+    <button type="button" class="tab" role="tab" id="tab-inc" aria-controls="panel-inc" aria-selected="true" data-tab="inc"><span>Incidents</span><em id="tab-inc-n"></em><small>what needs attention, most severe first</small></button>
+    <button type="button" class="tab" role="tab" id="tab-cab" aria-controls="panel-cab" aria-selected="false" tabindex="-1" data-tab="cab"><span>Cabling vs UFM</span><em id="tab-cab-n"></em><small>what is actually plugged in, compared with NetBox</small></button>
     <button type="button" class="tab" role="tab" id="tab-live" aria-controls="panel-live" aria-selected="false" tabindex="-1" data-tab="live"><span>Live link state</span><em id="tab-live-n"></em><small>NetBox cables vs. switch interfaces</small></button>
   </div>
-  <div class="tabpanel cab" role="tabpanel" id="panel-cab" aria-labelledby="tab-cab"><div class="cabmeta" id="cab-meta"></div><div id="cab-body"></div></div>
+  <div class="tabpanel" role="tabpanel" id="panel-inc" aria-labelledby="tab-inc"><div id="inc-body"></div></div>
+  <div class="tabpanel cab" role="tabpanel" id="panel-cab" aria-labelledby="tab-cab" hidden><div class="cabmeta" id="cab-meta"></div><div id="cab-body"></div></div>
   <div class="tabpanel" role="tabpanel" id="panel-live" aria-labelledby="tab-live" hidden><div id="live-ex"></div></div>
 </div>
 <p class="foot">Leaf colour = rail. Each leaf tile shows two meters: top = spine uplinks used of 72, bottom = GPU downlinks used of 72. Tray tiles show their four RDMA ports in rail colours; dashed trays are not in the device inventory export.</p>
@@ -781,6 +800,10 @@ const slotLabel = slot => `sw${Math.floor(slot/2) + 1}p${slot % 2 + 1}`;
 const endTxt = e => e ? `${sh(e[0]).toUpperCase()} ${e[1]}` : '?';
 const connHtml = (a, b, c) => `<span class="conn" style="--c:${c}">${esc(endTxt(a))} <i>⟷</i> ${esc(endTxt(b))}</span>`;
 const misCur = f => [f.leaf, f.leaf_actual[0]], misExp = f => [f.leaf, f.spine];
+const IMPACT = {'port-swap': ['Port swap · no fabric impact', '#c9b458', 'Every leaf still has its designed links to every spine; only port positions differ (labels, runbooks, maintenance).'],
+  'topology': ['Topology change · affects routing', '#ff5e78', 'Leaf–spine pairs now have more or fewer cables than designed: uneven bandwidth, and fat-tree routing may not hold.'],
+  'plane-split': ['Planes split · plane imbalance', '#ff5e78', 'The four planes of this cable land on different far ends.']};
+const impactChip = f => { const m = IMPACT[f.impact]; return m ? `<span class="impact" style="--sc:${m[1]}" title="${esc(m[2])}">${esc(m[0])}</span>` : ''; };
 const misFix = f => `Re-patch the cable in ${endTxt(f.leaf)}: move its far end from ${endTxt(f.leaf_actual[0])} to ${endTxt(f.spine)}.`;
 const nbLine = f => { const c = f.cable ? ` (#${f.cable})` : '';
   return f.netbox_state === 'matches-expected' ? `<span style="color:${CB.ok}">✓ NetBox agrees with the design${c}</span>`
@@ -856,7 +879,7 @@ function renderCab(err) {
           <div class="mrl"><span class="mrk" style="--c:${CB.mis}">Current · UFM</span>${connHtml(...misCur(f), CB.mis)}</div>
           <div class="mrl"><span class="mrk" style="--c:${CB.ok}">Expected · design</span>${connHtml(...misExp(f), CB.ok)}</div>
           ${masterLine(f)}
-          <div class="mrfix">${esc(misFix(f))} &nbsp;${nbLine(f)}${masterVerdict(f) ? '<br>' + masterVerdict(f) : ''}</div></div>`).join('')}</div>
+          <div class="mrfix">${esc(misFix(f))}${impactChip(f)} &nbsp;${nbLine(f)}${masterVerdict(f) ? '<br>' + masterVerdict(f) : ''}</div></div>`).join('')}</div>
         <p class="small"><b>Quickest fix:</b> ${cages.length === 2 ? `swap the cables in ${cages[0]} and ${cages[1]} on ${devId(leaf).toUpperCase()} (both lanes p1 and p2). That restores all ${fs.length} expected connections.` : 're-patch each cable as listed.'} ${fs.every(f => f.netbox_state === 'matches-expected') ? 'NetBox already matches the design, so no NetBox change is needed.' : 'Then correct the NetBox records flagged above.'}</p></div>`; });
     h += `</div>`; }
   h += `<h4>2 · GPU trays by scalable unit</h4><p class="small">Each SU uses one leaf from each rail; every tray lands its four RDMA ports on the same port of those four leaves. Bars: <span style="color:${CB.ok}">■</span> in NetBox <span style="color:${CB.ufm}">■</span> UFM only <span style="color:${CB.warn}">■</span> attention <span style="color:${CB.unn}">■</span> unnamed <span style="color:#34405a">■</span> empty</p>
@@ -940,7 +963,7 @@ async function fetchFromUfm() {
     const poll = async () => { const p = await fetch(`/api/cabling/fetch/${d.run_id}`), x = await p.json();
       if (x.state === 'running') { setUfmMsg(`<span class="step" style="--c:${CB.warn}"><i class="spin"></i><b>${esc(UFM_STEP[x.step] || x.step)}</b> ${esc(x.detail || '')} · ${Math.round((Date.now() - t0)/1000)} s</span>`); setTimeout(poll, 1200); return; }
       ufmBusy = false;
-      if (x.state === 'complete') { cabStamp = null; await loadCab();
+      if (x.state === 'complete') { cabStamp = null; await loadCab(); if (typeof loadInc === 'function') loadInc();
         const what = x.source === 'rest' ? `live links (${num(x.links)}) from UFM ${esc(x.host)}` : `UFM ${esc(x.host)} scan file`;
         const when = x.source === 'rest' ? 'compared just now' : `scan ${esc(fmtTime(x.scanned_at))}`;
         const note = (x.skipped || []).filter(m => /live links|master\/report/.test(m)).map(m => `<span style="color:${CB.warn}" title="${esc(m)}"> · ⚠ ${esc(m.split(':')[0])} not used</span>`).join('');
@@ -951,6 +974,44 @@ async function fetchFromUfm() {
   } catch (err) { ufmBusy = false; setUfmMsg(`<span style="color:${CB.err}">✗ ${esc(err.message)}</span>`); document.querySelectorAll('#ufm-fetch').forEach(b => b.disabled = false); } }
 document.addEventListener('click', e => { if (e.target.closest('#ufm-fetch')) fetchFromUfm(); });
 
+// ---- Incidents (ranked, from /api/incidents) ----
+const SEV = {critical:['Critical','#ff5e78'], major:['Major','#ffb547'], minor:['Minor','#c9b458'], info:['Info','#9aa8bb']};
+let INC = null, incStamp = null;
+const sevChip = (k, n) => `<span class="sev${n === 0 ? ' zero' : ''}" style="--sc:${SEV[k][1]}">${n === undefined ? '' : n + ' '}${SEV[k][0]}</span>`;
+function renderIncBar() {
+  const bar = document.getElementById('incbar'), x = LIVE.incidents;
+  if (!SERVICE || !x || !x.counts) { bar.hidden = true; return; }
+  const c = x.counts, worst = ['critical', 'major', 'minor', 'info'].find(k => c[k]) || null;
+  bar.hidden = false; bar.style.setProperty('--ic', worst && worst !== 'info' ? SEV[worst][1] : CB.ok);
+  const top = (x.top || []).filter(i => i.severity !== 'info')[0];
+  bar.innerHTML = `<b>Fabric incidents</b> ${['critical', 'major', 'minor', 'info'].map(k => sevChip(k, c[k] || 0)).join(' ')}
+    ${top ? `<span>· ${esc(top.title)}</span>` : `<span style="color:${CB.ok}">· nothing that affects the fabric</span>`}<span class="grow"></span>
+    <button class="btn" type="button" id="inc-open">View incidents</button>`; }
+async function loadInc() {
+  if (!SERVICE) { document.getElementById('inc-body').innerHTML = '<div class="incnone">Incidents need the local service: open http://127.0.0.1:8765/.</div>'; return; }
+  try { const r = await fetch('/api/incidents'); INC = await r.json(); if (!r.ok) throw Error(INC.error); }
+  catch (e) { document.getElementById('inc-body').innerHTML = `<div class="incnone" style="color:${CB.err}">Could not load incidents: ${esc(e.message)}</div>`; return; }
+  if (INC.counts) { LIVE.incidents = {counts: INC.counts, generated_at: INC.generated_at, top: (INC.incidents || []).slice(0, 3)}; renderIncBar(); const t = document.getElementById('tab-inc-n'); if (t) { const c = INC.counts, n = (c.critical || 0) + (c.major || 0); t.textContent = (n || c.minor || 0) ? (n || c.minor).toLocaleString() : '✓'; t.style.setProperty('--c', c.critical ? SEV.critical[1] : n ? SEV.major[1] : c.minor ? SEV.minor[1] : '#38d9a0'); } }
+  renderInc(); }
+function renderInc() {
+  const body = document.getElementById('inc-body'); if (!INC) return;
+  const items = INC.incidents || [], c = INC.counts || {};
+  const head = `<p class="small" style="margin:0 0 12px">${['critical', 'major', 'minor', 'info'].map(k => sevChip(k, c[k] || 0)).join(' &nbsp; ')} &nbsp;·&nbsp; from the Cabling vs UFM check and the Live link state, checked ${esc(fmtTime(INC.generated_at))}.
+    <b>Critical</b> = fabric-wide or many GPUs affected now · <b>Major</b> = hurts jobs or routing · <b>Minor</b> = single links or labels · <b>Info</b> = documentation and data.</p>`;
+  const tabName = {cab: 'Cabling vs UFM', live: 'Live link state'};
+  const card = i => `<div class="inc" style="--sc:${SEV[i.severity][1]}">${sevChip(i.severity)}
+    <h4>${esc(i.title)}<small>${esc(i.category)}</small></h4>
+    <p>${esc(i.impact)}</p><p><b>Action:</b> ${esc(i.action)} ${tabName[i.tab] ? `<a href="#" data-goto="${i.tab}">→ ${tabName[i.tab]}</a>` : ''}</p>
+    ${i.evidence_total ? `<details${i.severity === 'critical' ? ' open' : ''}><summary>${num(i.evidence_total)} affected${i.evidence_total > i.evidence.length ? ` (first ${i.evidence.length} shown)` : ''}</summary><ul>${i.evidence.map(e => `<li>${esc(e)}</li>`).join('')}</ul></details>` : ''}</div>`;
+  const serious = items.filter(i => i.severity !== 'info'), info = items.filter(i => i.severity === 'info');
+  body.innerHTML = head + (serious.length ? `<div class="incs">${serious.map(card).join('')}</div>` : `<div class="incnone" style="color:${CB.ok}">✓ No critical, major or minor incidents in the fabric.</div>`)
+    + (info.length ? `<h5 class="inch">Documentation and data</h5><div class="incs">${info.map(card).join('')}</div>` : ''); }
+document.addEventListener('click', e => {
+  const g = e.target.closest('[data-goto]'); if (g) { e.preventDefault(); window.showCheckTab && showCheckTab(g.dataset.goto); }
+  if (e.target.closest('#inc-open')) { window.showCheckTab && showCheckTab('inc'); document.querySelector('.tabs-card').scrollIntoView({behavior: 'smooth', block: 'start'}); } });
+const _applyLive3 = applyLive; applyLive = function (v) { _applyLive3(v); renderIncBar(); const st = v.incidents && v.incidents.generated_at + JSON.stringify(v.incidents.counts); if (st !== incStamp) { incStamp = st; loadInc(); } };
+renderIncBar(); loadInc();
+
 // ---- check tabs (Cabling vs UFM / Live link state) ----
 { const tabs = [...document.querySelectorAll('.tabs .tab')];
   const show = (name, focus) => { tabs.forEach(t => { const sel = t.dataset.tab === name; t.setAttribute('aria-selected', sel); t.tabIndex = sel ? 0 : -1;
@@ -959,15 +1020,16 @@ document.addEventListener('click', e => { if (e.target.closest('#ufm-fetch')) fe
   tabs.forEach((t, i) => { t.addEventListener('click', () => show(t.dataset.tab));
     t.addEventListener('keydown', e => { if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') { e.preventDefault(); const n = tabs[(i + (e.key === 'ArrowRight' ? 1 : tabs.length - 1)) % tabs.length]; show(n.dataset.tab, true); } }); });
   let saved = null; try { saved = localStorage.getItem('ice2-check-tab'); } catch (e) {}
-  show(saved === 'live' ? 'live' : 'cab');
+  show(['live', 'cab', 'inc'].includes(saved) ? saved : 'inc');
   window.showCheckTab = show;
   const badge = (id, n, c, okText) => { const e = document.getElementById(id); if (!e) return; e.textContent = n ? n.toLocaleString() : okText || ''; e.style.setProperty('--c', n ? c : '#38d9a0'); e.title = n ? n + ' to review' : 'nothing to review'; };
   const updBadges = () => {
     if (CAB) { const S = CAB.summary, att = CAB.sus.reduce((n, su) => n + su.trays.filter(t => t.status !== 'ok').length, 0); badge('tab-cab-n', S.switch_miscabled + att + S.gpu_not_seen, '#e879f9', '✓'); }
     else badge('tab-cab-n', 0, '', 'no scan');
+    const ic = (LIVE.incidents || {}).counts; if (ic) { const n = (ic.critical || 0) + (ic.major || 0); badge('tab-inc-n', n || ic.minor || 0, ic.critical ? SEV.critical[1] : n ? SEV.major[1] : SEV.minor[1], '✓'); }
     const cb = LIVE.cables || {}; badge('tab-live-n', (cb.down || 0) + (cb.init || 0) + (cb.unknown || 0) + Object.keys(NBX).length, (cb.down || Object.keys(NBX).length) ? '#ff5e78' : '#ffb547', '✓'); };
   const _rc = renderCab; renderCab = function (err) { _rc(err); updBadges(); };
-  const _rp = renderPanels; renderPanels = function () { _rp(); updBadges(); };
+  const _rp = renderPanels; renderPanels = function () { _rp(); updBadges(); if (typeof renderIncBar === 'function') renderIncBar(); };
   updBadges(); }
 
 inspect(null);

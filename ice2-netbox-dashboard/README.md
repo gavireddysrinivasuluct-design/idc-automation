@@ -344,7 +344,8 @@ Sync complete in 34.2 s   NetBox 1.0 s ‖ IPs 0.0 s ‖ devices 34.2 s
   - The device's NetBox **vendor, model, management IP and status**, taken from the most recent sync. Clicking a device makes no NetBox call, so this works even when the NetBox proxy is down. A device not seen by any sync yet is looked up once, then remembered.
   - A **Live** column in every cable table.
   - Click any **cable ID** to check that one cable against NetBox right now.
-- **Check tabs** below the diagram: **Cabling vs UFM** and **Live link state**. Each tab shows a count of items to review, or ✓ when there are none. Click a tab or use the arrow keys to switch; the page remembers your last tab.
+- **Incident banner** under the status bar: how many critical, major, minor and info incidents there are, and the most severe one. **View incidents** opens the Incidents tab. See [6.2](#62-incidents).
+- **Check tabs** below the diagram: **Incidents**, **Cabling vs UFM** and **Live link state**. Each tab shows a count of items to review, or ✓ when there are none. Click a tab or use the arrow keys to switch; the page remembers your last tab.
 - **Live link state tab.** Counts, the full problem list (down, initializing, NetBox changed or missing), and the UFM `fnm1` port states.
 
 GPU-side RDMA ports are not collected by the switch sync; only the leaf side of each GPU link is checked there. The UFM cabling check below covers both ends.
@@ -441,6 +442,29 @@ The dashboard picks up the new file automatically; reload the page if it is open
   - **NetBox import CSV**: every GPU cable UFM sees but NetBox lacks, in NetBox's cable bulk-import columns. The UFM tray name is in `label`. Fill in `side_b_device` (the tray's NetBox host) before importing in NetBox (*Cables → Import*).
 
 **How it matches the two sources.** Each Q3400 switch is four chips, one per plane, so each 800G cable appears as four 200G lanes on the same port. UFM numbers ports in hex, and NVOS `swNpM` is port 2·(N−1)+M. UFM names GPU adapters by rack and tray (`nvl72d031-T14 mlx5_2`). The tray's NetBox host is learned from the NetBox cables that end on its adapters. Each switch's internal chip-to-chip links, the SHARP aggregation nodes and UFM's own links are left out.
+
+### 6.2 Incidents
+
+The **Incidents** tab turns everything the dashboard knows into one ranked list: what is broken, what it affects, and what to do. It uses only data already collected (the UFM data from **Fetch from UFM**, and the last device sync), so it adds no load on the fabric. It updates whenever new UFM data or a new sync arrives.
+
+| Severity | Meaning | Examples it detects |
+| --- | --- | --- |
+| **Critical** | Fabric-wide, or many GPUs affected now | A spine or leaf with no links left; a quarter or more of leaf–spine capacity missing; 18 or more GPU trays gone offline; no UFM data at all |
+| **Major** | Hurts jobs or routing | Miscabling that changes the topology (a leaf with more cables to one spine and fewer to another); planes of one cable on different far ends; leaf–leaf or spine–spine links; a GPU tray on the wrong rail, SU or slot; a tray running without all four rails; GPU trays that went offline; a leaf or spine losing 1/8 or more of its links; NetBox GPU hosts missing from the fabric; UFM's own fabric links degraded; switches the sync could not read; many down ports on one switch |
+| **Minor** | Single links, or labels only | Individual leaf–spine cables not up, in *Init*, or missing planes; GPU adapters not fully active; **port swaps with no fabric impact** |
+| **Info** | Documentation and data | NetBox differs from the design; unnamed adapters; trays missing from NetBox; miscabling baked into UFM's master; UFM data older than 6 hours; a failed UFM fetch |
+
+Each incident shows its impact, the action to take, a link to the tab with the details, and the affected cables, ports or trays.
+
+**Miscabling impact.** Each miscabled leaf–spine cable is also labelled in *Cabling vs UFM*:
+
+- **Port swap · no fabric impact:** every leaf still has its designed number of cables to every spine; only port positions differ (for example the BEL21 sw49 ↔ sw50 cages). Routing and bandwidth are unaffected; labels, runbooks and port-based maintenance are wrong. Fix in a maintenance window.
+- **Topology change · affects routing:** some leaf–spine pairs have more or fewer cables than designed. That means uneven bandwidth and hot spots, and the fat-tree routing may not hold. Fix soon.
+- **Planes split:** the four planes of one cable land on different far ends.
+
+**Offline GPU trays.** The service remembers when it last saw each GPU tray (`.netbox-live-sync/tray-history.json`, kept 7 days). A tray that was on the fabric and is missing from newer UFM data is reported as offline, with its last-seen time and leaf ports. Live links ([4.9](#49-optional-let-the-dashboard-fetch-from-ufm)) make this current to the minute.
+
+What it cannot see: link errors, congestion and UFM alarms (not collected yet), GPU-side health, and *Init* states when using live links (the scan file and the Live link state tab still show those).
 
 ---
 
@@ -590,6 +614,7 @@ Also revoke the NetBox API token in NetBox (**API Tokens → delete**).
 | `GET /api/verify/<cable_id>` | One cable: current NetBox record vs. live state |
 | `GET /api/device/<hostname>` | NetBox details for one device, from the last sync (add `?live=1` to query NetBox now) |
 | `GET /api/health` | NetBox reachability |
+| `GET /api/incidents` | Ranked fabric incidents ([6.2](#62-incidents)); counts and the top three are also in `/api/live` |
 | `GET /api/cabling` | Cabling vs UFM report (ETag and gzip) |
 | `GET /api/cabling/findings.csv` | Every cabling difference, one row each |
 | `POST /api/cabling/fetch` · `GET /api/cabling/fetch/<run>` | Fetch UFM's files now, or check that fetch's progress |
@@ -614,6 +639,7 @@ Also revoke the NetBox API token in NetBox (**API Tokens → delete**).
 | `scripts/netbox_proxy.sh`, `scripts/netbox_host_proxy.py` | Local NetBox proxy through Teleport |
 | `scripts/fetch_ufm_scan.sh` | Copies UFM's latest fabric scan to `local-inputs/ufm/` (read-only) |
 | `scripts/configure_ufm_access.sh` | Saves the UFM web and/or host password to Keychain for the Fetch from UFM button |
+| `app/incidents.py` | Incident rules: severity, impact and action for each problem found ([6.2](#62-incidents)) |
 | `app/ufm_fetch.py` | Fetch from UFM: live links over the UFM REST API, or UFM's files, through `jmp0` (read-only) |
 | `config/device-access.example.ini` | Example profile (no secrets) |
 
@@ -629,4 +655,5 @@ Also revoke the NetBox API token in NetBox (**API Tokens → delete**).
 | `.netbox-live-sync/` | the service | Collected evidence, IP cache, cable cache, device details (`netbox-devices.json`) |
 | `local-inputs/ufm/ibdiagnet2.lst.gz` | Fetch from UFM or `fetch_ufm_scan.sh` | UFM fabric scan for the cabling check. The previous copy is kept as `ibdiagnet2.lst.previous.gz`. |
 | `local-inputs/ufm/master.topo.gz`, `topology-compare.json.gz` | Fetch from UFM or `fetch_ufm_scan.sh` | UFM's master topology and its latest Topology Compare report |
+| `.netbox-live-sync/tray-history.json` | The service | When each GPU tray was last seen, to report trays that go offline |
 | `local-inputs/ufm/links.json.gz`, `tls-pins.json` | Fetch from UFM (live links) | UFM's raw live link list, and the pinned UFM certificate fingerprints |

@@ -260,7 +260,7 @@ def _pick(record: dict, *names):
     return None
 
 
-SW_AGG = re.compile(r"^([^:]+):sw\d+p\d+$")        # one record per cable, all 4 planes up
+SW_AGG = re.compile(r"^([^:]+):(?:sw\d+p\d+|FNM\d+)$")  # one record per cable, all 4 planes up (FNM1 = sw73p1)
 SW_CHIP = re.compile(r"^([^:]+):A(\d+)/(\d+)$")    # one record per plane (chip A1..A4)
 SW_OTHER = re.compile(r"^(\S*-swi-\S+?):(\S+)$")   # e.g. FNM1 (UFM management port)
 LST_END = re.compile(r"\{ (?:SW|CA) Ports:\S+ SystemGUID:\S+ NodeGUID:(\S+) .*?\{([^}]*)\} LID:")
