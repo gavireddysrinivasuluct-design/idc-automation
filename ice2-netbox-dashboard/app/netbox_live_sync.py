@@ -153,19 +153,34 @@ class SyncState:
         names = [name for name in names if name]
         if not names or len(names) != len(set(names)):
             raise RuntimeError("The device inventory must contain unique non-empty hostname values.")
+        def address_from_device(device: dict, name: str) -> str:
+            primary = device.get("primary_ip4") or device.get("primary_ip") or {}
+            address = (primary.get("address") or "").split("/", 1)[0]
+            if not address:
+                raise RuntimeError("NetBox has no primary management IP for %s." % name)
+            return address
+
+        # NetBox supports an `__in` lookup. Batch first to avoid 100 serial
+        # requests; retain exact-name lookups as a compatibility fallback.
+        addresses: dict[str, str] = {}
+        for start in range(0, len(names), 20):
+            batch = names[start:start + 20]
+            payload = self.get_netbox("/api/dcim/devices/?limit=100&name__in=" + quote(",".join(batch), safe=","))
+            for device in payload.get("results") or []:
+                name = device.get("name")
+                if name in batch:
+                    addresses[name] = address_from_device(device, name)
+
         def lookup(name: str) -> tuple[str, str]:
             payload = self.get_netbox("/api/dcim/devices/?limit=2&name=" + quote(name, safe=""))
             matches = payload.get("results") or []
             if len(matches) != 1:
                 raise RuntimeError("NetBox returned %d devices for %s." % (len(matches), name))
-            primary = matches[0].get("primary_ip4") or matches[0].get("primary_ip") or {}
-            address = (primary.get("address") or "").split("/", 1)[0]
-            if not address:
-                raise RuntimeError("NetBox has no primary management IP for %s." % name)
-            return name, address
-        addresses: dict[str, str] = {}
+            return name, address_from_device(matches[0], name)
+
+        unresolved = [name for name in names if name not in addresses]
         with ThreadPoolExecutor(max_workers=8) as pool:
-            futures = {pool.submit(lookup, name): name for name in names}
+            futures = {pool.submit(lookup, name): name for name in unresolved}
             for future in as_completed(futures):
                 name, address = future.result()
                 addresses[name] = address
@@ -285,7 +300,7 @@ class SyncState:
         }
 
     # ---------- NetBox bulk sync ----------
-    def fetch_cables(self) -> dict[str, dict]:
+    def fetch_cables(self, progress: dict | None = None) -> dict[str, dict]:
         """Pull every backend cable (IDs in the baseline CSV ranges) from NetBox, paginated."""
         ids = sorted(int(k) for k in self.baseline)
         ranges, lo, prev = [], ids[0], ids[0]
@@ -296,20 +311,27 @@ class SyncState:
             prev = cid
         ranges.append((lo, prev))
         cables: dict[str, dict] = {}
+        pages: list[str] = []
         for lo, hi in ranges:
-            # Smaller pages avoid proxy/read timeouts on the fully expanded
-            # cable payload while retaining complete termination data.
-            path = "/api/dcim/cables/?id__gte=%d&id__lte=%d&limit=250&offset=0" % (lo, hi)
-            while path:
-                page = self.get_netbox(path)
+            base = "/api/dcim/cables/?id__gte=%d&id__lte=%d&limit=250" % (lo, hi)
+            first = self.get_netbox(base + "&offset=0")
+            for cable in first.get("results", []):
+                cables[str(cable["id"])] = cable
+            pages.extend(base + "&offset=%d" % offset for offset in range(250, first.get("count", 0), 250))
+        if progress is not None:
+            progress.update(state="running", pages_completed=len(ranges), pages_total=len(ranges) + len(pages))
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            futures = [pool.submit(self.get_netbox, path) for path in pages]
+            for future in as_completed(futures):
+                page = future.result()
                 for cable in page.get("results", []):
                     cables[str(cable["id"])] = cable
-                nxt = page.get("next")
-                path = nxt[nxt.find("/api/"):] if nxt else None
+                if progress is not None:
+                    progress["pages_completed"] += 1
         return cables
 
-    def sync_netbox(self) -> dict:
-        cables = self.fetch_cables()
+    def sync_netbox(self, progress: dict | None = None) -> dict:
+        cables = self.fetch_cables(progress)
         mismatches, missing = [], []
         for cable_id, row in self.baseline.items():
             cable = cables.get(cable_id)
@@ -344,7 +366,7 @@ class SyncState:
     def run_sync(self, run_id: str) -> None:
         record = self.syncs[run_id]
         try:
-            nb = self.sync_netbox()
+            nb = self.sync_netbox(record["netbox"])
             record["netbox"] = {"state": "complete", "checked": nb["checked"], "mismatches": len(nb["mismatches"]), "missing": len(nb["missing"])}
         except Exception as error:
             record["netbox"] = {"state": "failed", "error": str(error)}
