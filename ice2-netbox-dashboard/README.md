@@ -38,11 +38,11 @@ Management IPs are different: they are fetched read-only from NetBox during each
 
 ## Run
 
-Replace every placeholder with your local input path and approved NetBox URL:
+Use the shared NetBox endpoint below and replace only the local input paths:
 
 ```bash
 python3 app/netbox_live_sync.py \
-  --netbox-url '<approved-netbox-url-or-local-proxy>' \
+  --netbox-url 'https://netbox-prod-europe-west2-netbox.nscale.teleport.sh' \
   --diagram local-inputs/dashboard.html \
   --connections local-inputs/connections.csv \
   --device-profile "$HOME/.config/idc-automation/device-access.ini" \
