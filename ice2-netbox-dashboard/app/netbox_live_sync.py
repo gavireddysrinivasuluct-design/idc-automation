@@ -16,6 +16,9 @@ POST /api/refresh         start a read-only collection across the 100 backend sw
 GET  /api/refresh/<run>   collection progress
 POST /api/sync            one-click sync: NetBox cables and device collection, run concurrently
 GET  /api/sync/<run>      sync progress with per-phase timings
+GET  /api/cabling         NetBox cabling vs. what UFM actually sees (from a local UFM fabric scan)
+GET  /api/cabling/findings.csv       every non-OK cabling observation
+GET  /api/cabling/netbox-import.csv  cables UFM sees but NetBox lacks, in NetBox import columns
 
 Performance notes
 -----------------
@@ -35,6 +38,7 @@ Performance notes
 from __future__ import annotations
 
 import argparse
+import sys as _sys
 import csv
 import getpass
 import gzip
@@ -66,6 +70,7 @@ LATEST = STATE_DIR / "latest-live.json"
 ADDRESS_CACHE = STATE_DIR / "management-addresses.csv"
 CABLE_CACHE = STATE_DIR / "netbox-cables.json"
 DEVICE_CACHE = STATE_DIR / "netbox-devices.json"
+DEFAULT_UFM_SCAN = PROJECT_ROOT / "local-inputs" / "ufm" / "ibdiagnet2.lst.gz"
 DEVICE_FIELDS = "name,primary_ip4,primary_ip,device_type,status"
 CABLE_FIELDS = "id,a_terminations,b_terminations"
 BASELINE_COLLECTED_AT = "not-collected"
@@ -169,6 +174,8 @@ class SyncState:
         self.load_baseline()
         self.load_latest()
         self.load_cable_cache()
+        self.ufm_scan = Path(getattr(opts, "ufm_scan", None) or DEFAULT_UFM_SCAN)
+        self._cabling: tuple | None = None
         self.device_info: dict[str, dict] = {}
         self.device_info_at: str | None = None
         self.load_device_cache()
@@ -454,12 +461,17 @@ class SyncState:
             "devices": self.known_devices(),
             "devices_synced_at": self.device_info_at,
             "netbox": self.netbox_sync,
+            "cabling": self.cabling_summary(),
             "refresh_running": any(item.get("state") == "running" for item in self.refreshes.values()),
             "sync_running": any(item.get("state") == "running" for item in self.syncs.values()),
         }
 
     def live_payload(self) -> tuple[str, bytes, bytes]:
         """(etag, json, gzipped json) for /api/live, rebuilt only when state changed."""
+        try:
+            self.cabling()  # a new or removed UFM scan bumps the version first
+        except Exception:
+            pass
         version = self.version
         cached = self._live_cache
         if cached and cached[0] == version:
@@ -478,6 +490,51 @@ class SyncState:
                 print("[netbox-live-sync] scheduled sync:", self.start_sync())
             except RuntimeError as error:
                 print("[netbox-live-sync] scheduled sync skipped:", error)
+
+    # ---------- cabling vs. UFM ----------
+    def ufm_scan_path(self) -> Path | None:
+        for candidate in (self.ufm_scan, self.ufm_scan.with_suffix("") if self.ufm_scan.suffix == ".gz" else self.ufm_scan.with_name(self.ufm_scan.name + ".gz")):
+            if candidate.is_file():
+                return candidate
+        return None
+
+    def cabling(self) -> dict | None:
+        """The UFM-vs-NetBox cabling report, rebuilt only when the scan file changes."""
+        path = self.ufm_scan_path()
+        if not path:
+            if self._cabling is not None:  # the scan was removed: forget it
+                with self.lock:
+                    self._cabling = None
+                    self.bump()
+            return None
+        key = (str(path), path.stat().st_mtime_ns, path.stat().st_size)
+        with self.lock:
+            cached = self._cabling
+        if cached and cached[0] == key:
+            return cached[1]
+        _sys.path.insert(0, str(APP_DIR))
+        import ufm_cabling  # noqa: E402  (local module next to this file)
+        report = ufm_cabling.analyse(path, ufm_cabling.load_baseline(self.connections))
+        body = json.dumps(report, separators=(",", ":")).encode("utf-8")
+        payload = ('"c%d-%s"' % (key[1] % 10**9, hashlib.sha1(body).hexdigest()[:10]), body, gzip.compress(body, compresslevel=5))
+        with self.lock:
+            self._cabling = (key, report, payload)
+            self.bump()
+        return report
+
+    def cabling_payload(self) -> tuple[str, bytes, bytes] | None:
+        if self.cabling() is None:
+            return None
+        return self._cabling[2]
+
+    def cabling_summary(self) -> dict | None:
+        try:
+            report = self.cabling()
+        except Exception as error:  # a corrupt scan must not break /api/live
+            return {"error": str(error)}
+        if not report:
+            return None
+        return {"scanned_at": report["source"]["scanned_at"], "summary": report["summary"]}
 
     def health(self) -> dict:
         view = self.live_view()
@@ -928,11 +985,55 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def respond_cached(self, etag: str, body: bytes, packed: bytes) -> None:
+        if self.headers.get("If-None-Match") == etag:
+            self.send_response(HTTPStatus.NOT_MODIFIED)
+            self.send_header("ETag", etag)
+            self.send_header("Cache-Control", "no-cache")
+            self.end_headers()
+            return
+        use_gzip = "gzip" in (self.headers.get("Accept-Encoding") or "")
+        data = packed if use_gzip else body
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("ETag", etag)
+        self.send_header("Cache-Control", "no-cache")
+        if use_gzip:
+            self.send_header("Content-Encoding", "gzip")
+        self.end_headers()
+        self.wfile.write(data)
+
     def do_GET(self) -> None:
         path = urlparse(self.path).path
         try:
             if path in {"/", "/index.html"}:
                 self.respond(HTTPStatus.OK, self.diagram.read_text(encoding="utf-8"), "text/html; charset=utf-8")
+            elif path == "/api/cabling":
+                payload = self.state.cabling_payload()
+                if payload is None:
+                    self.respond(HTTPStatus.NOT_FOUND, {"error": "No UFM fabric scan found at %s. Run scripts/fetch_ufm_scan.sh." % self.state.ufm_scan})
+                    return
+                self.respond_cached(*payload)
+            elif path in ("/api/cabling/findings.csv", "/api/cabling/netbox-import.csv"):
+                report = self.state.cabling()
+                if report is None:
+                    self.respond(HTTPStatus.NOT_FOUND, {"error": "No UFM fabric scan found."})
+                    return
+                _sys.path.insert(0, str(APP_DIR))
+                import ufm_cabling  # noqa: E402
+                findings = path.endswith("findings.csv")
+                body = (ufm_cabling.findings_csv if findings else ufm_cabling.netbox_import_csv)(report)
+                stamp = report["source"]["scanned_at"][:16].replace(":", "").replace("-", "")
+                name = "ice2-cabling-%s-%s.csv" % ("findings" if findings else "netbox-import", stamp)
+                data = body.encode("utf-8")
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", "text/csv; charset=utf-8")
+                self.send_header("Content-Disposition", 'attachment; filename="%s"' % name)
+                self.send_header("Content-Length", str(len(data)))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(data)
             elif path == "/api/live":
                 etag, body, packed = self.state.live_payload()
                 if self.headers.get("If-None-Match") == etag:
@@ -967,6 +1068,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.respond(HTTPStatus.NOT_FOUND, {"error": "Not found"})
         except RuntimeError as error:
             self.respond(HTTPStatus.BAD_GATEWAY, {"error": str(error)})
+        except (OSError, ValueError) as error:
+            self.respond(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "Could not read the UFM scan: %s" % error})
 
     def do_POST(self) -> None:
         path = urlparse(self.path).path
@@ -991,6 +1094,8 @@ def main() -> int:
     parser.add_argument("--devices", type=Path, default=ASSETS_DIR / "devices.csv", help="Device inventory CSV (bundled by default).")
     parser.add_argument("--known-hosts", type=Path, default=PROJECT_ROOT / "local-inputs" / "known_hosts", help="Local approved SSH host-key file installed by scripts/configure_known_hosts.sh.")
     parser.add_argument("--commands", type=Path, default=ASSETS_DIR / "read_only_commands.txt", help="Read-only command file (bundled by default).")
+    parser.add_argument("--ufm-scan", type=Path, default=DEFAULT_UFM_SCAN,
+                        help="Local copy of UFM's fabric scan (ibdiagnet2.lst[.gz]) for the cabling check; scripts/fetch_ufm_scan.sh puts it here.")
     tuning = parser.add_argument_group("performance")
     tuning.add_argument("--fanout", choices=["local", "jump"], default="local",
                         help="jump: one Teleport session fans out from the jump host (needs python3 there; falls back to local automatically).")
@@ -1011,6 +1116,8 @@ def main() -> int:
     Handler.diagram = args.diagram
     server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     print("Live evidence: %s" % Handler.state.source)
+    scan = Handler.state.ufm_scan_path()
+    print("UFM cabling scan: %s" % (scan if scan else "none yet (run scripts/fetch_ufm_scan.sh)"))
     print("Open http://127.0.0.1:%d/" % args.port)
     server.serve_forever()
     return 0

@@ -1,0 +1,382 @@
+#!/usr/bin/env python3
+"""Compare the cabling UFM actually sees with the NetBox cable list.
+
+Input is UFM's own fabric scan, the ibdiagnet link list (`ibdiagnet2.lst`,
+optionally gzip-compressed), which UFM refreshes regularly at
+/opt/ufm/tmp/fabric_analysis/ibdiagnet.out/ibdiagnet2.lst inside its container.
+Reading it sends nothing to the fabric.
+
+Facts about the ICE2 fabric this relies on (checked against the real scan):
+
+* Every Q3400 switch is four chips, one per plane (`.../U1` .. `/U4`), and every
+  800G cable appears as four 200G lanes, one per plane, on the same port number.
+* Port numbers (`PN:`) are hexadecimal; NVOS port `swNpM` is number 2*(N-1)+M.
+* GPU adapters are named `<rack>-T<tray> mlx5_<n>` (for example
+  `nvl72d031-T14 mlx5_2`), not by NetBox hostname. The hostname of a tray is
+  learned from the NetBox cables that end on its adapters.
+* 4 pods of 16 leaves; a scalable unit (SU) takes the k-th leaf of each 4-leaf
+  rail block of its pod, and a tray uses the same port on all four of its leaves.
+"""
+
+from __future__ import annotations
+
+import collections
+import csv
+import gzip
+import io
+import os
+import re
+from datetime import datetime, timezone
+from pathlib import Path
+
+END = re.compile(r"\{ (SW|CA) Ports:[0-9a-fA-F]+ .*?\{([^}]*)\} LID:[0-9a-fA-F]+ PN:([0-9a-fA-F]+) \}")
+SWITCH = re.compile(r"^(?:MF\d+;)?([A-Za-z0-9._-]+):[^/]*/U(\d+)$")
+TRAY = re.compile(r"^(\S+-T\d+)\s+(mlx5_\d+)$")
+UFM_HOST = re.compile(r"-ufm\d", re.I)
+LEAF = re.compile(r"-bel(\d+)$")
+SPINE = re.compile(r"-bes(\d+)$")
+PLANES = 4
+
+
+def port_label(number: int) -> str:
+    return "sw%dp%d" % ((number - 1) // 2 + 1, (number - 1) % 2 + 1)
+
+
+def slot_of(label: str) -> int | None:
+    """Tray slot 0..71 for a leaf downlink label swNpM with N <= 36."""
+    m = re.match(r"sw(\d+)p([12])$", label)
+    if not m or int(m.group(1)) > 36:
+        return None
+    return (int(m.group(1)) - 1) * 2 + int(m.group(2)) - 1
+
+
+def leaf_no(name: str) -> int | None:
+    m = LEAF.search(name)
+    return int(m.group(1)) if m else None
+
+
+def su_of_leaf(leaf: int) -> tuple[int, int, int]:
+    """(su 1..16, pod 1..4, rail 1..4) for leaf 1..64."""
+    pod, offset = divmod(leaf - 1, 16)
+    rail, k = divmod(offset, 4)
+    return pod * 4 + k + 1, pod + 1, rail + 1
+
+
+def su_leaves(su: int) -> list[int]:
+    pod, k = divmod(su - 1, 4)
+    return [pod * 16 + k + 1 + 4 * r for r in range(4)]
+
+
+def short(name: str) -> str:
+    return re.sub(r"^sys1-ice2-p-(swi|phy)-", "", name)
+
+
+def open_scan(path: Path):
+    raw = path.open("rb")
+    head = raw.read(2)
+    raw.seek(0)
+    if head == b"\x1f\x8b":
+        return io.TextIOWrapper(gzip.GzipFile(fileobj=raw), encoding="utf-8", errors="replace")
+    return io.TextIOWrapper(raw, encoding="utf-8", errors="replace")
+
+
+def read_lanes(path: Path) -> tuple[list[tuple], dict]:
+    """Every link lane as ((kind, name, plane_or_port, label), (..), state dict)."""
+    lanes, meta = [], {"tool": "", "unparsed": 0}
+    with open_scan(path) as handle:
+        for line in handle:
+            if line.startswith("# Running version"):
+                meta["tool"] = line.split(":", 1)[1].strip().split(",")[0].strip('" ')
+            if not line.startswith("{"):
+                continue
+            ends = END.findall(line)
+            if len(ends) != 2:
+                meta["unparsed"] += 1
+                continue
+            parsed = []
+            for kind, desc, pn in ends:
+                number = int(pn, 16)
+                if kind == "SW":
+                    m = SWITCH.match(desc)
+                    parsed.append(("SW", m.group(1), int(m.group(2)), port_label(number)) if m else ("SW?", desc, 0, port_label(number)))
+                else:
+                    parsed.append(("CA", desc.strip(), number, ""))
+            state = dict(item.split("=", 1) for item in line.rsplit("}", 1)[1].split() if "=" in item)
+            lanes.append((parsed[0], parsed[1], state))
+    return lanes, meta
+
+
+def load_baseline(connections: Path) -> list[dict]:
+    with connections.open(newline="", encoding="utf-8") as handle:
+        return list(csv.DictReader(handle))
+
+
+def analyse(scan: Path, baseline: list[dict]) -> dict:
+    lanes, meta = read_lanes(scan)
+    stat = scan.stat()
+
+    # ---- per switch port: who is on the other end, on how many planes ------------
+    ports: dict[tuple[str, str], dict] = collections.defaultdict(lambda: {"peers": set(), "planes": set(), "logs": set(), "phys": set()})
+    for a, b, state in lanes:
+        for here, there in ((a, b), (b, a)):
+            if here[0] != "SW":
+                continue
+            if there[0] == "SW" and there[1] == here[1]:
+                continue  # a switch's own chip-to-chip links
+            peer = ("SW", there[1], there[3]) if there[0] == "SW" else ("CA", there[1], "")
+            item = ports[(here[1], here[3])]
+            item["peers"].add(peer)
+            item["planes"].add(here[2])
+            item["logs"].add(state.get("LOG", "?"))
+            item["phys"].add(state.get("PHY", "?") + "@" + state.get("SPD", "?"))
+
+    def health(item: dict) -> str:
+        if item["logs"] - {"ACT"}:
+            return "init" if "INI" in item["logs"] or "ARM" in item["logs"] else "down"
+        return "degraded" if len(item["planes"]) < PLANES else "ok"
+
+    # ---- NetBox, indexed both ways -------------------------------------------------
+    nb_switch: dict[tuple[str, str], tuple] = {}
+    nb_gpu: dict[tuple[str, str], tuple] = {}
+    switch_cables = []
+    for row in baseline:
+        a = (row["endpoint_a_device"], row["endpoint_a_port"])
+        b = (row["endpoint_b_device"], row["endpoint_b_port"])
+        if row["connection_type"] == "leaf-spine":
+            leaf, spine = (a, b) if leaf_no(a[0]) else (b, a)
+            switch_cables.append((row["netbox_cable_id"], leaf, spine))
+            nb_switch[leaf] = (spine, row["netbox_cable_id"])
+            nb_switch[spine] = (leaf, row["netbox_cable_id"])
+        elif row["connection_type"] == "leaf-gpu-rdma":
+            sw, gpu = (a, b) if "-swi-" in a[0] else (b, a)
+            nb_gpu[sw] = (gpu[0], gpu[1], row["netbox_cable_id"])
+
+    # ---- leaf <-> spine --------------------------------------------------------------
+    switch_findings, counts = [], collections.Counter()
+    for cid, leaf, spine in switch_cables:
+        pl, ps = ports.get(leaf), ports.get(spine)
+        if not pl and not ps:
+            status, actual = "not-seen", []
+        else:
+            item = pl or ps
+            peer_expected = ("SW",) + (spine if pl else leaf)
+            if peer_expected in item["peers"]:
+                status, actual = health(item), []
+            else:
+                status = "miscabled"
+                actual = sorted({(p[1], p[2]) for p in (pl or {"peers": set()})["peers"] if p[0] == "SW"})
+        counts["switch-" + status] += 1
+        if status != "ok":
+            item = pl or ps or {"planes": set(), "logs": set()}
+            switch_findings.append({"status": status, "cable": cid, "leaf": list(leaf), "spine": list(spine),
+                                    "leaf_actual": actual,
+                                    "spine_actual": sorted({(p[1], p[2]) for p in (ps or {"peers": set()})["peers"] if p[0] == "SW"}),
+                                    "planes": len(item["planes"]), "state": "/".join(sorted(item["logs"])) or "-"})
+    # pair crossed cables on the same leaf into swaps
+    by_leaf = collections.defaultdict(list)
+    for f in switch_findings:
+        if f["status"] == "miscabled":
+            by_leaf[f["leaf"][0]].append(f)
+    swap_no = 0
+    for leaf, items in sorted(by_leaf.items()):
+        for f in items:
+            if f.get("swap"):
+                continue
+            for g in items:
+                if g is f or g.get("swap") or not f["leaf_actual"] or not g["leaf_actual"]:
+                    continue
+                if f["leaf_actual"][0][0] == g["spine"][0] and g["leaf_actual"][0][0] == f["spine"][0] and f["leaf"][1][-2:] == g["leaf"][1][-2:]:
+                    swap_no += 1
+                    f["swap"] = g["swap"] = swap_no
+                    break
+    undocumented_switch = []
+    for (dev, label), item in ports.items():
+        for p in item["peers"]:
+            if p[0] == "SW" and (dev, label) not in nb_switch and (p[1], p[2]) not in nb_switch and dev < p[1]:
+                undocumented_switch.append({"a": [dev, label], "b": [p[1], p[2]], "planes": len(item["planes"]), "state": health(item)})
+
+    # ---- GPU trays as UFM sees them ---------------------------------------------------
+    trays: dict[str, list] = collections.defaultdict(list)
+    unnamed, ufm_links = [], []
+    for (dev, label), item in ports.items():
+        leaf = leaf_no(dev)
+        cas = [p[1] for p in item["peers"] if p[0] == "CA"]
+        if not cas or leaf is None:
+            continue
+        for desc in cas:
+            m = TRAY.match(desc)
+            if UFM_HOST.search(desc):
+                ufm_links.append({"leaf": dev, "port": label, "adapter": desc, "state": health(item), "planes": len(item["planes"])})
+            elif "Aggregation Node" in desc:
+                continue
+            elif m:
+                trays[m.group(1)].append({"leaf": leaf, "port": label, "hca": m.group(2), "planes": len(item["planes"]), "state": health(item),
+                                           "nb": nb_gpu.get((dev, label))})
+            else:
+                su, pod, rail = su_of_leaf(leaf)
+                unnamed.append({"su": su, "rail": rail, "leaf": leaf, "port": label, "slot": slot_of(label), "adapter": desc,
+                                "state": health(item), "nb": nb_gpu.get((dev, label))})
+    # learn tray -> NetBox host, and rail -> adapter, by majority
+    hca_votes = collections.defaultdict(collections.Counter)
+    for code, ads in trays.items():
+        for ad in ads:
+            hca_votes[su_of_leaf(ad["leaf"])[2]][ad["hca"]] += 1
+    rail_hca = {rail: votes.most_common(1)[0][0] for rail, votes in hca_votes.items()}
+    rdma_votes = collections.defaultdict(collections.Counter)
+    for code, ads in trays.items():
+        for ad in ads:
+            if ad["nb"]:
+                rdma_votes[ad["nb"][1]][ad["hca"]] += 1
+    rdma_hca = {rdma: votes.most_common(1)[0][0] for rdma, votes in rdma_votes.items()}
+    hca_rdma = {hca: rdma for rdma, hca in rdma_hca.items()}
+
+    sus = {su: {"su": su, "pod": (su - 1) // 4 + 1, "leaves": su_leaves(su), "trays": [], "unnamed": []} for su in range(1, 17)}
+    gpu_counts = collections.Counter()
+    host_of_tray = {}
+    for code, ads in trays.items():
+        hosts = collections.Counter(ad["nb"][0] for ad in ads if ad["nb"])
+        host = hosts.most_common(1)[0][0] if hosts else ""
+        host_of_tray[code] = host
+        issues = []
+        leaves = sorted({ad["leaf"] for ad in ads})
+        su_set = {su_of_leaf(l)[0] for l in leaves}
+        slots = {slot_of(ad["port"]) for ad in ads}
+        su = collections.Counter(su_of_leaf(ad["leaf"])[0] for ad in ads).most_common(1)[0][0]
+        slot = collections.Counter(slot_of(ad["port"]) for ad in ads).most_common(1)[0][0]
+        if len(su_set) > 1:
+            issues.append("adapters on leaves of different SUs")
+        if len(slots) > 1:
+            issues.append("not on the same port of all four leaves")
+        for ad in ads:
+            rail = su_of_leaf(ad["leaf"])[2]
+            if rail_hca.get(rail) and ad["hca"] != rail_hca[rail]:
+                issues.append("%s on rail %d leaf BEL%d (expected %s)" % (ad["hca"], rail, ad["leaf"], rail_hca[rail]))
+        rails_seen = {su_of_leaf(ad["leaf"])[2] for ad in ads}
+        missing_rails = [r for r in range(1, 5) if r not in rails_seen]
+        if missing_rails:
+            issues.append("no link on rail %s" % ", ".join(map(str, missing_rails)))
+        documented = [ad for ad in ads if ad["nb"]]
+        for ad in documented:
+            if ad["nb"][0] != host:
+                issues.append("NetBox says BEL%d %s goes to %s" % (ad["leaf"], ad["port"], short(ad["nb"][0])))
+            if rdma_hca.get(ad["nb"][1]) and rdma_hca[ad["nb"][1]] != ad["hca"]:
+                issues.append("NetBox %s on BEL%d is %s in UFM" % (ad["nb"][1], ad["leaf"], ad["hca"]))
+        for ad in ads:
+            if ad["state"] != "ok":
+                issues.append("BEL%d %s %s (%d/4 planes)" % (ad["leaf"], ad["port"], ad["state"], ad["planes"]))
+        if not documented:
+            doc = "missing"
+        elif len(documented) < len(ads):
+            doc = "partial"
+        else:
+            doc = "documented"
+        if issues and any(not i.startswith("no link") and "planes" not in i for i in issues):
+            status = "error"
+        elif issues:
+            status = "incomplete"
+        else:
+            status = "ok"
+        gpu_counts["trays-" + doc] += 1
+        gpu_counts["trays-" + status] += 1
+        gpu_counts["adapters"] += len(ads)
+        gpu_counts["adapters-documented"] += len(documented)
+        sus[su]["trays"].append({
+            "slot": slot, "code": code, "host": host, "doc": doc, "status": status, "issues": issues,
+            "adapters": sorted(([su_of_leaf(ad["leaf"])[2], ad["leaf"], ad["port"], ad["hca"], ad["planes"], ad["state"],
+                                 ad["nb"][2] if ad["nb"] else "", hca_rdma.get(ad["hca"], "")] for ad in ads)),
+        })
+    for item in unnamed:
+        sus[item["su"]]["unnamed"].append([item["slot"], item["rail"], item["leaf"], item["port"], item["adapter"], item["state"]])
+    for su in sus.values():
+        su["trays"].sort(key=lambda t: (t["slot"] if t["slot"] is not None else 99, t["code"]))
+        su["unnamed"].sort(key=lambda u: (u[0] if u[0] is not None else 99, u[1]))
+    gpu_not_seen = []
+    seen_ports = {(f"sys1-ice2-p-swi-bel{ad['leaf']}", ad["port"]) for ads in trays.values() for ad in ads}
+    seen_ports |= {(f"sys1-ice2-p-swi-bel{u['leaf']}", u["port"]) for u in unnamed}
+    for (dev, label), (host, rdma, cid) in nb_gpu.items():
+        if (dev, label) not in seen_ports:
+            gpu_not_seen.append({"cable": cid, "leaf": dev, "port": label, "host": host, "rdma": rdma})
+    gpu_not_seen.sort(key=lambda x: (x["host"], x["rdma"]))
+
+    summary = {
+        "switch_cables": len(switch_cables),
+        "switch_ok": counts["switch-ok"], "switch_miscabled": counts["switch-miscabled"],
+        "switch_not_seen": counts["switch-not-seen"], "switch_init": counts["switch-init"],
+        "switch_degraded": counts["switch-degraded"] + counts["switch-down"], "swaps": swap_no,
+        "switch_undocumented": len(undocumented_switch),
+        "trays": len(trays), "tray_slots": 16 * 72,
+        "trays_documented": gpu_counts["trays-documented"], "trays_partial": gpu_counts["trays-partial"],
+        "trays_missing": gpu_counts["trays-missing"],
+        "trays_ok": gpu_counts["trays-ok"], "trays_error": gpu_counts["trays-error"], "trays_incomplete": gpu_counts["trays-incomplete"],
+        "gpu_links": gpu_counts["adapters"], "gpu_links_documented": gpu_counts["adapters-documented"],
+        "gpu_links_undocumented": gpu_counts["adapters"] - gpu_counts["adapters-documented"],
+        "gpu_not_seen": len(gpu_not_seen), "unnamed_adapters": len(unnamed),
+        "netbox_gpu_cables": len(nb_gpu),
+    }
+    return {
+        "source": {"file": str(scan), "scanned_at": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(timespec="seconds"),
+                   "bytes": stat.st_size, "lanes": len(lanes), "tool": meta["tool"], "unparsed": meta["unparsed"]},
+        "summary": summary,
+        "switch_findings": sorted(switch_findings, key=lambda f: ({"miscabled": 0, "not-seen": 1, "down": 2, "init": 3, "degraded": 4}.get(f["status"], 9), f["leaf"])),
+        "switch_undocumented": sorted(undocumented_switch, key=lambda x: x["a"]),
+        "sus": [sus[k] for k in sorted(sus)],
+        "gpu_not_seen": gpu_not_seen,
+        "ufm_links": sorted(ufm_links, key=lambda x: (x["leaf"], x["port"])),
+        "rail_adapter": {str(k): v for k, v in sorted(rail_hca.items())},
+        "rdma_adapter": dict(sorted(rdma_hca.items())),
+    }
+
+
+def findings_csv(report: dict) -> str:
+    """Every non-OK observation, one row each; suitable for a ticket or a spreadsheet."""
+    out = io.StringIO()
+    w = csv.writer(out)
+    w.writerow(["finding", "netbox_cable_id", "switch", "port", "netbox_far_end", "ufm_far_end", "planes_up_of_4", "state", "note"])
+    for f in report["switch_findings"]:
+        note = ("swap #%d" % f["swap"]) if f.get("swap") else ""
+        w.writerow([f["status"], f["cable"], f["leaf"][0], f["leaf"][1], " ".join(f["spine"]),
+                    "; ".join(" ".join(x) for x in f["leaf_actual"]), f["planes"], f["state"], note])
+    for x in report["switch_undocumented"]:
+        w.writerow(["switch-link-not-in-netbox", "", x["a"][0], x["a"][1], "", " ".join(x["b"]), x["planes"], x["state"], ""])
+    for su in report["sus"]:
+        for t in su["trays"]:
+            for rail, leaf, port, hca, planes, state, cid, rdma in t["adapters"]:
+                if t["status"] == "ok" and cid:
+                    continue
+                finding = "gpu-link-not-in-netbox" if not cid else "gpu-" + t["status"]
+                w.writerow([finding, cid, "sys1-ice2-p-swi-bel%d" % leaf, port, (t["host"] + " " + rdma).strip() if cid else "",
+                            "%s %s" % (t["code"], hca), planes, state, "; ".join(t["issues"])])
+        for slot, rail, leaf, port, adapter, state in su["unnamed"]:
+            w.writerow(["gpu-adapter-unnamed", "", "sys1-ice2-p-swi-bel%d" % leaf, port, "", adapter, "", state,
+                        "adapter has no node description; tray cannot be identified"])
+    for x in report["gpu_not_seen"]:
+        w.writerow(["gpu-not-seen-by-ufm", x["cable"], x["leaf"], x["port"], x["host"] + " " + x["rdma"], "", 0, "", ""])
+    return out.getvalue()
+
+
+def netbox_import_csv(report: dict) -> str:
+    """Cables UFM sees but NetBox lacks, in NetBox's cable bulk-import columns.
+
+    Trays not yet linked to a NetBox device keep `side_b_device` empty and carry the
+    UFM tray code in `label`, so the hostname can be filled in before importing.
+    """
+    out = io.StringIO()
+    w = csv.writer(out)
+    w.writerow(["side_a_device", "side_a_type", "side_a_name", "side_b_device", "side_b_type", "side_b_name", "status", "label"])
+    for su in report["sus"]:
+        for t in su["trays"]:
+            for rail, leaf, port, hca, planes, state, cid, rdma in t["adapters"]:
+                if cid:
+                    continue
+                w.writerow(["sys1-ice2-p-swi-bel%d" % leaf, "dcim.interface", port, t["host"], "dcim.interface",
+                            rdma or ("RDMA%d" % rail), "connected", t["code"]])
+    return out.getvalue()
+
+
+if __name__ == "__main__":  # quick report: python3 app/ufm_cabling.py <ibdiagnet2.lst[.gz]> [connections.csv]
+    import json
+    import sys
+    here = Path(__file__).resolve().parent.parent
+    report = analyse(Path(sys.argv[1]), load_baseline(Path(sys.argv[2]) if len(sys.argv) > 2 else here / "assets" / "connections.csv"))
+    print(json.dumps({"source": report["source"], "summary": report["summary"],
+                      "miscabled": [f for f in report["switch_findings"] if f["status"] == "miscabled"]}, indent=1))
