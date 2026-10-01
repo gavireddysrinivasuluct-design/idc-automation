@@ -48,6 +48,12 @@ Obtain the approved SSH `known_hosts` file from the platform owner, then install
 
 The script copies the supplied file to `local-inputs/known_hosts` with mode `600`. That directory is ignored by Git.
 
+### How a new user obtains `known_hosts`
+
+Host keys are trust material, so the user must get the current file from an approved source rather than create it themselves. The platform/network owner should either grant access to the restricted onboarding download, send the approved file through the internal secure channel, or provide a documented approved file location or verified host-CA/fingerprint.
+
+After downloading it, the user runs `./scripts/configure_known_hosts.sh` and pastes the downloaded file's path. The script repeats these instructions when it starts. Do not use `ssh-keyscan` unless the platform owner verifies the resulting fingerprint through an independent channel.
+
 Management IPs are different: they are fetched read-only from NetBox during each device refresh. The generated address map is written only to the ignored runtime directory and is never committed.
 
 ## Run
