@@ -338,6 +338,24 @@ The design topology is the file `assets/expected_topology.csv`. It has one row p
 
 If the design changes, edit the rules and run `python3 scripts/build_expected_topology.py`, or edit the CSV directly for a one-off exception. The dashboard picks up the change automatically.
 
+**UFM's master topology as a second reference.** UFM keeps its own reference, the *master topology* (`/opt/ufm/shared_config_files/periodicTopo/master.topo`). It copies the master to `/opt/ufm/data/fabric.topo` every night and runs its own Topology Compare against it. The master records how the fabric looked *on the day someone saved it*, which isn't necessarily how it was designed. So the check shows the master next to each cable, and that tells you *since when* a difference exists:
+
+| Current vs design | Current vs master | Meaning |
+| --- | --- | --- |
+| ✓ | ✓ | Correct |
+| ✗ | ✓ | Miscabled, and **already like this in the master**. UFM's own compare treats it as correct and never flags it. |
+| ✗ | ✗ | Miscabled, and **changed since the master** (for example a recent move or RMA) |
+| ✓ | ✗ | Changed since the master, and now as designed (fixed, or the master was wrong) |
+
+The tab's *UFM master topology* section shows:
+
+- when the master was saved and what it covers
+- how many links agree in design, master and current
+- which hostnames the master knows for adapters that are unnamed today
+- a plain summary of UFM's own Topology Compare report
+
+UFM's report compares only against its master, so it mostly lists trays added after the master was saved, not cabling errors. After fixing the miscabled cables, save a new master in UFM so that its nightly compare becomes meaningful again.
+
 **Load or refresh the scan.** Run this in the project folder whenever you want fresh data. UFM rewrites its scan regularly, so this picks up the latest one:
 
 ```bash
@@ -348,7 +366,10 @@ The script:
 
 - connects through `jmp0` to the active UFM, trying `10.1.67.190` and then `10.1.67.191`
 - asks once for the UFM host password, which is typed into `ssh` on the jump host and never stored
-- saves the scan to `local-inputs/ufm/ibdiagnet2.lst.gz`, which Git ignores
+- copies three files UFM already writes, in one session, into `local-inputs/ufm/` (ignored by Git):
+  - the current fabric scan, saved as `ibdiagnet2.lst.gz`
+  - UFM's master topology, saved as `master.topo.gz` with its original save date
+  - UFM's latest Topology Compare report, saved as `topology-compare.json.gz`
 
 The dashboard picks up the new file automatically; reload the page if it is open. If you have a read-only login on the UFM host, use it with `UFM_USER=<user> ./scripts/fetch_ufm_scan.sh` instead of the default `root`.
 
@@ -397,6 +418,8 @@ The dashboard picks up the new file automatically; reload the page if it is open
 | `--netbox-concurrency N` | `2` | NetBox pages fetched in parallel through the Teleport app proxy |
 | `--netbox-host-header` | — | Only if the platform owner tells you a proxy needs it |
 | `--expected-topology PATH` | `assets/expected_topology.csv` | Designed topology the cabling check compares against ([6.1](#61-cabling-vs-ufm-miscabling-check)) |
+| `--ufm-master PATH` | `local-inputs/ufm/master.topo.gz` | UFM's master topology, the second reference ([6.1](#61-cabling-vs-ufm-miscabling-check)) |
+| `--ufm-report PATH` | `local-inputs/ufm/topology-compare.json.gz` | UFM's latest Topology Compare report, summarized in the tab |
 | `--ufm-scan PATH` | `local-inputs/ufm/ibdiagnet2.lst.gz` | UFM fabric scan used by the cabling check ([6.1](#61-cabling-vs-ufm-miscabling-check)). Plain or gzip-compressed. |
 | `--port N` | `8765` | Local dashboard port |
 | `--diagram`, `--connections`, `--devices`, `--commands`, `--known-hosts` | bundled | Override the bundled dashboard, topology, inventory, command file or host-key path |
@@ -546,4 +569,5 @@ Also revoke the NetBox API token in NetBox (**API Tokens → delete**).
 | `local-inputs/known_hosts` | step 4.7 | Approved switch host keys |
 | `~/.local/state/netbox-mcp/` | `netbox_proxy.sh` | Proxy PIDs and logs |
 | `.netbox-live-sync/` | the service | Collected evidence, IP cache, cable cache, device details (`netbox-devices.json`) |
-| `local-inputs/ufm/ibdiagnet2.lst.gz` | `fetch_ufm_scan.sh` | UFM fabric scan for the cabling check. The previous scan is kept as `ibdiagnet2.previous.lst.gz`. |
+| `local-inputs/ufm/ibdiagnet2.lst.gz` | `fetch_ufm_scan.sh` | UFM fabric scan for the cabling check. The previous copy is kept as `ibdiagnet2.lst.previous.gz`. |
+| `local-inputs/ufm/master.topo.gz`, `topology-compare.json.gz` | `fetch_ufm_scan.sh` | UFM's master topology and its latest Topology Compare report |

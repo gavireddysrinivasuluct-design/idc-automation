@@ -227,13 +227,19 @@ svg.ufm .lvlayer circle.lbadge{display:none}
 
 .misrows{display:flex;flex-direction:column;gap:8px;margin:4px 0 8px}
 .misrow{display:grid;grid-template-columns:86px minmax(0,1fr);gap:3px 12px;padding:8px 10px;border:1px solid #3b2d58;border-radius:8px;background:#0e0b1d}
-.mrc{grid-row:1 / 4;display:flex;flex-direction:column;gap:2px;font:12px var(--mono)}.mrc small{color:var(--dim)}
+.mrc{grid-row:1 / span 6;display:flex;flex-direction:column;gap:2px;font:12px var(--mono)}.mrc small{color:var(--dim)}
+.mrl,.mrfix{grid-column:2}
 .mrl{display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 10px}
-.mrk{display:inline-block;min-width:118px;font:600 10px var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--c)}
+.mrk{display:inline-block;min-width:150px;font:600 10px var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--c)}
 .conn{font:600 12.5px var(--mono);color:var(--c)}.conn i{font-style:normal;color:var(--dim);padding:0 4px}
 .mrfix{font-size:12px;color:var(--dim)}
 .misi .cable-ref{justify-self:start}
 .misi{display:grid;gap:2px;margin-top:6px;padding-top:6px;border-top:1px dashed #4b3a6e}.misi .mrk{min-width:70px}
+
+.refs{display:flex;flex-wrap:wrap;gap:4px 16px}.refs span{display:inline-flex;gap:6px;align-items:center}.refs i{width:9px;height:9px;border-radius:2px;display:inline-block}.refs b{color:var(--fg);font-weight:600}
+.mastergrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px}
+.mastergrid div{border:1px solid var(--line);border-left:3px solid #9aa8bb;border-radius:8px;padding:9px 11px;background:#0b1523;display:flex;flex-direction:column;gap:2px}
+.mastergrid b{font:600 20px var(--display);color:var(--fg)}.mastergrid span{font-size:12.5px}.mastergrid small{font-size:11.5px;color:var(--dim)}
 </style>
 
 <div class="wrap">
@@ -750,7 +756,7 @@ function drawMis() {
   (CAB.switch_findings || []).filter(f => f.status === 'miscabled').forEach(f => {
     const j = +f.leaf[0].match(/bel(\d+)$/)[1], act = f.leaf_actual[0], i = act ? +act[0].match(/bes(\d+)$/)[1] : null;
     const p = i && meshEl[j + ':' + i]; if (p) { const d = p.getAttribute('d'); const hit = el('path', {d, class:'lvhit'}, gMis); el('path', {d, class:'misglow'}, gMis); const v = el('path', {d, class:'misx'}, gMis); v.dataset.l = 'bel' + j; v.dataset.s = 'bes' + i;
-      hit.addEventListener('mousemove', e => { tip.innerHTML = `<b style="color:${CB.mis}">Miscabled · NetBox #${esc(f.cable)}</b><span style="color:${CB.mis}">Current&nbsp;&nbsp;</span> ${esc(endTxt(f.leaf))} ⟷ ${esc(endTxt(act))}<br><span style="color:${CB.ok}">Expected</span> ${esc(endTxt(f.leaf))} ⟷ ${esc(endTxt(f.spine))} <span class="k">(design)</span>`; tip.style.left = Math.min(e.clientX + 16, innerWidth - 380) + 'px'; tip.style.top = (e.clientY + 16) + 'px'; tip.hidden = false; });
+      hit.addEventListener('mousemove', e => { tip.innerHTML = `<b style="color:${CB.mis}">Miscabled · NetBox #${esc(f.cable)}</b><span style="color:${CB.mis}">Current&nbsp;&nbsp;</span> ${esc(endTxt(f.leaf))} ⟷ ${esc(endTxt(act))}<br><span style="color:${CB.ok}">Expected</span> ${esc(endTxt(f.leaf))} ⟷ ${esc(endTxt(f.spine))} <span class="k">(design)</span>${f.master ? `<br><span style="color:${MCOL}">Master&nbsp;&nbsp;</span> ${esc(endTxt(f.leaf))} ⟷ ${esc(endTxt(f.master))} <span class="k">(UFM ${esc(mDate())})</span>` : ''}`; tip.style.left = Math.min(e.clientX + 16, innerWidth - 380) + 'px'; tip.style.top = (e.clientY + 16) + 'px'; tip.hidden = false; });
       hit.addEventListener('mouseleave', () => tip.hidden = true); hit.addEventListener('click', () => pick('bel' + j)); }
     badge('bel' + j); badge(devId(f.spine[0])); if (i) badge('bes' + i);
   });
@@ -767,7 +773,7 @@ const _hot2 = hot; hot = function (id) { _hot2(id);
 const _tip2 = tipFor; tipFor = function (e, id) { _tip2(e, id); const s = slotInfo[id];
   if (s) { const t = s.tray;
     tip.innerHTML = t ? `<b>${esc(t.host ? sh(t.host) : t.code)}</b>${t.host ? esc(t.code) + ' · ' : ''}SU${s.su.su} · slot ${s.slot + 1} · ${t.adapters.length}/4 rails<br><span style="color:${CB[s.style]}">● ${TILE_TXT[s.style]}</span>${t.issues.length ? '<br><span class="k">' + t.issues.slice(0, 3).map(esc).join('<br>') + '</span>' : ''}`
-      : s.unnamed.length ? `<b>SU${s.su.su} · slot ${s.slot + 1}</b><span style="color:${CB.unn}">● ${TILE_TXT.unn}</span><br><span class="k">${esc(s.unnamed[0][4])}</span>` : `<b>SU${s.su.su} · slot ${s.slot + 1}</b><span class="k">empty · no adapter on BEL${s.su.leaves.join('/')} port ${slotLabel(s.slot)}</span>`;
+      : s.unnamed.length ? `<b>SU${s.su.su} · slot ${s.slot + 1}${s.unnamed[0][6] ? ' · ' + esc(sh(s.unnamed[0][6])) + ' (UFM master)' : ''}</b><span style="color:${CB.unn}">● ${TILE_TXT.unn}</span><br><span class="k">${esc(s.unnamed[0][4])}</span>` : `<b>SU${s.su.su} · slot ${s.slot + 1}</b><span class="k">empty · no adapter on BEL${s.su.leaves.join('/')} port ${slotLabel(s.slot)}</span>`;
     tip.style.left = Math.min(e.clientX + 16, innerWidth - 380) + 'px'; tip.style.top = (e.clientY + 16) + 'px'; tip.hidden = false; return; }
   if (CAB && /^(bel|bes)\d+$/.test(id)) { const n = misFor(id).length; if (n) tip.insertAdjacentHTML('beforeend', `<br><span style="color:${CB.mis}">◆ ${n} miscabled cable${n > 1 ? 's' : ''} (UFM vs. design)</span>`); } };
 const slotLabel = slot => `sw${Math.floor(slot/2) + 1}p${slot % 2 + 1}`;
@@ -779,17 +785,23 @@ const nbLine = f => { const c = f.cable ? ` (#${f.cable})` : '';
   return f.netbox_state === 'matches-expected' ? `<span style="color:${CB.ok}">✓ NetBox agrees with the design${c}</span>`
     : f.netbox_state === 'matches-current' ? `<span style="color:${CB.warn}">NetBox records the current cabling${c} — correct it to the design</span>`
     : f.netbox_state === 'missing' ? `<span style="color:${CB.ufm}">Not in NetBox</span>` : `<span style="color:${CB.warn}">NetBox shows ${esc(endTxt(f.leaf))} ⟷ ${esc(endTxt(f.netbox))}${c}</span>`; };
+const MCOL = '#9aa8bb';
+const mDate = () => CAB && CAB.master ? new Date(CAB.master.saved_at).toLocaleDateString('en-GB', {day:'2-digit', month:'short', year:'numeric', timeZone:'UTC'}) : '';
+const masterLine = f => !CAB || !CAB.master ? '' : f.master ? `<div class="mrl"><span class="mrk" style="--c:${MCOL}">Master · ${esc(mDate())}</span>${connHtml(f.leaf, f.master, MCOL)}</div>` : `<div class="mrl"><span class="mrk" style="--c:${MCOL}">Master · ${esc(mDate())}</span><span class="small">not in UFM's master topology</span></div>`;
+const masterVerdict = f => !CAB || !CAB.master ? '' : f.master_state === 'matches-current' ? `<span style="color:${CB.warn}">⚑ Already like this in UFM's master (${esc(mDate())}): UFM's own Topology Compare treats it as correct and does not flag it.</span>`
+  : f.master_state === 'matches-expected' ? `<span style="color:${CB.mis}">⚑ Changed since UFM's master (${esc(mDate())}), which still had the expected connection.</span>`
+  : f.master_state === 'missing' ? `<span class="small">Not in UFM's master (added after ${esc(mDate())}).</span>` : f.master_state === 'differs' ? `<span style="color:${CB.warn}">⚑ UFM's master shows a third, different far end.</span>` : '';
 const misFor = id => (CAB ? CAB.switch_findings : []).filter(f => f.status === 'miscabled' && (devId(f.leaf[0]) === id || devId(f.spine[0]) === id || (f.leaf_actual[0] && devId(f.leaf_actual[0][0]) === id)));
 const pill = (c, t) => `<span class="lpill" style="--c:${c}"><i></i>${t}</span>`;
 const stTxt = s => s === 'ok' ? pill(CB.ok, 'Active') : s === 'init' ? pill(CB.warn, 'initializing') : pill(CB.err, esc(s));
 function trayHtml(s) { const t = s.tray, su = s.su;
   if (!t) return `<div class="role" style="color:${CB[s.style]}">SU${su.su} · slot ${s.slot + 1} · port ${slotLabel(s.slot)}</div><h2>${s.unnamed.length ? 'Unnamed adapter' : 'Empty slot'}</h2>
     <p class="small" style="margin:0">${s.unnamed.length ? 'UFM sees an adapter here but it has no node description, so the tray cannot be identified. Set the node description on the host (for example via the OS hostname service) and refetch the scan.' : 'No adapter is connected on this port of the SU’s four leaves.'}</p>
-    ${s.unnamed.length ? tbl(['Rail', 'Leaf', 'Port', 'Adapter as UFM sees it', 'State'], s.unnamed.map(u => [pill(R[u[1] - 1], 'R' + u[1]), lk('bel' + u[2], 'BEL' + u[2]), u[3], esc(u[4]), stTxt(u[5])])) : ''}`;
+    ${s.unnamed.length && s.unnamed.some(u => u[6]) ? `<div class="live-sum" style="--c:${MCOL}"><b>UFM's master (${esc(mDate())}) names this tray: ${esc(sh(s.unnamed.find(u => u[6])[6]).toUpperCase())}</b><br><span class="small">The host has since lost its adapter node description; setting it again lets UFM identify the tray.</span></div>` : ''}${s.unnamed.length ? tbl(['Rail', 'Leaf', 'Port', 'Adapter as UFM sees it', 'State'], s.unnamed.map(u => [pill(R[u[1] - 1], 'R' + u[1]), lk('bel' + u[2], 'BEL' + u[2]), u[3], esc(u[4]), stTxt(u[5])])) : ''}`;
   const m = t.code.match(/^(.*)-T(\d+)$/);
   return `<div class="role" style="color:${CB[s.style]}">GPU tray · SU${su.su} · slot ${s.slot + 1}</div><h2>${esc(t.host ? sh(t.host).toUpperCase() : t.code)}</h2>
     <div class="live-sum" style="--c:${CB[s.style]}"><b>${TILE_TXT[s.style]}</b>${t.issues.length ? '<br>' + t.issues.map(esc).join('<br>') : ''}</div>
-    <dl class="kv"><dt>UFM name</dt><dd>${esc(t.code)}</dd><dt>Rack / tray</dt><dd>${esc(m ? m[1] : '?')} · tray ${esc(m ? +m[2] : '?')}</dd><dt>NetBox</dt><dd>${t.host ? esc(t.host) : `<span style="color:${CB.ufm}">not in NetBox</span>`}</dd><dt>Leaf port</dt><dd>${slotLabel(s.slot)} on BEL${su.leaves.join(' / ')}</dd></dl>
+    <dl class="kv"><dt>UFM name</dt><dd>${esc(t.code)}</dd><dt>Rack / tray</dt><dd>${esc(m ? m[1] : '?')} · tray ${esc(m ? +m[2] : '?')}</dd><dt>NetBox</dt><dd>${t.host ? esc(t.host) : `<span style="color:${CB.ufm}">not in NetBox</span>`}</dd>${CAB.master ? `<dt>UFM master</dt><dd>${t.in_master ? (t.master_host ? esc(t.master_host) : 'present (no host name)') : `<span class="small">not in the master · added after ${esc(mDate())}</span>`}</dd>` : ''}<dt>Leaf port</dt><dd>${slotLabel(s.slot)} on BEL${su.leaves.join(' / ')}</dd></dl>
     ${tbl(['Rail', 'Leaf', 'Port', 'Adapter', 'UFM', 'NetBox'], [1, 2, 3, 4].map(r => { const a = t.adapters.find(x => x[0] === r);
       return a ? [pill(R[r - 1], 'R' + r), lk('bel' + a[1], 'BEL' + a[1]), a[2], esc(a[3]) + (a[7] ? ` <span class="small">${esc(a[7])}</span>` : ''), stTxt(a[5]) + ` <span class="small">${a[4]}/4</span>`, a[6] ? cableRef(a[6]) : `<span style="color:${CB.ufm}">missing</span>`]
         : [pill(R[r - 1], 'R' + r), lk('bel' + su.leaves[r - 1], 'BEL' + su.leaves[r - 1]), slotLabel(s.slot), '—', pill(CB.err, 'no link'), '—']; }))}
@@ -806,7 +818,7 @@ const _insp2 = inspect; inspect = function (id) {
       const lab = dg.previousElementSibling; if (lab) lab.innerHTML = `Downlinks sw1–36 · lanes p1 / p2 · <span style="color:${R[d.rail - 1]}">■</span> in NetBox <span style="color:${CB.ufm}">■</span> UFM only <span style="color:${CB.unn}">■</span> unnamed`; } } }
   const mis = misFor(id), box = document.createElement('div'); box.className = 'live-sum'; box.style.setProperty('--c', mis.length ? CB.mis : CB.ok);
   let html = `<b>${mis.length ? `◆ ${mis.length} miscabled cable${mis.length > 1 ? 's' : ''} (UFM vs. design)` : 'Cabling matches NetBox (UFM)'}</b>`;
-  mis.forEach(f => { html += `<div class="misi">${cableRef(f.cable)}<div><span class="mrk" style="--c:${CB.mis}">Current</span>${connHtml(...misCur(f), CB.mis)}</div><div><span class="mrk" style="--c:${CB.ok}">Expected</span>${connHtml(...misExp(f), CB.ok)}</div><div class="small">${nbLine(f)}</div></div>`; });
+  mis.forEach(f => { html += `<div class="misi">${cableRef(f.cable)}<div><span class="mrk" style="--c:${CB.mis}">Current</span>${connHtml(...misCur(f), CB.mis)}</div><div><span class="mrk" style="--c:${CB.ok}">Expected</span>${connHtml(...misExp(f), CB.ok)}</div>${f.master ? `<div><span class="mrk" style="--c:${MCOL}">Master</span>${connHtml(f.leaf, f.master, MCOL)}</div>` : ''}<div class="small">${nbLine(f)}${f.master_state === 'matches-current' ? ` · <span style="color:${CB.warn}">already in UFM's master (${esc(mDate())})</span>` : ''}</div></div>`; });
   if (id.startsWith('bel')) { const j = +id.slice(3), su = CAB.sus.find(x => x.leaves.includes(j)); if (su) { const r = su.leaves.indexOf(j) + 1, trs = su.trays.filter(t => t.adapters.some(a => a[1] === j));
     const doc = trs.filter(t => t.adapters.some(a => a[1] === j && a[6])).length;
     html += `<br>GPU downlinks seen by UFM: <b style="color:var(--fg)">${trs.length + su.unnamed.filter(u => u[2] === j).length}</b> · rail ${r} of SU${su.su} · ${doc} in NetBox${trs.length - doc ? ` · <span style="color:${CB.ufm}">${trs.length - doc} missing in NetBox</span>` : ''}${su.unnamed.filter(u => u[2] === j).length ? ` · ${su.unnamed.filter(u => u[2] === j).length} unnamed` : ''}`; } }
@@ -820,7 +832,7 @@ function renderCab(err) {
   const box = document.getElementById('cab-body'), meta = document.getElementById('cab-meta');
   if (!CAB) { meta.textContent = ''; box.innerHTML = `<div class="cab-empty"><b>No UFM fabric scan loaded yet.</b> ${err ? esc(err) + '<br>' : ''}This check compares every NetBox cable with what UFM actually sees. To load UFM's latest scan (read-only), run in the project folder:<br><code>./scripts/fetch_ufm_scan.sh</code><br>then reload this page. ${SERVICE ? '' : 'Open the dashboard through <code>netbox_live_sync.py</code> to use it.'}</div>`; return; }
   const S = CAB.summary, src = CAB.source;
-  meta.innerHTML = `UFM scan <b>${esc(fmtTime(src.scanned_at))}</b> · ${num(src.lanes)} link lanes · ${esc(src.tool || 'ibdiagnet')} &nbsp; <a class="btn" href="/api/cabling/findings.csv">⬇ Findings CSV</a> <a class="btn" href="/api/cabling/netbox-import.csv">⬇ NetBox import CSV</a>`;
+  meta.innerHTML = `<span class="refs"><span><i style="background:${CB.ok}"></i><b>Expected</b> design topology (expected_topology.csv)</span><span><i style="background:${CB.mis}"></i><b>Current</b> UFM scan ${esc(fmtTime(src.scanned_at))} · ${num(src.lanes)} lanes</span>${CAB.master ? `<span><i style="background:${MCOL}"></i><b>Master</b> UFM master topology saved ${esc(mDate())} ${esc(CAB.master.saved_at.slice(11, 16))} UTC</span>` : '<span class="small">no UFM master topology loaded</span>'}<span><i style="background:${CB.ufm}"></i><b>NetBox</b> for reference</span></span> &nbsp; <a class="btn" href="/api/cabling/findings.csv">⬇ Findings CSV</a> <a class="btn" href="/api/cabling/netbox-import.csv">⬇ NetBox import CSV</a>`;
   const tile = (c, n, t, sub) => `<div class="cabt" style="--c:${c}"><b>${n}</b><span>${t}</span>${sub ? `<small>${sub}</small>` : ''}</div>`;
   const att = CAB.sus.reduce((n, su) => n + su.trays.filter(t => t.status !== 'ok').length, 0);
   let h = `<div class="cabtiles">
@@ -842,7 +854,8 @@ function renderCab(err) {
         <div class="misrows">${fs.map(f => `<div class="misrow"><div class="mrc">${cableRef(f.cable)}<small>${esc(f.leaf[1])}</small></div>
           <div class="mrl"><span class="mrk" style="--c:${CB.mis}">Current · UFM</span>${connHtml(...misCur(f), CB.mis)}</div>
           <div class="mrl"><span class="mrk" style="--c:${CB.ok}">Expected · design</span>${connHtml(...misExp(f), CB.ok)}</div>
-          <div class="mrfix">${esc(misFix(f))} &nbsp;${nbLine(f)}</div></div>`).join('')}</div>
+          ${masterLine(f)}
+          <div class="mrfix">${esc(misFix(f))} &nbsp;${nbLine(f)}${masterVerdict(f) ? '<br>' + masterVerdict(f) : ''}</div></div>`).join('')}</div>
         <p class="small"><b>Quickest fix:</b> ${cages.length === 2 ? `swap the cables in ${cages[0]} and ${cages[1]} on ${devId(leaf).toUpperCase()} (both lanes p1 and p2). That restores all ${fs.length} expected connections.` : 're-patch each cable as listed.'} ${fs.every(f => f.netbox_state === 'matches-expected') ? 'NetBox already matches the design, so no NetBox change is needed.' : 'Then correct the NetBox records flagged above.'}</p></div>`; });
     h += `</div>`; }
   h += `<h4>2 · GPU trays by scalable unit</h4><p class="small">Each SU uses one leaf from each rail; every tray lands its four RDMA ports on the same port of those four leaves. Bars: <span style="color:${CB.ok}">■</span> in NetBox <span style="color:${CB.ufm}">■</span> UFM only <span style="color:${CB.warn}">■</span> attention <span style="color:${CB.unn}">■</span> unnamed <span style="color:#34405a">■</span> empty</p>
@@ -853,10 +866,20 @@ function renderCab(err) {
   const attn = []; CAB.sus.forEach(su => su.trays.forEach(t => { if (t.status !== 'ok') attn.push([su, t]); }));
   h += `<h4>3 · Trays needing attention</h4>` + (attn.length ? tbl(['Tray', 'SU · slot', 'NetBox host', 'What UFM shows'], attn.map(([su, t]) => [`<span class="peer" data-id="tray:${esc(t.code)}">${esc(t.code)}</span>`, `SU${su.su} · ${t.slot + 1}`, t.host ? esc(sh(t.host)) : `<span style="color:${CB.ufm}">not in NetBox</span>`, t.issues.map(esc).join('<br>')])) : '<p class="small">None.</p>');
   const other = CAB.switch_findings.filter(f => f.status !== 'miscabled');
-  h += `<h4>4 · Links not fully Active, or NetBox differs from the design</h4>` + (other.length || CAB.gpu_not_seen.length ? tbl(['Status', 'Cable', 'Leaf', 'Far end', 'Planes'], [...other.map(f => [f.status === 'init' ? pill(CB.warn, 'initializing') : f.status === 'netbox-differs' ? pill(CB.warn, 'NetBox differs') : pill(CB.err, esc(f.status)), cableRef(f.cable), `${lk(devId(f.leaf[0]), sh(f.leaf[0]).toUpperCase())} ${esc(f.leaf[1])}`, `${esc(sh(f.spine[0]).toUpperCase())} ${esc(f.spine[1])}`, f.planes + '/4']),
+  h += `<h4>4 · Links not fully Active, or NetBox differs from the design</h4>` + (other.length || CAB.gpu_not_seen.length ? tbl(['Status', 'Cable', 'Leaf', 'Far end', 'Planes'], [...other.map(f => [f.status === 'init' ? pill(CB.warn, 'initializing') : f.status === 'netbox-differs' ? pill(CB.warn, 'NetBox differs') : f.status === 'changed-since-master' ? pill(MCOL, 'changed since master') : pill(CB.err, esc(f.status)), cableRef(f.cable), `${lk(devId(f.leaf[0]), sh(f.leaf[0]).toUpperCase())} ${esc(f.leaf[1])}`, `${esc(sh(f.spine[0]).toUpperCase())} ${esc(f.spine[1])}`, f.planes + '/4']),
     ...CAB.gpu_not_seen.map(x => [pill(CB.err, 'not seen'), cableRef(x.cable), `${lk(devId(x.leaf), sh(x.leaf).toUpperCase())} ${esc(x.port)}`, `${esc(sh(x.host))} ${esc(x.rdma)}`, '0/4'])]) : '<p class="small">None.</p>');
   const un = []; CAB.sus.forEach(su => su.unnamed.forEach(u => un.push([su, u])));
-  h += `<details class="cabdet"><summary>5 · Adapters without a name (${un.length})</summary><p class="small">These ports face an adapter whose node description is unset (default <code>MT4131 ConnectX8</code> or a UUID), so UFM cannot say which tray it is. Set the node description on those hosts, then refetch the scan.</p>${tbl(['SU', 'Leaf', 'Port', 'Adapter'], un.map(([su, u]) => [`SU${su.su}`, lk('bel' + u[2], 'BEL' + u[2]), u[3], esc(u[4])]))}</details>`;
+  h += `<details class="cabdet"><summary>5 · Adapters without a name (${un.length})</summary><p class="small">These ports face an adapter whose node description is unset (default <code>MT4131 ConnectX8</code> or a UUID), so UFM cannot say which tray it is. Set the node description on those hosts, then refetch the scan.</p>${tbl(['SU', 'Leaf', 'Port', 'Adapter', 'Host in UFM master'], un.map(([su, u]) => [`SU${su.su}`, lk('bel' + u[2], 'BEL' + u[2]), u[3], esc(u[4]), u[6] ? `<b>${esc(sh(u[6]))}</b>` : '<span class="small">—</span>']))}</details>`;
+  if (CAB.master) { const M = CAB.master, U = CAB.ufm_compare;
+    h += `<h4>6 · UFM master topology (baseline)</h4><div class="mastergrid">
+      <div><b>${esc(mDate())}</b><span>master saved in UFM</span><small>${esc(CAB.master.saved_at.slice(11, 16))} UTC · periodicTopo/master.topo · UFM copies it to fabric.topo nightly and compares against it</small></div>
+      <div><b>${num(M.switch_links)}</b><span>leaf–spine cables in the master</span><small>${num(M.agree_all_three)} agree in design, master and current</small></div>
+      <div><b style="color:${M.switch_matches_current_not_design ? CB.warn : CB.ok}">${num(M.switch_matches_current_not_design)}</b><span>already wrong in the master</span><small>same as today, not as designed</small></div>
+      <div><b>${num(M.changed_since_master)}</b><span>leaf–spine changes since the master</span><small>${M.gpu_ports_gone} GPU ports gone since then</small></div>
+      <div><b>${num(M.gpu_hosts)}</b><span>GPU hosts in the master</span><small>${num(M.gpu_ports)} ports · UFM now sees ${num(S.trays)} trays</small></div>
+      <div><b>${num(M.named_unnamed)}</b><span>unnamed adapters named by the master</span><small>of ${num(S.unnamed_adapters)} without a node description</small></div></div>
+      ${U ? `<p class="small" style="margin-top:10px"><b>UFM's own Topology Compare</b> (${esc(U.date)}): <span style="color:${CB.err}">${esc(U.status)}</span>. It compares only against its master, so it reports the build-out since ${esc(mDate())}, not cabling errors:</p>${tbl(['What UFM reports', 'Items'], (U.categories || []).map(([k, n]) => [esc(k), num(n)]))}<p class="small">It reports nothing about the ${S.switch_miscabled} miscabled cables, because they are already in its master.</p>` : ''}
+      <p class="small"><b>Recommendation:</b> after re-patching ${[...new Set(CAB.switch_findings.filter(f => f.status === 'miscabled').map(f => sh(f.leaf[0]).toUpperCase()))].join(' and ') || 'the miscabled cables'}, save a new master topology in UFM. UFM's nightly compare then checks every tray, and any later change shows up there as well as here.</p>`; }
   h += `<details class="cabdet"><summary>How this is checked</summary><p class="small">UFM writes a fabric scan (<code>ibdiagnet2.lst</code>) listing every link lane with both ends. Each Q3400 is four chips (one per plane), so every 800G cable is four 200G lanes on the same port; port numbers are hex and NVOS <code>swNpM</code> = 2·(N−1)+M. The reference is the design topology in <code>assets/expected_topology.csv</code> (rules in <code>scripts/build_expected_topology.py</code>: leaf <i>j</i> <code>sw(36+i)pM</code> ⟷ spine <i>i</i> <code>sw(j)pM</code>; each SU takes the k-th leaf of every rail; a tray uses the same port on its four leaves, rail <i>r</i> on <code>mlx5_(r−1)</code>). A cable is “as designed” when UFM sees the designed far end on that port; NetBox is compared separately; trays are named <code>rack-Ttray</code> by UFM and matched to NetBox hosts through the NetBox cables on their adapters. Chips’ internal links, SHARP aggregation nodes and UFM’s own links are left out.</p></details>`;
   box.innerHTML = h;
 }

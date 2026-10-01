@@ -106,6 +106,97 @@ def read_lanes(path: Path) -> tuple[list[tuple], dict]:
     return lanes, meta
 
 
+TOPO_HEAD = re.compile(r"^(\S+)\s+(\S+)\s*$")
+TOPO_LINK = re.compile(r"^\s+(\S+)\s+-\d+x-[^>]*->\s+(\S+)\s+(\S+)\s+(\S+)")
+TOPO_SWPORT = re.compile(r"^U(\d+)/P(\d+)$")
+
+
+def read_master(path: Path) -> dict:
+    """UFM's master (reference) topology, an IBDM .topo file (plain or gzip).
+
+    UFM's own Topology Compare uses it as the truth (it is copied to
+    /opt/ufm/data/fabric.topo nightly). Ports here are decimal: U<chip>/P<n>.
+    Returns leaf-port -> far end for switch links, leaf-port -> (host, adapter) for GPUs.
+    """
+    switch, gpu, lanes = {}, {}, 0
+    node = None
+    with open_scan(path) as handle:
+        for line in handle:
+            if not line.strip() or line.startswith("#"):
+                continue
+            if not line[0].isspace():
+                m = TOPO_HEAD.match(line)
+                node = (m.group(1), m.group(2)) if m else None
+                continue
+            m = TOPO_LINK.match(line)
+            if not m or not node:
+                continue
+            lanes += 1
+            lport, rtype, rname, rport = m.groups()
+            here_sw, there_sw = node[0].startswith("Q"), rtype.startswith("Q")
+            lm, rm = TOPO_SWPORT.match(lport), TOPO_SWPORT.match(rport)
+            if here_sw and there_sw and lm and rm and node[1] != rname:
+                a, b = (node[1], port_label(int(lm.group(2)))), (rname, port_label(int(rm.group(2))))
+                for x, y in ((a, b), (b, a)):
+                    if leaf_no(x[0]) is not None:
+                        switch[x] = y
+            elif node[0].startswith("HCA") and there_sw and rm and not UFM_HOST.search(node[1]):
+                gpu[(rname, port_label(int(rm.group(2))))] = (node[1], lport.split("/")[0])
+    hosts = sorted({h for h, _ in gpu.values()})
+    return {"switch": switch, "gpu": gpu, "lanes": lanes, "hosts": hosts,
+            "saved_at": datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).isoformat(timespec="seconds"), "file": str(path)}
+
+
+def read_ufm_compare(path: Path) -> dict:
+    """Summary of UFM's own Topology Compare report (JSON): date, verdict, counts by kind."""
+    import json
+    with open_scan(path) as handle:
+        data = json.load(handle)
+    items = []
+
+    def walk(obj):
+        if isinstance(obj, dict):
+            if "Detected Differences" in obj:
+                items.append((obj.get("Severity", ""), str(obj["Detected Differences"]).strip()))
+            for value in obj.values():
+                walk(value)
+        elif isinstance(obj, list):
+            for value in obj:
+                walk(value)
+    walk(data)
+    kinds = collections.Counter()
+    for severity, text in items:
+        key = re.sub(r"0x[0-9a-fA-F]+|[0-9a-fA-F]{16}|'[^']*'|\d+", "…", text)[:120]
+        kinds[(severity, key)] += 1
+    status = ""
+    try:
+        status = data["sections"][0]["status"]["value"]
+    except (KeyError, IndexError, TypeError):
+        pass
+    plain = collections.Counter()
+    for severity, text in items:
+        t = text.lower()
+        if t.startswith("total:") or "found mismatches" in t:
+            continue
+        if "unplanned node" in t:
+            plain["nodes not in the master (added after it was saved)"] += 1
+        elif "unplanned cable" in t:
+            plain["cables not in the master (added after it was saved)"] += 1
+        elif "wrong node name" in t:
+            plain["node names that differ from the master"] += 1
+        elif "non-parsible" in t:
+            plain["adapters without a usable node description"] += 1
+        elif "missing" in t:
+            plain["links in the master that are missing now"] += 1
+        elif "wrong" in t or "mismatch" in t:
+            plain["links connected differently from the master"] += 1
+        else:
+            plain["other"] += 1
+    return {"date": data.get("date", ""), "status": status, "items": len(items), "categories": plain.most_common(),
+            "by_severity": dict(collections.Counter(s for s, _ in items)),
+            "top": [[sev, text, n] for (sev, text), n in kinds.most_common(8)]}
+
+
 def load_baseline(connections: Path) -> list[dict]:
     with connections.open(newline="", encoding="utf-8") as handle:
         return list(csv.DictReader(handle))
@@ -117,7 +208,8 @@ def load_expected(path: Path) -> list[dict]:
         return list(csv.DictReader(line for line in handle if not line.startswith("#")))
 
 
-def analyse(scan: Path, baseline: list[dict], expected: list[dict] | None = None) -> dict:
+def analyse(scan: Path, baseline: list[dict], expected: list[dict] | None = None, master: dict | None = None,
+            ufm_compare: dict | None = None) -> dict:
     """Compare UFM's current cabling with the designed topology (or NetBox if no design is given).
 
     NetBox is reported next to each link (agrees with the design / records the current
@@ -200,12 +292,29 @@ def analyse(scan: Path, baseline: list[dict], expected: list[dict] | None = None
             nb_state = "matches-current"
         else:
             nb_state = "differs"
+        m_far = master["switch"].get(tuple(leaf)) if master else None
+        if master is None:
+            m_state = None
+        elif m_far is None:
+            m_state = "missing"
+        elif tuple(m_far) == tuple(spine):
+            m_state = "matches-expected"
+        elif current and tuple(m_far) == current:
+            m_state = "matches-current"
+        else:
+            m_state = "differs"
+        if m_state:
+            counts["master-" + m_state] += 1
+            if current and m_far and tuple(m_far) != current:
+                counts["changed-since-master"] += 1
         counts["switch-" + status] += 1
         if nb_state != "matches-expected":
             counts["netbox-differs"] += 1
-        if status != "ok" or nb_state != "matches-expected":
+        changed_ok = status == "ok" and m_state not in (None, "matches-expected")
+        if status != "ok" or nb_state != "matches-expected" or changed_ok:
             item = pl or ps or {"planes": set(), "logs": set()}
-            switch_findings.append({"status": status if status != "ok" else "netbox-differs", "cable": nb[1] if nb else "",
+            switch_findings.append({"status": status if status != "ok" else ("changed-since-master" if changed_ok and nb_state == "matches-expected" else "netbox-differs"),
+                                    "cable": nb[1] if nb else "", "master": list(m_far) if m_far else None, "master_state": m_state,
                                     "leaf": list(leaf), "spine": list(spine), "leaf_actual": actual,
                                     "spine_actual": sorted({(p[1], p[2]) for p in (ps or {"peers": set()})["peers"] if p[0] == "SW"}),
                                     "netbox": list(nb[0]) if nb else None, "netbox_state": nb_state,
@@ -252,8 +361,10 @@ def analyse(scan: Path, baseline: list[dict], expected: list[dict] | None = None
                                            "nb": nb_gpu.get((dev, label))})
             else:
                 su, pod, rail = su_of_leaf(leaf)
+                known = master["gpu"].get((dev, label)) if master else None
                 unnamed.append({"su": su, "rail": rail, "leaf": leaf, "port": label, "slot": slot_of(label), "adapter": desc,
-                                "state": health(item), "nb": nb_gpu.get((dev, label))})
+                                "state": health(item), "nb": nb_gpu.get((dev, label)),
+                                "master_host": known[0] if known and "-phy-" in known[0] else ""})
     # learn tray -> NetBox host, and rail -> adapter, by majority
     hca_votes = collections.defaultdict(collections.Counter)
     for code, ads in trays.items():
@@ -275,6 +386,9 @@ def analyse(scan: Path, baseline: list[dict], expected: list[dict] | None = None
         hosts = collections.Counter(ad["nb"][0] for ad in ads if ad["nb"])
         host = hosts.most_common(1)[0][0] if hosts else ""
         host_of_tray[code] = host
+        m_hosts = collections.Counter(master["gpu"][("sys1-ice2-p-swi-bel%d" % ad["leaf"], ad["port"])][0] for ad in ads
+                                      if master and ("sys1-ice2-p-swi-bel%d" % ad["leaf"], ad["port"]) in master["gpu"])
+        master_host = m_hosts.most_common(1)[0][0] if m_hosts else ""
         issues = []
         leaves = sorted({ad["leaf"] for ad in ads})
         su_set = {su_of_leaf(l)[0] for l in leaves}
@@ -324,11 +438,12 @@ def analyse(scan: Path, baseline: list[dict], expected: list[dict] | None = None
         gpu_counts["adapters-documented"] += len(documented)
         sus[su]["trays"].append({
             "slot": slot, "code": code, "host": host, "doc": doc, "status": status, "issues": issues,
+            "master_host": master_host if "-phy-" in master_host else "", "in_master": bool(m_hosts),
             "adapters": sorted(([su_of_leaf(ad["leaf"])[2], ad["leaf"], ad["port"], ad["hca"], ad["planes"], ad["state"],
                                  ad["nb"][2] if ad["nb"] else "", hca_rdma.get(ad["hca"], "")] for ad in ads)),
         })
     for item in unnamed:
-        sus[item["su"]]["unnamed"].append([item["slot"], item["rail"], item["leaf"], item["port"], item["adapter"], item["state"]])
+        sus[item["su"]]["unnamed"].append([item["slot"], item["rail"], item["leaf"], item["port"], item["adapter"], item["state"], item["master_host"]])
     for su in sus.values():
         su["trays"].sort(key=lambda t: (t["slot"] if t["slot"] is not None else 99, t["code"]))
         su["unnamed"].sort(key=lambda u: (u[0] if u[0] is not None else 99, u[1]))
@@ -357,11 +472,25 @@ def analyse(scan: Path, baseline: list[dict], expected: list[dict] | None = None
         "gpu_not_seen": len(gpu_not_seen), "unnamed_adapters": len(unnamed),
         "netbox_gpu_cables": len(nb_gpu),
     }
+    master_summary = None
+    if master:
+        seen_now = {(f"sys1-ice2-p-swi-bel{ad['leaf']}", ad["port"]) for ads in trays.values() for ad in ads} | {(f"sys1-ice2-p-swi-bel{u['leaf']}", u["port"]) for u in unnamed}
+        master_summary = {
+            "file": master["file"], "saved_at": master["saved_at"], "lanes": master["lanes"],
+            "switch_links": len(master["switch"]), "gpu_ports": len(master["gpu"]), "gpu_hosts": len(master["hosts"]),
+            "agree_all_three": counts["master-matches-expected"] - sum(1 for f in switch_findings if f["status"] in ("miscabled", "not-seen") and f.get("master_state") == "matches-expected"),
+            "switch_matches_design": counts["master-matches-expected"], "switch_matches_current_not_design": counts["master-matches-current"],
+            "switch_differs": counts["master-differs"], "switch_missing": counts["master-missing"],
+            "changed_since_master": counts["changed-since-master"],
+            "gpu_ports_gone": sum(1 for k in master["gpu"] if k not in seen_now),
+            "named_unnamed": sum(1 for u in unnamed if u["master_host"]),
+        }
     return {
+        "master": master_summary, "ufm_compare": ufm_compare,
         "source": {"file": str(scan), "scanned_at": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(timespec="seconds"),
                    "bytes": stat.st_size, "lanes": len(lanes), "tool": meta["tool"], "unparsed": meta["unparsed"]},
         "summary": summary,
-        "switch_findings": sorted(switch_findings, key=lambda f: ({"miscabled": 0, "not-seen": 1, "down": 2, "init": 3, "degraded": 4, "netbox-differs": 5}.get(f["status"], 9), f["leaf"])),
+        "switch_findings": sorted(switch_findings, key=lambda f: ({"miscabled": 0, "not-seen": 1, "down": 2, "init": 3, "degraded": 4, "netbox-differs": 5, "changed-since-master": 6}.get(f["status"], 9), f["leaf"])),
         "switch_undocumented": sorted(undocumented_switch, key=lambda x: x["a"]),
         "sus": [sus[k] for k in sorted(sus)],
         "gpu_not_seen": gpu_not_seen,
@@ -376,7 +505,8 @@ def findings_csv(report: dict) -> str:
     out = io.StringIO()
     w = csv.writer(out)
     w.writerow(["finding", "netbox_cable_id", "switch", "port", "expected_far_end", "current_far_end_ufm", "planes_up_of_4", "state",
-                "expected_connection", "current_connection_ufm", "netbox_connection", "netbox_vs_expected", "fix_or_note"])
+                "expected_connection", "current_connection_ufm", "netbox_connection", "netbox_vs_expected", "fix_or_note",
+                "master_connection_ufm", "master_vs_expected"])
     end = lambda e: " ".join(e) if e else ""
     for f in report["switch_findings"]:
         current = f["leaf_actual"][0] if f["leaf_actual"] else None
@@ -390,9 +520,10 @@ def findings_csv(report: dict) -> str:
         w.writerow([f["status"], f["cable"], f["leaf"][0], f["leaf"][1], end(f["spine"]),
                     "; ".join(" ".join(x) for x in f["leaf_actual"]), f["planes"], f["state"],
                     "%s <-> %s" % (end(f["leaf"]), end(f["spine"])), ("%s <-> %s" % (end(f["leaf"]), end(current))) if current else "",
-                    ("%s <-> %s" % (end(f["leaf"]), end(nb))) if nb else "", f.get("netbox_state", ""), note])
+                    ("%s <-> %s" % (end(f["leaf"]), end(nb))) if nb else "", f.get("netbox_state", ""), note,
+                    ("%s <-> %s" % (end(f["leaf"]), end(f["master"]))) if f.get("master") else "", f.get("master_state") or ""])
     for x in report["switch_undocumented"]:
-        w.writerow(["switch-link-not-in-netbox", "", x["a"][0], x["a"][1], "", " ".join(x["b"]), x["planes"], x["state"], "", "%s <-> %s" % (end(x["a"]), end(x["b"])), "", "", "not in the design topology"])
+        w.writerow(["switch-link-not-in-netbox", "", x["a"][0], x["a"][1], "", " ".join(x["b"]), x["planes"], x["state"], "", "%s <-> %s" % (end(x["a"]), end(x["b"])), "", "", "not in the design topology", "", ""])
     for su in report["sus"]:
         for t in su["trays"]:
             for rail, leaf, port, hca, planes, state, cid, rdma in t["adapters"]:
@@ -404,13 +535,15 @@ def findings_csv(report: dict) -> str:
                             ("sys1-ice2-p-swi-bel%d %s <-> %s" % (leaf, port, expected)) if expected else "",
                             "sys1-ice2-p-swi-bel%d %s <-> %s %s" % (leaf, port, t["code"], hca),
                             ("sys1-ice2-p-swi-bel%d %s <-> %s %s" % (leaf, port, t["host"], rdma)) if cid else "",
-                            "documented" if cid else "missing", "; ".join(t["issues"])])
-        for slot, rail, leaf, port, adapter, state in su["unnamed"]:
+                            "documented" if cid else "missing", "; ".join(t["issues"]),
+                            ("master host " + t["master_host"]) if t.get("master_host") else "", "in master" if t.get("in_master") else "not in master"])
+        for slot, rail, leaf, port, adapter, state, master_host in su["unnamed"]:
             w.writerow(["gpu-adapter-unnamed", "", "sys1-ice2-p-swi-bel%d" % leaf, port, "", adapter, "", state, "",
-                        "sys1-ice2-p-swi-bel%d %s <-> %s" % (leaf, port, adapter), "", "", "adapter has no node description; tray cannot be identified"])
+                        "sys1-ice2-p-swi-bel%d %s <-> %s" % (leaf, port, adapter), "", "", "adapter has no node description; tray cannot be identified",
+                        ("master host " + master_host) if master_host else "", ""])
     for x in report["gpu_not_seen"]:
         w.writerow(["gpu-not-seen-by-ufm", x["cable"], x["leaf"], x["port"], x["host"] + " " + x["rdma"], "", 0, "",
-                    "%s %s <-> %s %s" % (x["leaf"], x["port"], x["host"], x["rdma"]), "", "%s %s <-> %s %s" % (x["leaf"], x["port"], x["host"], x["rdma"]), "", "no link on this port in UFM"])
+                    "%s %s <-> %s %s" % (x["leaf"], x["port"], x["host"], x["rdma"]), "", "%s %s <-> %s %s" % (x["leaf"], x["port"], x["host"], x["rdma"]), "", "no link on this port in UFM", "", ""])
     return out.getvalue()
 
 
