@@ -4,6 +4,22 @@ This repository contains the shared dashboard HTML, topology snapshot, device in
 
 Every user keeps their own credentials and approved SSH host keys only on their own machine. Never add those files or collected evidence to Git.
 
+## Quick start
+
+From the project directory, complete these steps in order:
+
+```bash
+tsh login
+./scripts/configure_netbox_token.sh
+./scripts/configure_device_access.sh
+./scripts/configure_known_hosts.sh
+python3 app/netbox_live_sync.py \
+  --netbox-url 'https://netbox-prod-europe-west2-netbox.nscale.teleport.sh' \
+  --device-profile "$HOME/.config/idc-automation/device-access.ini"
+```
+
+Then open `http://127.0.0.1:8765/` in a browser. The dashboard, topology, device list, and read-only command file are already included under `assets/`.
+
 ## Prerequisites
 
 - macOS with Python 3, macOS Keychain, and the Teleport CLI (`tsh`).
