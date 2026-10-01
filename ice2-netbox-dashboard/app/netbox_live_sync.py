@@ -9,14 +9,16 @@ also read-only (`nv show interface --output json`).
 Endpoints
 ---------
 GET  /                    the live backend GPU diagram
-GET  /api/live            full live link state for every backend cable
+GET  /api/live            live link state for every designed link in use (switch side)
 GET  /api/health          NetBox reachability + live-evidence summary (never fails hard)
 GET  /api/verify/<id>     one cable: current NetBox record vs. live switch state
 POST /api/refresh         start a read-only collection across the 100 backend switches
 GET  /api/refresh/<run>   collection progress
-POST /api/sync            one-click sync: NetBox cables and device collection, run concurrently
+POST /api/sync            Sync fabric: switch collection + UFM fetch (+ NetBox when its inventory is due)
+POST /api/netbox/refresh  NetBox inventory and cable records only
 GET  /api/sync/<run>      sync progress with per-phase timings
-GET  /api/cabling         NetBox cabling vs. what UFM actually sees (from a local UFM fabric scan)
+GET  /api/cabling         design topology vs. what UFM actually sees (NetBox alongside)
+GET  /api/incidents       ranked fabric incidents
 POST /api/cabling/fetch   read UFM's scan, master topology and compare report directly (via the jump host)
 GET  /api/cabling/fetch/<run>  progress of that fetch
 GET  /api/cabling/findings.csv       every non-OK cabling observation
@@ -171,6 +173,7 @@ class SyncState:
         self.full_every_hours = getattr(opts, "full_netbox_every_hours", 6.0)
         self.device_parallel = getattr(opts, "device_parallel", 10)
         self.fanout = getattr(opts, "fanout", "local")
+        self.netbox_every_hours = getattr(opts, "netbox_every_hours", 24.0)
         self.fields_ok: bool | None = None          # NetBox `fields=` support, learned on first use
         self.nb_cables: dict[str, list | None] = {}  # cable id -> [a_dev, a_port, b_dev, b_port]
         self.nb_full_at: str | None = None
@@ -361,6 +364,7 @@ class SyncState:
         addresses: dict[str, str] = {}
         details: dict[str, dict] = {}
         groups = sorted({(row.get("site", ""), row.get("netbox_role", "")) for row in inventory if row.get("site") and row.get("netbox_role")})
+        bulk_errors: list[str] = []
         for site, role in groups:
             try:
                 path: str | None = "/api/dcim/devices/?site=%s&role=%s&limit=1000" % (quote(site, safe=""), quote(role, safe=""))
@@ -378,7 +382,11 @@ class SyncState:
                             addresses[name] = address
                     path = next_path(page)
             except RuntimeError as error:
+                bulk_errors.append(str(error))
                 print("[netbox-live-sync] bulk address query %s/%s failed, falling back per device: %s" % (site, role, error))
+        if bulk_errors and not addresses:
+            # NetBox is unreachable: do not try 100 per-device lookups first.
+            raise RuntimeError(bulk_errors[-1])
         if addresses:
             self.address_source = "netbox bulk"
         if details:
@@ -428,6 +436,58 @@ class SyncState:
         return len(addresses)
 
     # ---------- live view ----------
+    def live_links(self) -> list[tuple]:
+        """The links Live link state checks: the design topology, with NetBox cable IDs.
+
+        leaf-spine: every designed cable. leaf-GPU: designed GPU ports that are in use
+        (seen by UFM now or before, or documented in NetBox), so empty slots are not
+        reported as down. Falls back to the NetBox cable list without a design file.
+        Rows: (cable_id, type, a_dev, a_port, b_dev, b_port, source)."""
+        design = self.expected_topology if self.expected_topology.is_file() else None
+        try:
+            report = self.cabling()
+        except Exception:
+            report = None
+        key = (design.stat().st_mtime_ns if design else 0, self._cabling[0] if self._cabling else None, len(self.baseline),
+               TRAY_HISTORY.stat().st_mtime_ns if TRAY_HISTORY.is_file() else 0)
+        cached = getattr(self, "_live_links", None)
+        if cached and cached[0] == key:
+            return cached[1]
+        by_port = {}
+        for cid, row in self.baseline.items():
+            for dev, port in ((row["endpoint_a_device"], row["endpoint_a_port"]), (row["endpoint_b_device"], row["endpoint_b_port"])):
+                if "-swi-" in dev:
+                    by_port.setdefault((dev, port), (cid, row))
+        if not design:
+            links = [(cid, r["connection_type"], r["endpoint_a_device"], r["endpoint_a_port"], r["endpoint_b_device"], r["endpoint_b_port"], "netbox")
+                     for cid, r in self.baseline.items()]
+            self._live_links = (key, links)
+            return links
+        in_use = {}
+        for leaf, port, code in (report or {}).get("gpu_ports_seen", []):
+            in_use[(leaf, port)] = code
+        try:
+            for code, h in json.loads(TRAY_HISTORY.read_text()).items():
+                for leaf, port in h.get("ports", []):
+                    in_use.setdefault((leaf, port), code)
+        except (OSError, ValueError):
+            pass
+        links = []
+        with design.open(newline="", encoding="utf-8") as handle:
+            for row in csv.DictReader(line for line in handle if not line.startswith("#")):
+                a = (row["a_device"], row["a_port"])
+                nb = by_port.get(a)
+                cid = nb[0] if nb else ""
+                if row["link_type"] == "leaf-spine":
+                    links.append((cid, "leaf-spine", a[0], a[1], row["b_device"], row["b_port"], "design"))
+                elif row["link_type"] == "leaf-gpu":
+                    if a not in in_use and not (nb and nb[1]["connection_type"] == "leaf-gpu-rdma"):
+                        continue
+                    far = in_use.get(a) or (nb[1]["endpoint_b_device"] if nb and nb[1]["endpoint_a_device"] == a[0] else nb[1]["endpoint_a_device"] if nb else "")
+                    links.append((cid, "leaf-gpu-rdma", a[0], a[1], far or row["b_device"], row["b_port"], "design"))
+        self._live_links = (key, links)
+        return links
+
     def live_view(self, with_incidents: bool = True) -> dict:
         with self.lock:
             live = dict(self.live)
@@ -435,9 +495,10 @@ class SyncState:
         counts = {"active": 0, "init": 0, "down": 0, "other": 0, "not_collected": 0}
         cable_counts = {"active": 0, "init": 0, "down": 0, "unknown": 0}
         exceptions = []
-        for cable_id, row in self.baseline.items():
-            a = live.get((row["endpoint_a_device"], row["endpoint_a_port"]), "not-collected")
-            b = live.get((row["endpoint_b_device"], row["endpoint_b_port"]), "not-collected")
+        links = self.live_links()
+        for cable_id, ctype, a_dev, a_port, b_dev, b_port, _src in links:
+            a = live.get((a_dev, a_port), "not-collected")
+            b = live.get((b_dev, b_port), "not-collected")
             for state in (a, b):
                 if state == "not-collected":
                     counts["not_collected"] += 1
@@ -452,11 +513,7 @@ class SyncState:
             status = link_status([a, b])
             cable_counts[status] += 1
             if status != "active":
-                exceptions.append([
-                    int(cable_id), row["connection_type"], status,
-                    row["endpoint_a_device"], row["endpoint_a_port"], a,
-                    row["endpoint_b_device"], row["endpoint_b_port"], b,
-                ])
+                exceptions.append([int(cable_id) if cable_id else 0, ctype, status, a_dev, a_port, a, b_dev, b_port, b])
         exceptions.sort(key=lambda r: ({"down": 0, "init": 1, "unknown": 2}.get(r[2], 3), r[0]))
         view = {
             "mode": "service",
@@ -465,7 +522,8 @@ class SyncState:
             "served_at": now_iso(),
             "switches_collected": len(switches) or 100,
             "endpoints": {"compared": sum(counts.values()) - counts["not_collected"], **counts},
-            "cables": {"total": len(self.baseline), **cable_counts},
+            "cables": {"total": len(links), **cable_counts},
+            "reference": "design topology" if links and links[0][6] == "design" else "NetBox",
             "exceptions": exceptions,
             "ufm": [],
             "devices": self.known_devices(),
@@ -871,20 +929,55 @@ class SyncState:
         self.save_cable_cache()
         return result
 
-    def start_sync(self) -> dict:
-        """One-click sync: NetBox cable records first, then the read-only device collection."""
+    def netbox_due(self) -> bool:
+        """NetBox is inventory and documentation now: refresh it about once a day."""
+        if self.netbox_every_hours <= 0:
+            return False
+        return not self.nb_synced_at or age_hours(self.nb_synced_at) >= self.netbox_every_hours
+
+    def start_sync(self, kind: str = "fabric") -> dict:
+        """kind="fabric": switch states + UFM (+ NetBox when due). kind="netbox": NetBox only."""
         with self.lock:
             if any(item.get("state") == "running" for item in self.syncs.values()):
                 raise RuntimeError("A sync is already running.")
             run_id = secrets.token_hex(6)
-            self.syncs[run_id] = {"state": "running", "started_at": now_iso(),
-                                  "netbox": {"state": "running"}, "devices": {"state": "pending"}, "timings": {}}
+            if kind == "netbox":
+                phases = {"netbox"}
+            else:
+                phases = {"devices"} | ({"ufm"} if self.ufm_fetch_configured() else set()) | ({"netbox"} if self.netbox_due() else set())
+            skipped = lambda name, why: {"state": "skipped", "reason": why}
+            self.syncs[run_id] = {
+                "state": "running", "kind": kind, "started_at": now_iso(), "timings": {},
+                "devices": {"state": "pending"} if "devices" in phases else skipped("devices", "NetBox-only refresh"),
+                "ufm": {"state": "pending"} if "ufm" in phases else skipped("ufm", "UFM access not set up (scripts/configure_ufm_access.sh)" if kind != "netbox" else "NetBox-only refresh"),
+                "netbox": {"state": "running"} if "netbox" in phases else {"state": "skipped", "reason": "inventory refreshes every %g h" % self.netbox_every_hours,
+                                                                            "synced_at": self.nb_synced_at},
+            }
             self.bump()
-        threading.Thread(target=self.run_sync, args=(run_id,), daemon=True).start()
-        return {"run_id": run_id, "state": "running"}
+        threading.Thread(target=self.run_sync, args=(run_id, phases), daemon=True).start()
+        return {"run_id": run_id, "state": "running", "phases": sorted(phases)}
 
-    def run_sync(self, run_id: str) -> None:
-        """NetBox cable sync and the device phase (address lookup -> collection) run concurrently."""
+    def management_addresses(self, output: Path) -> int:
+        """IPs from NetBox (or its fresh cache); if NetBox is unreachable, the last known IPs."""
+        try:
+            return self.fetch_management_addresses(output)
+        except Exception as error:
+            if not ADDRESS_CACHE.is_file():
+                raise
+            with ADDRESS_CACHE.open(newline="", encoding="utf-8") as handle:
+                cached = {r["hostname"]: r["management_address"] for r in csv.DictReader(handle) if r.get("management_address")}
+            with self.devices.open(newline="", encoding="utf-8-sig") as handle:
+                names = [r["hostname"].strip() for r in csv.DictReader(handle) if (r.get("hostname") or "").strip()]
+            if not all(n in cached for n in names):
+                raise
+            self.write_addresses(output, names, cached)
+            when = datetime.fromtimestamp(ADDRESS_CACHE.stat().st_mtime, timezone.utc).isoformat(timespec="minutes")
+            self.address_source = "cached IPs from %s (NetBox unavailable: %s)" % (when, str(error).split(" after ")[0][:80])
+            return len(names)
+
+    def run_sync(self, run_id: str, phases: set | None = None) -> None:
+        """Phases run concurrently: switch collection, UFM fetch, NetBox inventory."""
+        phases = phases if phases is not None else {"devices", "netbox"}
         record = self.syncs[run_id]
         timings = record.setdefault("timings", {})
         t0 = time.monotonic()
@@ -897,15 +990,16 @@ class SyncState:
                                     "missing": len(nb["missing"]), "mode": nb["mode"], "changed": nb["changed"],
                                     "requests": nb["requests"], "fields_trimmed": nb["fields_trimmed"]}
             except Exception as error:
-                record["netbox"] = {"state": "failed", "error": str(error)}
+                record["netbox"] = {"state": "failed", "error": str(error), "synced_at": self.nb_synced_at}
             timings["netbox_s"] = round(time.monotonic() - start, 1)
 
         def device_phase() -> None:
             start = time.monotonic()
+            record["devices"] = {"state": "running"}
             try:
                 STATE_DIR.mkdir(exist_ok=True)
                 address_file = STATE_DIR / (run_id + "-management-addresses.csv")
-                count = self.fetch_management_addresses(address_file)
+                count = self.management_addresses(address_file)
                 timings["addresses_s"] = round(time.monotonic() - start, 1)
                 record["devices"] = {"state": "running", "management_addresses": count, "address_source": self.address_source}
             except Exception as error:
@@ -923,18 +1017,45 @@ class SyncState:
                 address_file.unlink(missing_ok=True)
                 timings["devices_s"] = round(time.monotonic() - start, 1)
 
-        phases = [threading.Thread(target=netbox_phase, daemon=True), threading.Thread(target=device_phase, daemon=True)]
-        for phase in phases:
-            phase.start()
-        for phase in phases:
-            phase.join()
-        ok = [record["netbox"]["state"], record["devices"]["state"]]
-        record["state"] = "complete" if all(s == "complete" for s in ok) else "partial" if any(s in ("complete", "partial") for s in ok) else "failed"
+        def ufm_phase() -> None:
+            start = time.monotonic()
+            try:
+                running = [k for k, r in self.ufm_fetches.items() if r["state"] == "running"]
+                fetch_id = running[0] if running else self.start_ufm_fetch()["run_id"]
+                while self.ufm_fetches[fetch_id]["state"] == "running":
+                    record["ufm"] = {k: v for k, v in self.ufm_fetches[fetch_id].items() if k != "thread"}
+                    time.sleep(0.5)
+                record["ufm"] = {k: v for k, v in self.ufm_fetches[fetch_id].items() if k != "thread"}
+            except Exception as error:
+                record["ufm"] = {"state": "failed", "error": str(error)}
+            timings["ufm_s"] = round(time.monotonic() - start, 1)
+
+        work = {"netbox": netbox_phase, "devices": device_phase, "ufm": ufm_phase}
+        threads = [threading.Thread(target=work[name], daemon=True) for name in sorted(phases)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        # NetBox is inventory: its failure does not fail a fabric sync (the last copy stays in use).
+        core = [name for name in ("devices", "ufm") if name in phases] or ["netbox"]
+        states = [record[name]["state"] for name in core]
+        record["state"] = "complete" if all(x == "complete" for x in states) else "partial" if any(x in ("complete", "partial") for x in states) else "failed"
         timings["total_s"] = round(time.monotonic() - t0, 1)
         record["finished_at"] = now_iso()
         with self.lock:
             self.bump()
-        print("[netbox-live-sync] sync %s %s in %.1fs %s" % (run_id, record["state"], timings["total_s"], timings))
+        print("[netbox-live-sync] %s sync %s %s in %.1fs %s" % (record.get("kind", "fabric"), run_id, record["state"], timings["total_s"], timings))
+
+    def netbox_schedule(self) -> None:
+        """Keep NetBox inventory fresh in the background (first check one minute after start)."""
+        time.sleep(60)
+        while True:
+            if self.netbox_due() and not any(r.get("state") == "running" for r in self.syncs.values()):
+                try:
+                    print("[netbox-live-sync] background NetBox refresh:", self.start_sync("netbox"))
+                except RuntimeError as error:
+                    print("[netbox-live-sync] background NetBox refresh skipped:", error)
+            time.sleep(1800)
 
     def sync_status(self, run_id: str) -> dict:
         item = self.syncs.get(run_id)
@@ -1212,7 +1333,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         path = urlparse(self.path).path
-        actions = {"/api/refresh": self.state.start_refresh, "/api/sync": self.state.start_sync, "/api/cabling/fetch": self.state.start_ufm_fetch}
+        actions = {"/api/refresh": self.state.start_refresh, "/api/sync": self.state.start_sync, "/api/cabling/fetch": self.state.start_ufm_fetch,
+                   "/api/netbox/refresh": lambda: self.state.start_sync("netbox")}
         if path not in actions:
             self.respond(HTTPStatus.NOT_FOUND, {"error": "Not found"})
             return
@@ -1251,7 +1373,9 @@ def main() -> int:
     tuning.add_argument("--full-netbox-every-hours", type=float, default=6.0, help="Between full cable syncs, sync only cables in the NetBox change log.")
     tuning.add_argument("--ufm-fetch-every-minutes", type=float, default=0,
                         help="Fetch UFM's fabric files in the background on this interval (0 = only with the Fetch from UFM button).")
-    tuning.add_argument("--sync-every-minutes", type=float, default=0, help="Run the full sync in the background on this interval (0 = on demand only).")
+    tuning.add_argument("--sync-every-minutes", type=float, default=0, help="Run the fabric sync (switches + UFM) in the background on this interval (0 = on demand only).")
+    tuning.add_argument("--netbox-every-hours", type=float, default=24.0,
+                        help="Refresh NetBox inventory (IPs, models, cable records) in the background this often; 0 = only with Refresh NetBox.")
     args = parser.parse_args()
     if not 1 <= args.device_parallel <= 25:
         raise SystemExit("--device-parallel must be between 1 and 25")
@@ -1262,6 +1386,8 @@ def main() -> int:
         threading.Thread(target=Handler.state.ufm_schedule, args=(args.ufm_fetch_every_minutes,), daemon=True).start()
     if args.sync_every_minutes > 0:
         threading.Thread(target=Handler.state.schedule, args=(args.sync_every_minutes,), daemon=True).start()
+    if args.netbox_every_hours > 0:
+        threading.Thread(target=Handler.state.netbox_schedule, daemon=True).start()
     Handler.diagram = args.diagram
     server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     print("Live evidence: %s" % Handler.state.source)

@@ -1,11 +1,12 @@
 # ICE2 NetBox + live device dashboard
 
-A local, read-only dashboard for the ICE2 backend InfiniBand fabric: 36 spines, 64 leaves and the GPU trays. It compares two sources:
+A local, read-only dashboard for the ICE2 backend InfiniBand fabric: 36 spines, 64 leaves and the GPU trays. It checks the fabric against the **design topology** (`assets/expected_topology.csv`) using:
 
-- **NetBox**, which says what *should* be cabled.
-- **The switches**, which say what is actually up right now (`nv show interface --output json`).
+- **The switches**, which say which ports are up right now (`nv show interface --output json`).
+- **UFM**, which says where every cable actually lands (live links or its fabric scan).
+- **NetBox**, as inventory (management IPs, models) and as a record to keep correct. It is shown for comparison, not used as the truth.
 
-Every link in the diagram is coloured by its live state, and one **Sync** button refreshes both sources.
+One **⟳ Sync fabric** button collects the switches and fetches from UFM. NetBox refreshes in the background about once a day, or with **Refresh NetBox**.
 
 - **Read-only.** Nothing is ever written to NetBox or to a device.
 - **Secrets stay on your Mac.** Your NetBox token and switch password are kept in your own macOS Keychain. They never reach the browser or this repository.
@@ -232,15 +233,16 @@ The terminal prints `Open http://127.0.0.1:8765/`. In a **second** terminal you 
 curl -s http://127.0.0.1:8765/api/health; echo        # expect "netbox": "reachable"
 ```
 
-Open **http://127.0.0.1:8765/** in a browser and press **⟳ Sync NetBox + devices**. The first sync does a **full** NetBox pull, so it takes longer than later ones. A successful result looks like this:
+Open **http://127.0.0.1:8765/** in a browser and press **⟳ Sync fabric**. The first sync also does a **full** NetBox pull, because there is no inventory yet. A successful result looks like this:
 
 ```
-NetBox  complete · full · 5,424 cables · 0 differ · 0 missing · 25 API calls
-Devices complete · 100 switches · 14,500 IB ports · 33.4 s · IPs: netbox bulk
-Sync complete in 34.2 s   NetBox … ‖ IPs … ‖ devices …
+Switches complete · 100 switches · 14,500 IB ports · 33.4 s · IPs: netbox bulk
+UFM      complete · live links from 10.1.67.190 · 8 miscabled · 1,120 trays     (or "skipped" until 4.9 is done)
+NetBox   complete · full · 5,424 cables · 0 differ · 0 missing · 25 API calls
+Sync complete in 34.2 s   devices … ‖ IPs … ‖ UFM … ‖ NetBox …
 ```
 
-From the second sync onwards, the NetBox step should say **incremental** and need only about 2 API calls. If it still says **full**, your token cannot read the change log (see [section 2](#2-request-access)).
+Later syncs show **NetBox skipped · inventory refreshes every 24 h**. Press **Refresh NetBox** after someone fixes NetBox records; it should say **incremental** and need only about 2 API calls. If it always says **full**, your token cannot read the change log (see [section 2](#2-request-access)).
 
 Setup is done.
 
@@ -288,7 +290,9 @@ python3 app/netbox_live_sync.py \
   --fanout jump --device-parallel 15 --sync-every-minutes 15
 ```
 
-Then open **http://127.0.0.1:8765/** and press **Sync**. With `--sync-every-minutes 15`, the service also syncs by itself every 15 minutes. The first automatic sync runs 15 minutes after start.
+Then open **http://127.0.0.1:8765/** and press **⟳ Sync fabric**. With `--sync-every-minutes 15`, the service also syncs the switches and UFM by itself every 15 minutes (the first automatic sync runs 15 minutes after start). NetBox refreshes by itself once a day (`--netbox-every-hours`), starting a minute after the service starts if the last refresh is older than that.
+
+**If NetBox is down,** the fabric sync still works: switch IPs come from the last good copy (the step says `IPs: cached IPs from …`), and the NetBox step shows the error and keeps the previous inventory.
 
 Always open the dashboard at this local address. Opened as a `file://` page, it shows only its saved snapshot and Sync cannot run.
 
@@ -332,7 +336,7 @@ Sync complete in 34.2 s   NetBox 1.0 s ‖ IPs 0.0 s ‖ devices 34.2 s
 
 ## 6. Using the dashboard
 
-- **Status bar.** Shows LIVE or SNAPSHOT, when the devices and NetBox were last synced, and the Sync button. The page re-checks for new data every 15 seconds.
+- **Status bar.** Shows LIVE or SNAPSHOT, when the switches, UFM and NetBox inventory were last read, and the **Refresh NetBox** and **⟳ Sync fabric** buttons. The page re-checks for new data every 15 seconds.
 - **Canvas.**
   - Every spine and leaf has a status dot: green up, amber initializing, red down, orange changed in NetBox.
   - Leaf–spine links with a problem are drawn as dashed overlay lines.
@@ -346,7 +350,7 @@ Sync complete in 34.2 s   NetBox 1.0 s ‖ IPs 0.0 s ‖ devices 34.2 s
   - Click any **cable ID** to check that one cable against NetBox right now.
 - **Incident banner** under the status bar: how many critical, major, minor and info incidents there are, and the most severe one. **View incidents** opens the Incidents tab. See [6.2](#62-incidents).
 - **Check tabs** below the diagram: **Incidents**, **Cabling vs UFM** and **Live link state**. Each tab shows a count of items to review, or ✓ when there are none. Click a tab or use the arrow keys to switch; the page remembers your last tab.
-- **Live link state tab.** Counts, the full problem list (down, initializing, NetBox changed or missing), and the UFM `fnm1` port states.
+- **Live link state tab.** Every designed link in use, as the switches report it: counts, the problem list (down, initializing, plus NetBox records that changed or are missing), and the UFM `fnm1` port states. A `—` in the cable column means NetBox has no cable record for that designed link.
 
 GPU-side RDMA ports are not collected by the switch sync; only the leaf side of each GPU link is checked there. The UFM cabling check below covers both ends.
 
@@ -476,7 +480,8 @@ What it cannot see: link errors, congestion and UFM alarms (not collected yet), 
 | `--device-profile` | — | `~/.config/idc-automation/device-access.ini`. Required for device collection. |
 | `--fanout local\|jump` | `local` | `jump` runs one Teleport session to `jmp0`, which logs in to the switches in parallel. Recommended. Falls back to `local` automatically if it can't be used. |
 | `--device-parallel N` | `10` | Concurrent switch logins (1–25). Raise gradually, for example 15 → 20 → 25, and watch for failures. |
-| `--sync-every-minutes N` | `0` (off) | Background sync, so the dashboard is already fresh when you open it |
+| `--sync-every-minutes N` | `0` (off) | Background fabric sync (switches and UFM), so the dashboard is already fresh when you open it |
+| `--netbox-every-hours H` | `24` | Refresh NetBox inventory in the background this often. `0` = only with **Refresh NetBox**. |
 | `--full-netbox-every-hours H` | `6` | Do a full cable pull this often; between pulls the sync is incremental. `0` forces a full pull every time. |
 | `--address-cache-hours H` | `24` | Reuse switch management IPs from NetBox for this long. `0` always re-queries. |
 | `--netbox-page-size N` | `250` | Cables per NetBox page during a full pull |
@@ -494,13 +499,16 @@ What it cannot see: link errors, congestion and UFM alarms (not collected yet), 
 
 ## 8. How sync works
 
-1. **Two phases run in parallel:**
-   - **NetBox.**
-     - The first run, and every 6 hours after that, reads every backend cable, with pages trimmed to the needed fields.
-     - Other runs ask the NetBox **change log** which cables changed since the last sync: edits, deletions and re-terminations. They re-read only those, usually in 1–3 API calls.
-   - **Devices.**
-     - Switch management IPs, vendor, model and status come from 2 bulk NetBox queries, or from the 24-hour local cache. The dashboard's inspector shows these saved details.
+1. **⟳ Sync fabric runs these phases in parallel:**
+   - **Switches.**
+     - Switch management IPs, vendor, model and status come from 2 bulk NetBox queries, or from the 24-hour local cache. If NetBox cannot be reached, the last known IPs are used.
      - Then `nv show interface --output json` is collected from all 100 switches.
+   - **UFM**, when [4.9](#49-optional-let-the-dashboard-fetch-from-ufm) is set up: the same as **Fetch from UFM**.
+   - **NetBox**, only when the inventory is older than `--netbox-every-hours` (24 by default). **Refresh NetBox** runs this phase alone.
+     - A full pull reads every backend cable, with pages trimmed to the needed fields; it runs the first time and every `--full-netbox-every-hours` (6).
+     - Other runs ask the NetBox **change log** which cables changed since the last refresh, and re-read only those, usually in 1–3 API calls.
+     - A NetBox failure never fails a fabric sync; the previous copy stays in use.
+   - **Live link state** compares the switch port states with the **design topology**: every designed leaf–spine link, and every designed GPU port in use (seen by UFM now or before, or recorded in NetBox), so empty tray slots are not reported as down. NetBox cable IDs are shown where NetBox has the cable.
 2. **Jump-host fan-out.** With `--fanout jump`, one `tsh ssh` session starts a small worker on `jmp0`.
    - The switch password is passed only on the worker's input. It never appears in a command line, an environment variable or a file.
    - The worker logs in to each switch with strict host-key checking, using your approved `known_hosts`.
@@ -609,7 +617,8 @@ Also revoke the NetBox API token in NetBox (**API Tokens → delete**).
 | --- | --- |
 | `GET /` | Dashboard |
 | `GET /api/live` | Current live state (ETag and gzip; `304` when unchanged) |
-| `POST /api/sync` · `GET /api/sync/<run>` | Start a sync, or check its progress and per-phase timings |
+| `POST /api/sync` · `GET /api/sync/<run>` | Start a fabric sync (switches, UFM, and NetBox when due), or check its progress and per-phase timings |
+| `POST /api/netbox/refresh` | NetBox inventory only (progress at `GET /api/sync/<run>`) |
 | `POST /api/refresh` · `GET /api/refresh/<run>` | Device collection only |
 | `GET /api/verify/<cable_id>` | One cable: current NetBox record vs. live state |
 | `GET /api/device/<hostname>` | NetBox details for one device, from the last sync (add `?live=1` to query NetBox now) |
