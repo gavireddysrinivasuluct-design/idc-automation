@@ -23,11 +23,13 @@ import csv
 import getpass
 import json
 import secrets
+import socket
 import subprocess
 import sys
 import threading
 import time
 from datetime import datetime, timezone
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -129,14 +131,18 @@ class SyncState:
         if self.netbox_host_header:
             headers["Host"] = self.netbox_host_header
         request = Request(self.netbox_url + path, headers=headers, method="GET")
-        try:
-            with urlopen(request, timeout=20) as response:
-                return json.loads(response.read().decode("utf-8"))
-        except HTTPError as error:
-            body = error.read().decode("utf-8", errors="replace")
-            raise RuntimeError("NetBox returned HTTP %s: %s" % (error.code, body[:240])) from error
-        except URLError as error:
-            raise RuntimeError("Cannot reach the local NetBox proxy at %s: %s" % (self.netbox_url, error.reason)) from error
+        for attempt in range(3):
+            try:
+                with urlopen(request, timeout=12) as response:
+                    return json.loads(response.read().decode("utf-8"))
+            except HTTPError as error:
+                body = error.read().decode("utf-8", errors="replace")
+                raise RuntimeError("NetBox returned HTTP %s: %s" % (error.code, body[:240])) from error
+            except (URLError, TimeoutError, socket.timeout) as error:
+                if attempt == 2:
+                    raise RuntimeError("Cannot reach NetBox at %s after 3 attempts: %s" % (self.netbox_url, error)) from error
+                time.sleep(0.5 * (attempt + 1))
+        raise AssertionError("NetBox request retry loop did not return")
 
     def fetch_management_addresses(self, output: Path) -> int:
         """Build an ephemeral device-IP map from NetBox; never persist it in Git."""
@@ -147,8 +153,7 @@ class SyncState:
         names = [name for name in names if name]
         if not names or len(names) != len(set(names)):
             raise RuntimeError("The device inventory must contain unique non-empty hostname values.")
-        addresses: list[tuple[str, str]] = []
-        for name in names:
+        def lookup(name: str) -> tuple[str, str]:
             payload = self.get_netbox("/api/dcim/devices/?limit=2&name=" + quote(name, safe=""))
             matches = payload.get("results") or []
             if len(matches) != 1:
@@ -157,11 +162,17 @@ class SyncState:
             address = (primary.get("address") or "").split("/", 1)[0]
             if not address:
                 raise RuntimeError("NetBox has no primary management IP for %s." % name)
-            addresses.append((name, address))
+            return name, address
+        addresses: dict[str, str] = {}
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            futures = {pool.submit(lookup, name): name for name in names}
+            for future in as_completed(futures):
+                name, address = future.result()
+                addresses[name] = address
         with output.open("w", newline="", encoding="utf-8") as handle:
             writer = csv.writer(handle)
             writer.writerow(["hostname", "management_address"])
-            writer.writerows(addresses)
+            writer.writerows((name, addresses[name]) for name in names)
         return len(addresses)
 
     # ---------- live view ----------
@@ -286,7 +297,9 @@ class SyncState:
         ranges.append((lo, prev))
         cables: dict[str, dict] = {}
         for lo, hi in ranges:
-            path = "/api/dcim/cables/?id__gte=%d&id__lte=%d&limit=1000&offset=0" % (lo, hi)
+            # Smaller pages avoid proxy/read timeouts on the fully expanded
+            # cable payload while retaining complete termination data.
+            path = "/api/dcim/cables/?id__gte=%d&id__lte=%d&limit=250&offset=0" % (lo, hi)
             while path:
                 page = self.get_netbox(path)
                 for cable in page.get("results", []):
@@ -333,7 +346,7 @@ class SyncState:
         try:
             nb = self.sync_netbox()
             record["netbox"] = {"state": "complete", "checked": nb["checked"], "mismatches": len(nb["mismatches"]), "missing": len(nb["missing"])}
-        except RuntimeError as error:
+        except Exception as error:
             record["netbox"] = {"state": "failed", "error": str(error)}
         try:
             record["devices"] = {"state": "running"}
@@ -341,7 +354,7 @@ class SyncState:
             while self.refreshes[refresh["run_id"]]["state"] == "running":
                 time.sleep(2)
             record["devices"] = self.refresh_status(refresh["run_id"])
-        except RuntimeError as error:
+        except Exception as error:
             record["devices"] = {"state": "failed", "error": str(error)}
         ok = [record["netbox"]["state"], record["devices"]["state"]]
         record["state"] = "complete" if all(s == "complete" for s in ok) else "partial" if "complete" in ok else "failed"
