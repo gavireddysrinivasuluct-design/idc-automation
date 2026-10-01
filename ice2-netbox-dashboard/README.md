@@ -10,11 +10,12 @@ From the project directory, complete these steps in order:
 
 ```bash
 tsh login
+./scripts/netbox_proxy.sh start
 ./scripts/configure_netbox_token.sh
 ./scripts/configure_device_access.sh
 ./scripts/configure_known_hosts.sh --collect-live
 python3 app/netbox_live_sync.py \
-  --netbox-url 'https://netbox-prod-europe-west2-netbox.nscale.teleport.sh' \
+  --netbox-url 'http://127.0.0.1:8444' \
   --device-profile "$HOME/.config/idc-automation/device-access.ini"
 ```
 
@@ -48,6 +49,8 @@ To collect a fresh candidate file through the authenticated Teleport jump host, 
 
 The script reads the bundled device inventory, fetches each current management IP from NetBox, then runs `ssh-keyscan` through the approved jump host. It installs the collected keys at `local-inputs/known_hosts` with mode `600`, while preserving an existing file as `local-inputs/known_hosts.previous`. That directory is ignored by Git.
 
+Start the local NetBox proxy first with `./scripts/netbox_proxy.sh start`. It is the standard local NetBox endpoint for this project: `http://127.0.0.1:8444`. Stop it after use with `./scripts/netbox_proxy.sh stop`.
+
 To install a file already issued by the platform owner instead, run `./scripts/configure_known_hosts.sh` without `--collect-live` and provide its path.
 
 ### How a new user obtains `known_hosts`
@@ -64,7 +67,7 @@ Use the shared NetBox endpoint. All dashboard and device inputs are bundled; onl
 
 ```bash
 python3 app/netbox_live_sync.py \
-  --netbox-url 'https://netbox-prod-europe-west2-netbox.nscale.teleport.sh' \
+  --netbox-url 'http://127.0.0.1:8444' \
   --device-profile "$HOME/.config/idc-automation/device-access.ini"
 ```
 
@@ -77,7 +80,7 @@ If an approved local proxy requires an HTTP Host header, add `--netbox-host-head
 - `assets/` — shared dashboard, topology, device inventory, and command file.
 - `app/netbox_live_sync.py` — local-only service.
 - `collector/run_ntp_audit.py` — read-only collector.
-- `scripts/` — personal Keychain and local host-key setup.
+- `scripts/` — Teleport NetBox proxy, personal Keychain, and local host-key setup.
 - `config/` — non-secret profile example.
 
 The collector and service write runtime evidence only to ignored local paths.

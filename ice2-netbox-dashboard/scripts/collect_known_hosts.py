@@ -20,7 +20,7 @@ from urllib.request import Request, urlopen
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_NETBOX_URL = "https://netbox-prod-europe-west2-netbox.nscale.teleport.sh"
+DEFAULT_NETBOX_URL = "http://127.0.0.1:8444"
 
 
 def token() -> str:
