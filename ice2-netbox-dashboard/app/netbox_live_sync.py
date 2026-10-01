@@ -367,19 +367,29 @@ class SyncState:
 
     def run_sync(self, run_id: str) -> None:
         record = self.syncs[run_id]
+        address_file: Path | None = None
+        try:
+            STATE_DIR.mkdir(exist_ok=True)
+            candidate_address_file = STATE_DIR / (run_id + "-management-addresses.csv")
+            address_count = self.fetch_management_addresses(candidate_address_file)
+            address_file = candidate_address_file
+            record["devices"] = {"state": "pending", "management_addresses_from_netbox": address_count}
+        except Exception as error:
+            record["devices"] = {"state": "failed", "error": "Management-IP lookup failed: " + str(error)}
         try:
             nb = self.sync_netbox(record["netbox"])
             record["netbox"] = {"state": "complete", "checked": nb["checked"], "mismatches": len(nb["mismatches"]), "missing": len(nb["missing"])}
         except Exception as error:
             record["netbox"] = {"state": "failed", "error": str(error)}
-        try:
-            record["devices"] = {"state": "running"}
-            refresh = self.start_refresh()
-            while self.refreshes[refresh["run_id"]]["state"] == "running":
-                time.sleep(2)
-            record["devices"] = self.refresh_status(refresh["run_id"])
-        except Exception as error:
-            record["devices"] = {"state": "failed", "error": str(error)}
+        if address_file:
+            try:
+                record["devices"] = {"state": "running"}
+                refresh = self.start_refresh(address_file)
+                while self.refreshes[refresh["run_id"]]["state"] == "running":
+                    time.sleep(2)
+                record["devices"] = self.refresh_status(refresh["run_id"])
+            except Exception as error:
+                record["devices"] = {"state": "failed", "error": str(error)}
         ok = [record["netbox"]["state"], record["devices"]["state"]]
         record["state"] = "complete" if all(s == "complete" for s in ok) else "partial" if "complete" in ok else "failed"
         record["finished_at"] = now_iso()
@@ -391,9 +401,11 @@ class SyncState:
         return item
 
     # ---------- collection ----------
-    def start_refresh(self) -> dict:
+    def start_refresh(self, prepared_addresses: Path | None = None) -> dict:
         required = {"bundled collector": COLLECTOR, "device profile": self.device_profile, "device inventory": self.devices, "approved host-key file": self.known_hosts, "read-only command file": self.commands}
         missing = [label for label, path in required.items() if not path or not path.is_file()]
+        if prepared_addresses and not prepared_addresses.is_file():
+            missing.append("prepared management-address map")
         if missing:
             raise RuntimeError("Local device-access inputs are missing: %s. See the README setup section." % ", ".join(missing))
         with self.lock:
@@ -402,9 +414,9 @@ class SyncState:
             run_id = secrets.token_hex(6)
             output_dir = STATE_DIR / run_id
             STATE_DIR.mkdir(exist_ok=True)
-            generated_addresses = output_dir / "management_addresses.csv"
             output_dir.mkdir()
-            address_count = self.fetch_management_addresses(generated_addresses)
+            generated_addresses = prepared_addresses or (output_dir / "management_addresses.csv")
+            address_count = None if prepared_addresses else self.fetch_management_addresses(generated_addresses)
             command = [
                 sys.executable, str(COLLECTOR), "--profile", str(self.device_profile),
                 "--devices", str(self.devices), "--addresses", str(generated_addresses),
