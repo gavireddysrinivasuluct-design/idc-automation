@@ -12,7 +12,7 @@ From the project directory, complete these steps in order:
 tsh login
 ./scripts/configure_netbox_token.sh
 ./scripts/configure_device_access.sh
-./scripts/configure_known_hosts.sh
+./scripts/configure_known_hosts.sh --collect-live
 python3 app/netbox_live_sync.py \
   --netbox-url 'https://netbox-prod-europe-west2-netbox.nscale.teleport.sh' \
   --device-profile "$HOME/.config/idc-automation/device-access.ini"
@@ -40,19 +40,21 @@ The scripts prompt for credentials and save them only in the logged-in user's ma
 
 ## SSH host-key setup
 
-Obtain the approved SSH `known_hosts` file from the platform owner, then install it locally:
+To collect a fresh candidate file through the authenticated Teleport jump host, run:
 
 ```bash
-./scripts/configure_known_hosts.sh
+./scripts/configure_known_hosts.sh --collect-live
 ```
 
-The script copies the supplied file to `local-inputs/known_hosts` with mode `600`. That directory is ignored by Git.
+The script reads the bundled device inventory, fetches each current management IP from NetBox, then runs `ssh-keyscan` through the approved jump host. It installs the collected keys at `local-inputs/known_hosts` with mode `600`, while preserving an existing file as `local-inputs/known_hosts.previous`. That directory is ignored by Git.
+
+To install a file already issued by the platform owner instead, run `./scripts/configure_known_hosts.sh` without `--collect-live` and provide its path.
 
 ### How a new user obtains `known_hosts`
 
-Host keys are trust material, so the user must get the current file from an approved source rather than create it themselves. The platform/network owner should either grant access to the restricted onboarding download, send the approved file through the internal secure channel, or provide a documented approved file location or verified host-CA/fingerprint.
+Host keys are trust material. Live collection is useful for onboarding, but each newly collected key must be independently verified against an approved platform fingerprint, host-CA, or trusted baseline before use. The platform/network owner can also issue a pre-verified file through the restricted onboarding download or internal secure channel.
 
-After downloading it, the user runs `./scripts/configure_known_hosts.sh` and pastes the downloaded file's path. The script repeats these instructions when it starts. Do not use `ssh-keyscan` unless the platform owner verifies the resulting fingerprint through an independent channel.
+The live collection command requires explicit acknowledgement and repeats this warning. Do not use unverified `ssh-keyscan` output as a trust source.
 
 Management IPs are different: they are fetched read-only from NetBox during each device refresh. The generated address map is written only to the ignored runtime directory and is never committed.
 

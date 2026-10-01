@@ -3,6 +3,21 @@
 # included in this repository or uploaded by this script.
 set -euo pipefail
 
+script_dir="$(cd "$(dirname "$0")" && pwd)"
+
+if [[ "${1:-}" == "--collect-live" ]]; then
+  read -r -p "Approved Teleport jump host [jmp0]: " jump_host
+  jump_host="${jump_host:-jmp0}"
+  read -r -p "Teleport login: " jump_user
+  if [[ -z "$jump_user" ]]; then
+    echo "Teleport login is required." >&2
+    exit 1
+  fi
+  echo "This collects current host keys from devices reached through $jump_host. Verify fingerprints independently before accepting a changed key."
+  python3 "$script_dir/collect_known_hosts.py" --jump-host "$jump_host" --jump-user "$jump_user" --accept-live-keys
+  exit 0
+fi
+
 cat <<'GUIDE'
 Before continuing, obtain the approved SSH known_hosts file through one of the
 platform team's trusted onboarding channels:
@@ -21,7 +36,7 @@ if [[ -z "$source_file" || ! -f "$source_file" ]]; then
   exit 1
 fi
 
-project_root="$(cd "$(dirname "$0")/.." && pwd)"
+project_root="$(cd "$script_dir/.." && pwd)"
 target_dir="$project_root/local-inputs"
 target_file="$target_dir/known_hosts"
 mkdir -p "$target_dir"
