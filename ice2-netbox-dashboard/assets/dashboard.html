@@ -377,17 +377,17 @@ document.getElementById('clr').onclick = () => { document.getElementById('q').va
 const insp = document.getElementById('insp');
 const tbl = (h, rows) => `<table><thead><tr>${h.map(x => `<th>${x}</th>`).join('')}</tr></thead><tbody>${rows.map(r => `<tr>${r.map(c => `<td>${c}</td>`).join('')}</tr>`).join('')}</tbody></table>`;
 const lk = (id, t) => `<span class="peer" data-id="${id}" tabindex="0">${t}</span>`;
-const deviceMetaHtml = (d, field) => field === 'model' ? `${esc(d.vendor)} · ${esc(d.model)}` : field === 'ip' ? `${esc(d.primary_ip)} · ${esc(d.status)}` : esc(d.vendor + ' · ' + d.model + ' · ' + d.primary_ip);
+const deviceMetaHtml = (d, note) => `${esc(d.vendor)} · ${esc(d.model)}<br>${esc(d.primary_ip)} · ${esc(d.status)}<br><span class="small">${esc(note)}</span>`;
 async function loadDeviceMeta(hostname) {
   const targets = [...insp.querySelectorAll('[data-netbox-host]')].filter(item => item.dataset.netboxHost === hostname); if (!targets.length) return;
   // 1) Facts collected by the most recent sync arrive with /api/live: no NetBox call on click.
   const known = LIVE.devices && LIVE.devices[hostname];
-  if (known) { const [primary_ip, vendor, model, status] = known; targets.forEach(item => item.innerHTML = deviceMetaHtml({primary_ip, vendor, model, status}, item.dataset.netboxField)); return; }
-  if (!SERVICE) { targets.forEach(item => item.textContent = item.dataset.netboxField === 'ip' ? '—' : 'Open through netbox_live_sync.py and press Sync'); return; }
+  if (known) { const [primary_ip, vendor, model, status] = known; targets.forEach(item => item.innerHTML = deviceMetaHtml({primary_ip, vendor, model, status}, 'NetBox · from last sync ' + fmtTime(LIVE.devices_synced_at))); return; }
+  if (!SERVICE) { targets.forEach(item => item.textContent = 'Not in the embedded snapshot. Open through netbox_live_sync.py and press Sync.'); return; }
   // 2) Not synced yet: the service answers from its cache or asks NetBox once and remembers it.
   try { const r = await fetch(`/api/device/${encodeURIComponent(hostname)}`), data = await r.json(); if (!r.ok) throw Error(data.error);
-    targets.forEach(item => item.innerHTML = deviceMetaHtml(data, item.dataset.netboxField)); }
-  catch (error) { targets.forEach(item => item.textContent = item.dataset.netboxField === 'ip' ? '—' : 'Not synced yet · press Sync once the NetBox proxy is running'); }
+    targets.forEach(item => item.innerHTML = deviceMetaHtml(data, data.source === 'netbox live' ? 'NetBox · looked up now' : 'NetBox · from last sync ' + fmtTime(data.synced_at))); }
+  catch (error) { targets.forEach(item => item.textContent = `Not in the last sync yet and NetBox is unreachable (${error.message}). Press Sync once the NetBox proxy is running.`); }
 }
 const ord = p => { const m = p.match(/sw(\d+)p(\d+)/); return m ? +m[1]*10 + +m[2] : 0; };
 function pgrid(j) { const up = new Set((upBy[j] || []).map(r => r[1])), dn = new Set((gBy[j] || []).map(r => r[1])), r = railOf(j), c = r ? R[r - 1] : LF; let s = '';
@@ -399,10 +399,10 @@ function inspect(id) {
     <dl class="kv"><dt>Spines</dt><dd>sys1-ice2-p-swi-bes1–36</dd><dt>Leaves</dt><dd>sys1-ice2-p-swi-bel1–64</dd><dt>GPU trays</dt><dd>sys1-ice2-p-phy-gpu1256–1531 (204 cabled)</dd><dt>Managers</dt><dd>UFM1 10.1.67.190 → BEL60 / BEL64 · UFM2 10.1.67.191 → BEL59 / BEL63</dd></dl>
     <div class="lgd"><span><b style="background:var(--sp)"></b>spine uplink</span>${R.map((c, i) => `<span><b style="background:${c}"></b>rail ${i + 1}</span>`).join('')}</div>`; return; }
   if (id.startsWith('bes')) { const i = +id.slice(3), rows = (spBy[i] || []).slice().sort((a, b) => a[0] - b[0] || ord(a[1]) - ord(b[1]));
-    insp.innerHTML = `<div class="role" style="color:var(--sp)">backend spine</div><h2>BES${i}</h2><dl class="kv"><dt>Hostname</dt><dd>${H('bes' + i)}</dd><dt>Model</dt><dd data-netbox-host="${H('bes' + i)}" data-netbox-field="model">Loading…</dd><dt>IP</dt><dd data-netbox-host="${H('bes' + i)}" data-netbox-field="ip">Loading…</dd><dt>Cables</dt><dd>${rows.length} · 2 to each of 64 leaves</dd><dt>Ports</dt><dd>sw1–sw64 (p1/p2) · swN ↔ belN</dd></dl>
+    insp.innerHTML = `<div class="role" style="color:var(--sp)">backend spine</div><h2>BES${i}</h2><dl class="kv"><dt>Hostname</dt><dd>${H('bes' + i)}</dd><dt>NetBox vendor / model / IP</dt><dd data-netbox-host="${H('bes' + i)}">Loading…</dd><dt>Cables</dt><dd>${rows.length} · 2 to each of 64 leaves</dd><dt>Ports</dt><dd>sw1–sw64 (p1/p2) · swN ↔ belN</dd></dl>
     ${tbl(['Spine port', 'Leaf', 'Leaf port', 'Cable', 'Live'], rows.map(r => [r[3], lk('bel' + r[0], 'bel' + r[0]), r[1], cableRef(r[4]), liveCell(r[4])]))}`; loadDeviceMeta(H('bes' + i)); return; }
   if (id.startsWith('bel')) { const j = +id.slice(3), r = railOf(j), up = (upBy[j] || []).slice().sort((a, b) => ord(a[1]) - ord(b[1])), dn = (gBy[j] || []).slice().sort((a, b) => ord(a[1]) - ord(b[1])), c = r ? R[r - 1] : LF;
-    insp.innerHTML = `<div class="role" style="color:${c}">${r ? `rail ${r} · SU${suOf(j)}` : 'leaf · uplinks only'}</div><h2>BEL${j}</h2><dl class="kv"><dt>Hostname</dt><dd>${H('bel' + j)}</dd><dt>Model</dt><dd data-netbox-host="${H('bel' + j)}" data-netbox-field="model">Loading…</dd><dt>IP</dt><dd data-netbox-host="${H('bel' + j)}" data-netbox-field="ip">Loading…</dd><dt>Uplinks</dt><dd>${up.length} / 72 · to all 36 spines</dd><dt>Downlinks</dt><dd>${dn.length} / 72${dn.length ? ` · RDMA${r} of ${dn.length} trays` : ''}</dd></dl>${pgrid(j)}
+    insp.innerHTML = `<div class="role" style="color:${c}">${r ? `rail ${r} · SU${suOf(j)}` : 'leaf · uplinks only'}</div><h2>BEL${j}</h2><dl class="kv"><dt>Hostname</dt><dd>${H('bel' + j)}</dd><dt>NetBox vendor / model / IP</dt><dd data-netbox-host="${H('bel' + j)}">Loading…</dd><dt>Uplinks</dt><dd>${up.length} / 72 · to all 36 spines</dd><dt>Downlinks</dt><dd>${dn.length} / 72${dn.length ? ` · RDMA${r} of ${dn.length} trays` : ''}</dd></dl>${pgrid(j)}
     ${UFMLEAF[j] ? tbl(['Leaf port', 'UFM', 'UFM port', 'Live'], UFMLEAF[j].map(([u, hp, lp]) => [lp, `<span class="peer" data-u="${u}">ufm${u + 1}</span>`, hp, ufmLive(j, lp)])) : ''}${dn.length ? tbl(['Leaf port', 'GPU tray', 'Port', 'Cable', 'Live'], dn.map(x => [x[1], lk('gpu' + x[2], 'gpu' + x[2]), x[3], cableRef(x[4]), liveCell(x[4])])) : ''}
     ${tbl(['Leaf port', 'Spine', 'Spine port', 'Cable', 'Live'], up.map(x => [x[1], lk('bes' + x[2], 'bes' + x[2]), x[3], cableRef(x[4]), liveCell(x[4])]))}`; loadDeviceMeta(H('bel' + j)); return; }
   if (id.startsWith('gpu')) { const t = +id.slice(3), rows = (trBy[t] || []).slice().sort((a, b) => a[3].localeCompare(b[3])), inv = INV[t], su = suOf(rows[0][0]), at = ATT[t] || [];
