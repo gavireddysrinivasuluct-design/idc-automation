@@ -1,4 +1,4 @@
-# ICE2 NetBox + live device dashboard
+# ICE2 backend fabric dashboard (switches · UFM · NetBox)
 
 A local, read-only dashboard for the ICE2 backend InfiniBand fabric: 36 spines, 64 leaves and the GPU trays. It checks the fabric against the **design topology** (`assets/expected_topology.csv`) using:
 
@@ -8,16 +8,25 @@ A local, read-only dashboard for the ICE2 backend InfiniBand fabric: 36 spines, 
 
 One **⟳ Sync fabric** button collects the switches and fetches from UFM. NetBox refreshes in the background about once a day, or with **Refresh NetBox**.
 
-- **Read-only.** Nothing is ever written to NetBox or to a device.
-- **Secrets stay on your Mac.** Your NetBox token and switch password are kept in your own macOS Keychain. They never reach the browser or this repository.
+What you get:
+
+- **Incidents:** one ranked list (critical, major, minor, info) of what is wrong in the fabric, with impact and action.
+- **Cabling vs UFM:** every miscabled cable, with its current and expected connection, and whether it changes the topology or is only a port swap.
+- **Live link state:** every designed link, as the switches report it.
+- **The diagram and inspector:** spines, leaves and GPU trays, with live state, NetBox details and each tray's RDMA, frontend and out-of-band ports.
+
+- **Read-only.** Nothing is ever written to NetBox, UFM or a device.
+- **Secrets stay on your Mac.** Your NetBox token, switch password and UFM passwords are kept in your own macOS Keychain. They never reach the browser or this repository.
 
 ```
  Browser ──► http://127.0.0.1:8765  (app/netbox_live_sync.py, runs on your Mac)
                  │                          │
-                 │ read-only REST           │ one Teleport session (--fanout jump)
+                 │ read-only REST           │ one Teleport session per sync (--fanout jump)
                  ▼                          ▼
-   127.0.0.1:8444 → tsh app proxy      jmp0 ──ssh──► 100 backend switches
-          → NetBox (prod)                     (read-only nv show interface)
+   127.0.0.1:8444 → tsh app proxy      jmp0 ──ssh──────► 100 backend switches (nv show interface)
+          → NetBox (prod)                   ├─https GET─► UFM REST: live links          (optional)
+          (inventory, ~daily)               └─ssh───────► UFM host: master topology,    (optional)
+                                                          Topology Compare, scan file
 ```
 
 This guide is written for a **new user setting up from nothing**. Follow sections 1–4 once, then use section 5 every day.
@@ -55,7 +64,7 @@ Tick these off in order. Each item links to the step that explains it.
 - [ ] NetBox proxy running and answering ([4.6](#46-start-the-local-netbox-proxy-and-test-it))
 - [ ] Approved switch host keys installed ([4.7](#47-install-the-approved-switch-host-keys))
 - [ ] First sync completed ([4.8](#48-first-run-and-verification))
-- [ ] Optional: UFM access stored, for the dashboard's **Fetch from UFM** button ([4.9](#49-optional-let-the-dashboard-fetch-from-ufm))
+- [ ] Recommended: UFM access stored, so Sync fabric and **Fetch from UFM** can read UFM ([4.9](#49-optional-let-the-dashboard-fetch-from-ufm))
 
 ---
 
@@ -72,6 +81,8 @@ Ask the platform/network owner, or raise your team's usual access request, for t
 | NetBox **read** permission for devices, interfaces and cables | Cable and IP lookups |
 | *(Recommended)* NetBox permission to **view the change log** (object changes) | Fast incremental sync. Without it every sync does a full pull, which still works but is slower. |
 | An approved **switch `known_hosts` file**, or approved fingerprints | Strict SSH host-key checking ([4.7](#47-install-the-approved-switch-host-keys)) |
+| *(Recommended)* A **UFM web (REST) user**, read-only if possible, and HTTPS from `jmp0` to the UFM addresses | Live links for the miscabling check and incidents ([4.9](#49-optional-let-the-dashboard-fetch-from-ufm)) |
+| *(Optional)* A **UFM host SSH login** (the UFM CLI entry in 1Password, or a read-only account) | UFM's master topology and Topology Compare report ([4.9](#49-optional-let-the-dashboard-fetch-from-ufm)) |
 
 Some Teleport access is granted through **access requests** rather than permanently. If `tsh ssh …@jmp0` is denied, request the role your team uses for jump-host access:
 
@@ -244,7 +255,7 @@ Sync complete in 34.2 s   devices … ‖ IPs … ‖ UFM … ‖ NetBox …
 
 Later syncs show **NetBox skipped · inventory refreshes every 24 h**. Press **Refresh NetBox** after someone fixes NetBox records; it should say **incremental** and need only about 2 API calls. If it always says **full**, your token cannot read the change log (see [section 2](#2-request-access)).
 
-Setup is done.
+The switch and NetBox setup is done. Do 4.9 as well: without UFM access, the miscabling check and most incidents have no data.
 
 ### 4.9 Optional: let the dashboard fetch from UFM
 
@@ -296,7 +307,7 @@ Then open **http://127.0.0.1:8765/** and press **⟳ Sync fabric**. With `--sync
 
 Always open the dashboard at this local address. Opened as a `file://` page, it shows only its saved snapshot and Sync cannot run.
 
-**To refresh the miscabling check,** press **⟳ Fetch from UFM** in the *Cabling vs UFM* tab (after [4.9](#49-optional-let-the-dashboard-fetch-from-ufm)), or run `./scripts/fetch_ufm_scan.sh` in a second terminal. Add `--ufm-fetch-every-minutes 60` to the start command to fetch by itself every hour. See [6.1](#61-cabling-vs-ufm-miscabling-check).
+**UFM data** (after [4.9](#49-optional-let-the-dashboard-fetch-from-ufm)) is read by every **⟳ Sync fabric**, including the automatic ones. **⟳ Fetch from UFM** in the *Cabling vs UFM* tab reads UFM alone. Without 4.9, run `./scripts/fetch_ufm_scan.sh` in a second terminal. See [6.1](#61-cabling-vs-ufm-miscabling-check).
 
 **To run it in the background,** so you can close the terminal:
 
@@ -318,19 +329,20 @@ pkill -f app/netbox_live_sync.py                     # stop it
 ### What a successful sync looks like
 
 ```
-NetBox  complete · incremental · 0 changed in log · 5,424 cables · 0 differ · 0 missing · 2 API calls
-Devices complete · 100 switches · 14,500 IB ports · 33.4 s · IPs: local cache
-Sync complete in 34.2 s   NetBox 1.0 s ‖ IPs 0.0 s ‖ devices 34.2 s
+Switches complete · 100 switches · 14,500 IB ports · 33.4 s · IPs: local cache
+UFM      complete · live links from 10.1.67.190 · 8 miscabled · 1,120 trays
+NetBox   skipped · inventory refreshes every 24 h · last Oct 02, 09:12
+Sync complete in 34.2 s   devices 34.2 s ‖ IPs 0.0 s ‖ UFM 6.9 s
 ```
 
-- **NetBox.**
-  - *incremental* means only cables listed in the NetBox change log were re-read.
-  - *full* (the first sync, then every 6 hours) re-reads every backend cable.
-  - *differ* counts cables whose NetBox endpoints no longer match the topology. *missing* counts cables that were deleted from NetBox.
-- **Devices.**
-  - The count rises (`37/100 switches · jump fan-out`) as switches return.
-  - Each switch is shown on the diagram as soon as its result arrives.
+- **Switches.**
+  - The count rises (`37/100 switches · jump fan-out`) as switches return, and each switch is shown on the diagram as soon as its result arrives.
+  - *IPs: local cache* means the management IPs came from the 24-hour cache. *cached IPs from … (NetBox unavailable)* means NetBox could not be reached and the last known IPs were used.
   - If the text says *fell back to local fan-out*, the jump-host worker could not be used and the reason is shown next to it.
+- **UFM.** *live links* (with a UFM web user) is what UFM sees right now; *scan file* is UFM's last periodic scan. *skipped* means [4.9](#49-optional-let-the-dashboard-fetch-from-ufm) is not set up.
+- **NetBox** (when it runs, or after **Refresh NetBox**).
+  - *incremental* means only cables listed in the NetBox change log were re-read; *full* (the first time, then every 6 hours) re-reads every backend cable.
+  - *differ* counts NetBox cables whose endpoints changed since the export; *missing* counts cables deleted from NetBox.
 
 ---
 
@@ -345,7 +357,7 @@ Sync complete in 34.2 s   NetBox 1.0 s ‖ IPs 0.0 s ‖ devices 34.2 s
 - **Hover or click** a spine, leaf or tray to trace its cables. Use the search box to find a device by name (for example `bel12` or `gpu1300`).
 - **Inspector (right panel).**
   - A live summary for the selected device.
-  - The device's NetBox **vendor, model, management IP and status**, taken from the most recent sync. Clicking a device makes no NetBox call, so this works even when the NetBox proxy is down. A device not seen by any sync yet is looked up once, then remembered.
+  - The device's NetBox **vendor, model, management IP and status**, taken from the most recent NetBox refresh. Clicking a device makes no NetBox call, so this works even when the NetBox proxy is down. A device not seen by any sync yet is looked up once, then remembered.
   - A **Live** column in every cable table.
   - Click any **cable ID** to check that one cable against NetBox right now.
   - A **GPU tray** shows its four RDMA links as UFM sees them, and its frontend (eth0/eth1 to the SpectrumX leaves) and out-of-band ports (BMC, OS MGMT, BF MGMT) from NetBox. UFM sees only the RDMA fabric, and the frontend and OOB switches are not collected, so those have no live state.
@@ -357,7 +369,7 @@ GPU-side RDMA ports are not collected by the switch sync; only the leaf side of 
 
 ### 6.1 Cabling vs UFM (miscabling check)
 
-The live sync tells you whether each port is *up*. This check tells you whether each cable goes *where the fabric design says it should go*. It compares the **expected** connection for every port with the **current** connection in UFM's own fabric scan, which lists every link with both ends. Nothing is sent to the fabric: it reads a file UFM already writes.
+The live sync tells you whether each port is *up*. This check tells you whether each cable goes *where the fabric design says it should go*. It compares the **expected** connection for every port with the **current** connection as UFM sees it, with both ends of every link: UFM's live links (REST) or its periodic fabric scan. Nothing is sent to the fabric.
 
 **The reference is the design, not NetBox.** NetBox can be wrong too, so it is reported next to each link (*agrees with the design*, *records the current cabling*, *differs*, or *missing*) but is never used as the truth.
 
@@ -436,17 +448,18 @@ The dashboard picks up the new file automatically; reload the page if it is open
   The four small bars in each tile are the tray's rails 1–4. Click a tray to see its four links, adapter by adapter, with the NetBox cable for each.
 - **Leaves** take their rail colour and show their real GPU downlink count from UFM.
 - **Miscabled leaf–spine cables** are drawn in **magenta** on the mesh, and both switches get a ◆ marker. The **Miscabling** chip turns the layer on or off.
-- **Cabling vs UFM tab**, in five sections:
-  1. Miscabled cables, grouped per leaf. Each one shows the **Current** connection (UFM) and the **Expected** connection (design), end to end. It also gives the re-patch instruction and whether NetBox agrees with the design.
+- **Cabling vs UFM tab**, in six sections:
+  1. Miscabled cables, grouped per leaf. Each one shows the **Current** connection (UFM), the **Expected** connection (design) and the **Master** connection, end to end. It also gives the re-patch instruction, the impact (*port swap · no fabric impact* or *topology change*, see [6.2](#62-incidents)) and whether NetBox agrees with the design.
   2. GPU trays per scalable unit.
   3. Trays needing attention.
-  4. Links not fully Active.
+  4. Links not fully Active, or where NetBox differs from the design.
   5. Adapters without a name.
+  6. UFM master topology.
 - **Downloads** from the tab:
   - **Findings CSV**: every difference, one row each, for a ticket or a spreadsheet. Columns include `expected_connection`, `current_connection_ufm`, `netbox_connection`, `netbox_vs_expected` and the fix.
   - **NetBox import CSV**: every GPU cable UFM sees but NetBox lacks, in NetBox's cable bulk-import columns. The UFM tray name is in `label`. Fill in `side_b_device` (the tray's NetBox host) before importing in NetBox (*Cables → Import*).
 
-**How it matches the two sources.** Each Q3400 switch is four chips, one per plane, so each 800G cable appears as four 200G lanes on the same port. UFM numbers ports in hex, and NVOS `swNpM` is port 2·(N−1)+M. UFM names GPU adapters by rack and tray (`nvl72d031-T14 mlx5_2`). The tray's NetBox host is learned from the NetBox cables that end on its adapters. Each switch's internal chip-to-chip links, the SHARP aggregation nodes and UFM's own links are left out.
+**How it matches the two sources.** Each Q3400 switch is four chips, one per plane, so each 800G cable appears as four 200G lanes on the same port. UFM numbers ports in hex, and NVOS `swNpM` is port 2·(N−1)+M. UFM names GPU adapters by rack and tray (`nvl72d031-T14 mlx5_2`); live links are converted to the same lanes, as described above. The tray's NetBox host is learned from the NetBox cables that end on its adapters. Each switch's internal chip-to-chip links, the SHARP aggregation nodes and UFM's own links are left out.
 
 ### 6.2 Incidents
 
@@ -491,10 +504,10 @@ What it cannot see: link errors, congestion and UFM alarms (not collected yet), 
 | `--expected-topology PATH` | `assets/expected_topology.csv` | Designed topology the cabling check compares against ([6.1](#61-cabling-vs-ufm-miscabling-check)) |
 | `--ufm-master PATH` | `local-inputs/ufm/master.topo.gz` | UFM's master topology, the second reference ([6.1](#61-cabling-vs-ufm-miscabling-check)) |
 | `--ufm-report PATH` | `local-inputs/ufm/topology-compare.json.gz` | UFM's latest Topology Compare report, summarized in the tab |
-| `--ufm-fetch-every-minutes N` | `0` (off) | Fetch UFM's files by itself every N minutes. Needs [4.9](#49-optional-let-the-dashboard-fetch-from-ufm). |
+| `--ufm-fetch-every-minutes N` | `0` (off) | Fetch from UFM by itself every N minutes, in addition to the fabric sync. Only needed if you want UFM more often than `--sync-every-minutes`. Needs [4.9](#49-optional-let-the-dashboard-fetch-from-ufm). |
 | `--ufm-scan PATH` | `local-inputs/ufm/ibdiagnet2.lst.gz` | UFM fabric scan used by the cabling check ([6.1](#61-cabling-vs-ufm-miscabling-check)). Plain or gzip-compressed. |
 | `--port N` | `8765` | Local dashboard port |
-| `--diagram`, `--connections`, `--devices`, `--commands`, `--known-hosts` | bundled | Override the bundled dashboard, topology, inventory, command file or host-key path |
+| `--diagram`, `--connections`, `--devices`, `--commands`, `--known-hosts` | bundled | Override the bundled dashboard, NetBox cable export, switch inventory, command file or host-key path |
 
 ---
 
@@ -515,7 +528,7 @@ What it cannot see: link errors, congestion and UFM alarms (not collected yet), 
    - The worker logs in to each switch with strict host-key checking, using your approved `known_hosts`.
 3. **Progressive results.** Each switch's result is shown as soon as it arrives. The latest evidence is saved locally, so a restart keeps it.
 
-Typical timings from a production run: NetBox 1.0 s (incremental, 2 API calls), devices about 34 s for 100 switches at `--device-parallel 15`.
+Typical timings: switches about 34 s for 100 switches at `--device-parallel 15`; UFM live links 3–10 s, in parallel; NetBox about 1 s when incremental (2 API calls).
 
 ---
 
@@ -543,7 +556,7 @@ Typical timings from a production run: NetBox 1.0 s (incremental, 2 API calls), 
 | `access denied` on `tsh ssh …@jmp0` | No jump-host role, or the access request has expired | `tsh request create …`, then `tsh login --request-id=…` |
 | `Host-rewrite proxy is already running.` but NetBox fails | The proxy is up but its Teleport forward stopped | `./scripts/netbox_proxy.sh status`. If it shows `tsh: stopped`: `stop`, then `start`. |
 | `NetBox token was not found in macOS Keychain` | Step 4.4 was skipped, or done as a different macOS user | `./scripts/configure_netbox_token.sh` |
-| NetBox step: `Cannot reach NetBox …` | Proxy not running, or Teleport expired | The two proxy and login rows above |
+| NetBox step: `Cannot reach NetBox …` | Proxy not running, or Teleport expired. The fabric sync still runs with the last known IPs. | The two proxy and login rows above, then **Refresh NetBox** |
 | NetBox step: `HTTP 403` | Token lacks read permission | Ask for read permission on devices, interfaces and cables |
 | NetBox step always says `full` | Token cannot read the change log | Ask for change-log view permission, or accept full pulls |
 | `unrecognized arguments: --fanout …` | Old copy of the code | `git pull` |
@@ -552,7 +565,10 @@ Typical timings from a production run: NetBox 1.0 s (incremental, 2 API calls), 
 | Devices: `Permission denied` | Wrong switch password, or the account is locked | `./scripts/configure_device_access.sh` |
 | Devices: `Host key verification failed` | A switch's key changed, or is missing from `known_hosts` | Get an updated approved file ([4.7](#47-install-the-approved-switch-host-keys)). Never just accept a changed key. |
 | Devices: some switches failed | The switch is unreachable or timed out | `ls -t .netbox-live-sync/` (newest first), then read `<run>/errors/<hostname>.txt` |
-| Cabling card says "No UFM fabric scan loaded yet" | No scan in `local-inputs/ufm/` | Press **⟳ Fetch from UFM**, or run `./scripts/fetch_ufm_scan.sh` |
+| Cabling tab says "No UFM data yet" | Nothing fetched from UFM yet | Press **⟳ Fetch from UFM**, or run `./scripts/fetch_ufm_scan.sh` |
+| Sync: `UFM skipped · UFM access not set up` | [4.9](#49-optional-let-the-dashboard-fetch-from-ufm) not done, or the service was not restarted after it | `./scripts/configure_ufm_access.sh`, then restart the service |
+| Switches: `IPs: cached IPs from … (NetBox unavailable)` | NetBox or its proxy is down; the sync used the last known IPs | Nothing urgent. Fix the proxy (rows above) so IPs and inventory stay current. |
+| Incidents: "UFM live links look incomplete" | UFM answered with far fewer links than the last scan (UFM restarting, or an unknown format) | The previous data is kept; fetch again later, and open an issue if it persists |
 | Fetch from UFM: "UFM access is not set up yet" | No `[ufm]` section in your profile, or the service was not restarted | `./scripts/configure_ufm_access.sh`, then restart the service |
 | Fetch from UFM: "The UFM password is not in Keychain" | Keychain item missing or renamed | `./scripts/configure_ufm_access.sh` |
 | Fetch from UFM: "Teleport login expired" | Teleport session ended | `tsh login`, then press the button again |
@@ -567,13 +583,14 @@ Typical timings from a production run: NetBox 1.0 s (incremental, 2 API calls), 
 | Page shows `SNAPSHOT` and Sync says "needs the local service" | Opened as a file, or from a published copy | Open `http://127.0.0.1:8765/` |
 | `Address already in use` | The service is already running | Use it, stop it with `pkill -f app/netbox_live_sync.py`, or pass `--port 8766` |
 
-To see where the time goes, read the final Sync line (NetBox ‖ IPs ‖ devices). The terminal also prints one summary line per sync.
+To see where the time goes, read the final Sync line (devices ‖ IPs ‖ UFM ‖ NetBox). The terminal also prints one summary line per sync.
 
 ---
 
 ## 11. Security model
 
-- **Read-only.** The service makes only NetBox `GET` requests, and runs only the commands in `assets/read_only_commands.txt` on switches.
+- **Read-only.** The service makes only NetBox `GET` requests, runs only the commands in `assets/read_only_commands.txt` on switches, and only reads from UFM: `GET /ufmRest/resources/links`, and `docker exec ufm` reading three files UFM already writes.
+- **UFM's certificate is pinned** on first use (`local-inputs/ufm/tls-pins.json`), and UFM host keys are checked against your `jmp0` account's `known_hosts`.
 - **Secrets live only in your Keychain:**
   - `netbox-mcp-token` for the NetBox token
   - `idc-automation-ice2-switch` for the switch password
@@ -587,8 +604,8 @@ To see where the time goes, read the final Sync line (NetBox ‖ IPs ‖ devices
 - **Loopback only.** The service and proxy listen on `127.0.0.1` only, so other machines cannot reach them.
 - **Strict host-key checking** is always on, against your approved `known_hosts`.
 - **Local, Git-ignored state.** Runtime evidence stays on your Mac:
-  - `.netbox-live-sync/` holds collections, the IP cache and the cable cache.
-  - `local-inputs/` holds host keys.
+  - `.netbox-live-sync/` holds collections, the IP cache, the cable cache and the tray history.
+  - `local-inputs/` holds host keys and the files read from UFM.
 - **Each user sets up their own credentials.** Never share a token, password, profile or host-key file, and never commit them.
 - **Inventory changes are never automatic.** Changes such as re-terminating a cable in NetBox stay explicit, reviewed actions.
 
@@ -617,7 +634,7 @@ Also revoke the NetBox API token in NetBox (**API Tokens → delete**).
 | Method and path | Purpose |
 | --- | --- |
 | `GET /` | Dashboard |
-| `GET /api/live` | Current live state (ETag and gzip; `304` when unchanged) |
+| `GET /api/live` | Live link state for every designed link in use, plus sync, UFM-fetch and incident summaries (ETag and gzip; `304` when unchanged) |
 | `POST /api/sync` · `GET /api/sync/<run>` | Start a fabric sync (switches, UFM, and NetBox when due), or check its progress and per-phase timings |
 | `POST /api/netbox/refresh` | NetBox inventory only (progress at `GET /api/sync/<run>`) |
 | `POST /api/refresh` · `GET /api/refresh/<run>` | Device collection only |
@@ -627,7 +644,7 @@ Also revoke the NetBox API token in NetBox (**API Tokens → delete**).
 | `GET /api/incidents` | Ranked fabric incidents ([6.2](#62-incidents)); counts and the top three are also in `/api/live` |
 | `GET /api/cabling` | Cabling vs UFM report (ETag and gzip) |
 | `GET /api/cabling/findings.csv` | Every cabling difference, one row each |
-| `POST /api/cabling/fetch` · `GET /api/cabling/fetch/<run>` | Fetch UFM's files now, or check that fetch's progress |
+| `POST /api/cabling/fetch` · `GET /api/cabling/fetch/<run>` | Fetch from UFM now (live links or files), or check that fetch's progress |
 | `GET /api/cabling/netbox-import.csv` | GPU cables UFM sees but NetBox lacks, in NetBox import columns |
 
 ### Repository contents
@@ -638,9 +655,11 @@ Also revoke the NetBox API token in NetBox (**API Tokens → delete**).
 | `assets/expected_topology.csv` | Designed topology: the reference for the cabling check |
 | `scripts/build_expected_topology.py` | Design rules that generate `expected_topology.csv` |
 | `app/ufm_cabling.py` | Cabling vs UFM check (also runs on its own: `python3 app/ufm_cabling.py <scan>`) |
+| `app/ufm_fetch.py` | Fetch from UFM: live links over the UFM REST API, or UFM's files, through `jmp0` (read-only) |
+| `app/incidents.py` | Incident rules: severity, impact and action for each problem found ([6.2](#62-incidents)) |
 | `collector/run_ntp_audit.py` | Read-only collector (local and jump-host fan-out) |
 | `assets/dashboard.html` | Dashboard |
-| `assets/connections.csv` | Backend topology baseline (5,424 cables) |
+| `assets/connections.csv` | NetBox cable export (5,424 cables): the diagram and the NetBox comparison |
 | `assets/devices.csv` | 100 backend switches with site and NetBox role |
 | `assets/read_only_commands.txt` | The only command run on switches |
 | `scripts/configure_netbox_token.sh` | Saves the NetBox token to Keychain |
@@ -649,8 +668,6 @@ Also revoke the NetBox API token in NetBox (**API Tokens → delete**).
 | `scripts/netbox_proxy.sh`, `scripts/netbox_host_proxy.py` | Local NetBox proxy through Teleport |
 | `scripts/fetch_ufm_scan.sh` | Copies UFM's latest fabric scan to `local-inputs/ufm/` (read-only) |
 | `scripts/configure_ufm_access.sh` | Saves the UFM web and/or host password to Keychain for the Fetch from UFM button |
-| `app/incidents.py` | Incident rules: severity, impact and action for each problem found ([6.2](#62-incidents)) |
-| `app/ufm_fetch.py` | Fetch from UFM: live links over the UFM REST API, or UFM's files, through `jmp0` (read-only) |
 | `config/device-access.example.ini` | Example profile (no secrets) |
 
 ### Files created on your Mac
@@ -659,7 +676,8 @@ Also revoke the NetBox API token in NetBox (**API Tokens → delete**).
 | --- | --- | --- |
 | Keychain `netbox-mcp-token` | step 4.4 | NetBox token |
 | Keychain `idc-automation-ice2-switch` | step 4.5 | Switch password |
-| `~/.config/idc-automation/device-access.ini` | step 4.5 | Usernames, jump host, Keychain references |
+| Keychain `idc-automation-ice2-ufm-rest`, `idc-automation-ice2-ufm` | step 4.9 | UFM web and host passwords |
+| `~/.config/idc-automation/device-access.ini` | steps 4.5, 4.9 | Usernames, jump host, UFM addresses, Keychain references |
 | `local-inputs/known_hosts` | step 4.7 | Approved switch host keys |
 | `~/.local/state/netbox-mcp/` | `netbox_proxy.sh` | Proxy PIDs and logs |
 | `.netbox-live-sync/` | the service | Collected evidence, IP cache, cable cache, device details (`netbox-devices.json`) |
