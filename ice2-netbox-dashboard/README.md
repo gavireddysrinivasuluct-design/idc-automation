@@ -323,7 +323,20 @@ GPU-side RDMA ports are not collected by the switch sync; only the leaf side of 
 
 ### 6.1 Cabling vs UFM (miscabling check)
 
-The live sync tells you whether each port is *up*. This check tells you whether each cable goes *where NetBox says it goes*. It compares every NetBox cable with UFM's own fabric scan, which lists every link with both ends. Nothing is sent to the fabric: it reads a file UFM already writes.
+The live sync tells you whether each port is *up*. This check tells you whether each cable goes *where the fabric design says it should go*. It compares the **expected** connection for every port with the **current** connection in UFM's own fabric scan, which lists every link with both ends. Nothing is sent to the fabric: it reads a file UFM already writes.
+
+**The reference is the design, not NetBox.** NetBox can be wrong too, so it is reported next to each link (*agrees with the design*, *records the current cabling*, *differs*, or *missing*) but is never used as the truth.
+
+The design topology is the file `assets/expected_topology.csv`. It has one row per expected link: 4,608 leaf–spine and 4,608 leaf–GPU rows. It is generated from the design rules in `scripts/build_expected_topology.py`:
+
+| Rule | Expected connection |
+| --- | --- |
+| L1 | Leaf *j* port `sw(36+i)pM` ⟷ spine *i* port `sw(j)pM` (two cables per leaf–spine pair) |
+| G1 | 4 pods of 16 leaves. Scalable unit *k* of a pod takes the *k*-th leaf of each of its 4 rail blocks. |
+| G2 | Leaf port `swNpM` (N ≤ 36) is tray slot 2·(N−1)+M of that SU. A tray uses the same slot on all four of its leaves. |
+| G3 | Rail *r* reaches the tray's adapter `mlx5_(r−1)` (RDMA *r*) |
+
+If the design changes, edit the rules and run `python3 scripts/build_expected_topology.py`, or edit the CSV directly for a one-off exception. The dashboard picks up the change automatically.
 
 **Load or refresh the scan.** Run this in the project folder whenever you want fresh data. UFM rewrites its scan regularly, so this picks up the latest one:
 
@@ -356,13 +369,13 @@ The dashboard picks up the new file automatically; reload the page if it is open
 - **Leaves** take their rail colour and show their real GPU downlink count from UFM.
 - **Miscabled leaf–spine cables** are drawn in **magenta** on the mesh, and both switches get a ◆ marker. The **Miscabling** chip turns the layer on or off.
 - **Cabling vs UFM tab**, in five sections:
-  1. Miscabled cables, grouped per leaf, with *NetBox says* next to *UFM sees* and the two ways to fix it.
+  1. Miscabled cables, grouped per leaf. Each one shows the **Current** connection (UFM) and the **Expected** connection (design), end to end. It also gives the re-patch instruction and whether NetBox agrees with the design.
   2. GPU trays per scalable unit.
   3. Trays needing attention.
   4. Links not fully Active.
   5. Adapters without a name.
 - **Downloads** from the tab:
-  - **Findings CSV**: every difference, one row each, for a ticket or a spreadsheet.
+  - **Findings CSV**: every difference, one row each, for a ticket or a spreadsheet. Columns include `expected_connection`, `current_connection_ufm`, `netbox_connection`, `netbox_vs_expected` and the fix.
   - **NetBox import CSV**: every GPU cable UFM sees but NetBox lacks, in NetBox's cable bulk-import columns. The UFM tray name is in `label`. Fill in `side_b_device` (the tray's NetBox host) before importing in NetBox (*Cables → Import*).
 
 **How it matches the two sources.** Each Q3400 switch is four chips, one per plane, so each 800G cable appears as four 200G lanes on the same port. UFM numbers ports in hex, and NVOS `swNpM` is port 2·(N−1)+M. UFM names GPU adapters by rack and tray (`nvl72d031-T14 mlx5_2`). The tray's NetBox host is learned from the NetBox cables that end on its adapters. Each switch's internal chip-to-chip links, the SHARP aggregation nodes and UFM's own links are left out.
@@ -383,6 +396,7 @@ The dashboard picks up the new file automatically; reload the page if it is open
 | `--netbox-page-size N` | `250` | Cables per NetBox page during a full pull |
 | `--netbox-concurrency N` | `2` | NetBox pages fetched in parallel through the Teleport app proxy |
 | `--netbox-host-header` | — | Only if the platform owner tells you a proxy needs it |
+| `--expected-topology PATH` | `assets/expected_topology.csv` | Designed topology the cabling check compares against ([6.1](#61-cabling-vs-ufm-miscabling-check)) |
 | `--ufm-scan PATH` | `local-inputs/ufm/ibdiagnet2.lst.gz` | UFM fabric scan used by the cabling check ([6.1](#61-cabling-vs-ufm-miscabling-check)). Plain or gzip-compressed. |
 | `--port N` | `8765` | Local dashboard port |
 | `--diagram`, `--connections`, `--devices`, `--commands`, `--known-hosts` | bundled | Override the bundled dashboard, topology, inventory, command file or host-key path |
@@ -507,6 +521,8 @@ Also revoke the NetBox API token in NetBox (**API Tokens → delete**).
 | Path | Contents |
 | --- | --- |
 | `app/netbox_live_sync.py` | Local service: dashboard, sync and API |
+| `assets/expected_topology.csv` | Designed topology: the reference for the cabling check |
+| `scripts/build_expected_topology.py` | Design rules that generate `expected_topology.csv` |
 | `app/ufm_cabling.py` | Cabling vs UFM check (also runs on its own: `python3 app/ufm_cabling.py <scan>`) |
 | `collector/run_ntp_audit.py` | Read-only collector (local and jump-host fan-out) |
 | `assets/dashboard.html` | Dashboard |

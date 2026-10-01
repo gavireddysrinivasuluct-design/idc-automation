@@ -71,6 +71,7 @@ ADDRESS_CACHE = STATE_DIR / "management-addresses.csv"
 CABLE_CACHE = STATE_DIR / "netbox-cables.json"
 DEVICE_CACHE = STATE_DIR / "netbox-devices.json"
 DEFAULT_UFM_SCAN = PROJECT_ROOT / "local-inputs" / "ufm" / "ibdiagnet2.lst.gz"
+DEFAULT_EXPECTED = ASSETS_DIR / "expected_topology.csv"
 DEVICE_FIELDS = "name,primary_ip4,primary_ip,device_type,status"
 CABLE_FIELDS = "id,a_terminations,b_terminations"
 BASELINE_COLLECTED_AT = "not-collected"
@@ -175,6 +176,7 @@ class SyncState:
         self.load_latest()
         self.load_cable_cache()
         self.ufm_scan = Path(getattr(opts, "ufm_scan", None) or DEFAULT_UFM_SCAN)
+        self.expected_topology = Path(getattr(opts, "expected_topology", None) or DEFAULT_EXPECTED)
         self._cabling: tuple | None = None
         self.device_info: dict[str, dict] = {}
         self.device_info_at: str | None = None
@@ -507,14 +509,16 @@ class SyncState:
                     self._cabling = None
                     self.bump()
             return None
-        key = (str(path), path.stat().st_mtime_ns, path.stat().st_size)
+        design = self.expected_topology if self.expected_topology.is_file() else None
+        key = (str(path), path.stat().st_mtime_ns, path.stat().st_size, design.stat().st_mtime_ns if design else 0)
         with self.lock:
             cached = self._cabling
         if cached and cached[0] == key:
             return cached[1]
         _sys.path.insert(0, str(APP_DIR))
         import ufm_cabling  # noqa: E402  (local module next to this file)
-        report = ufm_cabling.analyse(path, ufm_cabling.load_baseline(self.connections))
+        report = ufm_cabling.analyse(path, ufm_cabling.load_baseline(self.connections),
+                                     ufm_cabling.load_expected(design) if design else None)
         body = json.dumps(report, separators=(",", ":")).encode("utf-8")
         payload = ('"c%d-%s"' % (key[1] % 10**9, hashlib.sha1(body).hexdigest()[:10]), body, gzip.compress(body, compresslevel=5))
         with self.lock:
@@ -1095,6 +1099,8 @@ def main() -> int:
     parser.add_argument("--devices", type=Path, default=ASSETS_DIR / "devices.csv", help="Device inventory CSV (bundled by default).")
     parser.add_argument("--known-hosts", type=Path, default=PROJECT_ROOT / "local-inputs" / "known_hosts", help="Local approved SSH host-key file installed by scripts/configure_known_hosts.sh.")
     parser.add_argument("--commands", type=Path, default=ASSETS_DIR / "read_only_commands.txt", help="Read-only command file (bundled by default).")
+    parser.add_argument("--expected-topology", type=Path, default=DEFAULT_EXPECTED,
+                        help="Designed topology the cabling check compares against (scripts/build_expected_topology.py writes it).")
     parser.add_argument("--ufm-scan", type=Path, default=DEFAULT_UFM_SCAN,
                         help="Local copy of UFM's fabric scan (ibdiagnet2.lst[.gz]) for the cabling check; scripts/fetch_ufm_scan.sh puts it here.")
     tuning = parser.add_argument_group("performance")

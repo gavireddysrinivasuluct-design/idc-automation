@@ -111,7 +111,18 @@ def load_baseline(connections: Path) -> list[dict]:
         return list(csv.DictReader(handle))
 
 
-def analyse(scan: Path, baseline: list[dict]) -> dict:
+def load_expected(path: Path) -> list[dict]:
+    """The designed topology (assets/expected_topology.csv); '#' lines are comments."""
+    with path.open(newline="", encoding="utf-8") as handle:
+        return list(csv.DictReader(line for line in handle if not line.startswith("#")))
+
+
+def analyse(scan: Path, baseline: list[dict], expected: list[dict] | None = None) -> dict:
+    """Compare UFM's current cabling with the designed topology (or NetBox if no design is given).
+
+    NetBox is reported next to each link (agrees with the design / records the current
+    cabling / differs / missing) but is not used as the reference when a design exists.
+    """
     lanes, meta = read_lanes(scan)
     stat = scan.stat()
 
@@ -151,9 +162,23 @@ def analyse(scan: Path, baseline: list[dict]) -> dict:
             sw, gpu = (a, b) if "-swi-" in a[0] else (b, a)
             nb_gpu[sw] = (gpu[0], gpu[1], row["netbox_cable_id"])
 
-    # ---- leaf <-> spine --------------------------------------------------------------
+    # ---- the reference: designed topology ---------------------------------------------
+    exp_switch: list[tuple] = []
+    exp_gpu: dict[tuple[str, str], tuple[str, str]] = {}
+    for row in expected or []:
+        ea, eb = (row["a_device"], row["a_port"]), (row["b_device"], row["b_port"])
+        if row["link_type"] == "leaf-spine":
+            exp_switch.append((ea, eb))
+        elif row["link_type"] == "leaf-gpu":
+            exp_gpu[ea] = eb
+    reference = "design topology" if exp_switch else "NetBox"
+    if not exp_switch:
+        exp_switch = [(leaf, spine) for cid, leaf, spine in switch_cables]
+    exp_ends = {end for pair in exp_switch for end in pair}
+
+    # ---- leaf <-> spine: expected (design) vs current (UFM), NetBox alongside ----------
     switch_findings, counts = [], collections.Counter()
-    for cid, leaf, spine in switch_cables:
+    for leaf, spine in exp_switch:
         pl, ps = ports.get(leaf), ports.get(spine)
         if not pl and not ps:
             status, actual = "not-seen", []
@@ -165,12 +190,25 @@ def analyse(scan: Path, baseline: list[dict]) -> dict:
             else:
                 status = "miscabled"
                 actual = sorted({(p[1], p[2]) for p in (pl or {"peers": set()})["peers"] if p[0] == "SW"})
+        nb = nb_switch.get(leaf)
+        current = tuple(actual[0]) if actual else (spine if status != "not-seen" else None)
+        if nb is None:
+            nb_state = "missing"
+        elif tuple(nb[0]) == tuple(spine):
+            nb_state = "matches-expected"
+        elif current and tuple(nb[0]) == current:
+            nb_state = "matches-current"
+        else:
+            nb_state = "differs"
         counts["switch-" + status] += 1
-        if status != "ok":
+        if nb_state != "matches-expected":
+            counts["netbox-differs"] += 1
+        if status != "ok" or nb_state != "matches-expected":
             item = pl or ps or {"planes": set(), "logs": set()}
-            switch_findings.append({"status": status, "cable": cid, "leaf": list(leaf), "spine": list(spine),
-                                    "leaf_actual": actual,
+            switch_findings.append({"status": status if status != "ok" else "netbox-differs", "cable": nb[1] if nb else "",
+                                    "leaf": list(leaf), "spine": list(spine), "leaf_actual": actual,
                                     "spine_actual": sorted({(p[1], p[2]) for p in (ps or {"peers": set()})["peers"] if p[0] == "SW"}),
+                                    "netbox": list(nb[0]) if nb else None, "netbox_state": nb_state,
                                     "planes": len(item["planes"]), "state": "/".join(sorted(item["logs"])) or "-"})
     # pair crossed cables on the same leaf into swaps
     by_leaf = collections.defaultdict(list)
@@ -189,10 +227,10 @@ def analyse(scan: Path, baseline: list[dict]) -> dict:
                     swap_no += 1
                     f["swap"] = g["swap"] = swap_no
                     break
-    undocumented_switch = []
+    undocumented_switch = []  # links UFM sees between switches that the design does not have
     for (dev, label), item in ports.items():
         for p in item["peers"]:
-            if p[0] == "SW" and (dev, label) not in nb_switch and (p[1], p[2]) not in nb_switch and dev < p[1]:
+            if p[0] == "SW" and (dev, label) not in exp_ends and (p[1], p[2]) not in exp_ends and dev < p[1]:
                 undocumented_switch.append({"a": [dev, label], "b": [p[1], p[2]], "planes": len(item["planes"]), "state": health(item)})
 
     # ---- GPU trays as UFM sees them ---------------------------------------------------
@@ -249,8 +287,12 @@ def analyse(scan: Path, baseline: list[dict]) -> dict:
             issues.append("not on the same port of all four leaves")
         for ad in ads:
             rail = su_of_leaf(ad["leaf"])[2]
-            if rail_hca.get(rail) and ad["hca"] != rail_hca[rail]:
-                issues.append("%s on rail %d leaf BEL%d (expected %s)" % (ad["hca"], rail, ad["leaf"], rail_hca[rail]))
+            design = exp_gpu.get(("sys1-ice2-p-swi-bel%d" % ad["leaf"], ad["port"]))
+            want = design[1] if design else rail_hca.get(rail)
+            if design is None and exp_gpu:
+                issues.append("BEL%d %s is not a GPU port in the design" % (ad["leaf"], ad["port"]))
+            elif want and ad["hca"] != want:
+                issues.append("%s on rail %d leaf BEL%d (design expects %s)" % (ad["hca"], rail, ad["leaf"], want))
         rails_seen = {su_of_leaf(ad["leaf"])[2] for ad in ads}
         missing_rails = [r for r in range(1, 5) if r not in rails_seen]
         if missing_rails:
@@ -299,7 +341,9 @@ def analyse(scan: Path, baseline: list[dict]) -> dict:
     gpu_not_seen.sort(key=lambda x: (x["host"], x["rdma"]))
 
     summary = {
-        "switch_cables": len(switch_cables),
+        "reference": reference,
+        "switch_cables": len(exp_switch), "netbox_switch_cables": len(switch_cables),
+        "switch_netbox_differs": counts["netbox-differs"],
         "switch_ok": counts["switch-ok"], "switch_miscabled": counts["switch-miscabled"],
         "switch_not_seen": counts["switch-not-seen"], "switch_init": counts["switch-init"],
         "switch_degraded": counts["switch-degraded"] + counts["switch-down"], "swaps": swap_no,
@@ -317,7 +361,7 @@ def analyse(scan: Path, baseline: list[dict]) -> dict:
         "source": {"file": str(scan), "scanned_at": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(timespec="seconds"),
                    "bytes": stat.st_size, "lanes": len(lanes), "tool": meta["tool"], "unparsed": meta["unparsed"]},
         "summary": summary,
-        "switch_findings": sorted(switch_findings, key=lambda f: ({"miscabled": 0, "not-seen": 1, "down": 2, "init": 3, "degraded": 4}.get(f["status"], 9), f["leaf"])),
+        "switch_findings": sorted(switch_findings, key=lambda f: ({"miscabled": 0, "not-seen": 1, "down": 2, "init": 3, "degraded": 4, "netbox-differs": 5}.get(f["status"], 9), f["leaf"])),
         "switch_undocumented": sorted(undocumented_switch, key=lambda x: x["a"]),
         "sus": [sus[k] for k in sorted(sus)],
         "gpu_not_seen": gpu_not_seen,
@@ -331,26 +375,42 @@ def findings_csv(report: dict) -> str:
     """Every non-OK observation, one row each; suitable for a ticket or a spreadsheet."""
     out = io.StringIO()
     w = csv.writer(out)
-    w.writerow(["finding", "netbox_cable_id", "switch", "port", "netbox_far_end", "ufm_far_end", "planes_up_of_4", "state", "note"])
+    w.writerow(["finding", "netbox_cable_id", "switch", "port", "expected_far_end", "current_far_end_ufm", "planes_up_of_4", "state",
+                "expected_connection", "current_connection_ufm", "netbox_connection", "netbox_vs_expected", "fix_or_note"])
+    end = lambda e: " ".join(e) if e else ""
     for f in report["switch_findings"]:
-        note = ("swap #%d" % f["swap"]) if f.get("swap") else ""
-        w.writerow([f["status"], f["cable"], f["leaf"][0], f["leaf"][1], " ".join(f["spine"]),
-                    "; ".join(" ".join(x) for x in f["leaf_actual"]), f["planes"], f["state"], note])
+        current = f["leaf_actual"][0] if f["leaf_actual"] else None
+        if f["status"] == "miscabled":
+            note = "Re-patch the cable in %s from %s to %s (expected by the design)" % (end(f["leaf"]), end(current), end(f["spine"]))
+        elif f["status"] == "netbox-differs":
+            note = "Cabling matches the design; correct NetBox%s" % ((" #" + f["cable"]) if f["cable"] else "")
+        else:
+            note = ""
+        nb = f.get("netbox")
+        w.writerow([f["status"], f["cable"], f["leaf"][0], f["leaf"][1], end(f["spine"]),
+                    "; ".join(" ".join(x) for x in f["leaf_actual"]), f["planes"], f["state"],
+                    "%s <-> %s" % (end(f["leaf"]), end(f["spine"])), ("%s <-> %s" % (end(f["leaf"]), end(current))) if current else "",
+                    ("%s <-> %s" % (end(f["leaf"]), end(nb))) if nb else "", f.get("netbox_state", ""), note])
     for x in report["switch_undocumented"]:
-        w.writerow(["switch-link-not-in-netbox", "", x["a"][0], x["a"][1], "", " ".join(x["b"]), x["planes"], x["state"], ""])
+        w.writerow(["switch-link-not-in-netbox", "", x["a"][0], x["a"][1], "", " ".join(x["b"]), x["planes"], x["state"], "", "%s <-> %s" % (end(x["a"]), end(x["b"])), "", "", "not in the design topology"])
     for su in report["sus"]:
         for t in su["trays"]:
             for rail, leaf, port, hca, planes, state, cid, rdma in t["adapters"]:
                 if t["status"] == "ok" and cid:
                     continue
                 finding = "gpu-link-not-in-netbox" if not cid else "gpu-" + t["status"]
-                w.writerow([finding, cid, "sys1-ice2-p-swi-bel%d" % leaf, port, (t["host"] + " " + rdma).strip() if cid else "",
-                            "%s %s" % (t["code"], hca), planes, state, "; ".join(t["issues"])])
+                expected = "SU%d slot %d %s" % (su["su"], t["slot"] + 1, "mlx5_%d" % (rail - 1)) if t["slot"] is not None else ""
+                w.writerow([finding, cid, "sys1-ice2-p-swi-bel%d" % leaf, port, expected, "%s %s" % (t["code"], hca), planes, state,
+                            ("sys1-ice2-p-swi-bel%d %s <-> %s" % (leaf, port, expected)) if expected else "",
+                            "sys1-ice2-p-swi-bel%d %s <-> %s %s" % (leaf, port, t["code"], hca),
+                            ("sys1-ice2-p-swi-bel%d %s <-> %s %s" % (leaf, port, t["host"], rdma)) if cid else "",
+                            "documented" if cid else "missing", "; ".join(t["issues"])])
         for slot, rail, leaf, port, adapter, state in su["unnamed"]:
-            w.writerow(["gpu-adapter-unnamed", "", "sys1-ice2-p-swi-bel%d" % leaf, port, "", adapter, "", state,
-                        "adapter has no node description; tray cannot be identified"])
+            w.writerow(["gpu-adapter-unnamed", "", "sys1-ice2-p-swi-bel%d" % leaf, port, "", adapter, "", state, "",
+                        "sys1-ice2-p-swi-bel%d %s <-> %s" % (leaf, port, adapter), "", "", "adapter has no node description; tray cannot be identified"])
     for x in report["gpu_not_seen"]:
-        w.writerow(["gpu-not-seen-by-ufm", x["cable"], x["leaf"], x["port"], x["host"] + " " + x["rdma"], "", 0, "", ""])
+        w.writerow(["gpu-not-seen-by-ufm", x["cable"], x["leaf"], x["port"], x["host"] + " " + x["rdma"], "", 0, "",
+                    "%s %s <-> %s %s" % (x["leaf"], x["port"], x["host"], x["rdma"]), "", "%s %s <-> %s %s" % (x["leaf"], x["port"], x["host"], x["rdma"]), "", "no link on this port in UFM"])
     return out.getvalue()
 
 
@@ -377,6 +437,7 @@ if __name__ == "__main__":  # quick report: python3 app/ufm_cabling.py <ibdiagne
     import json
     import sys
     here = Path(__file__).resolve().parent.parent
-    report = analyse(Path(sys.argv[1]), load_baseline(Path(sys.argv[2]) if len(sys.argv) > 2 else here / "assets" / "connections.csv"))
+    report = analyse(Path(sys.argv[1]), load_baseline(Path(sys.argv[2]) if len(sys.argv) > 2 else here / "assets" / "connections.csv"),
+                     load_expected(here / "assets" / "expected_topology.csv"))
     print(json.dumps({"source": report["source"], "summary": report["summary"],
                       "miscabled": [f for f in report["switch_findings"] if f["status"] == "miscabled"]}, indent=1))
