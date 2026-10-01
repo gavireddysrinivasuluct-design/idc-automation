@@ -572,18 +572,21 @@ const _pick = pick; pick = function (id) { _pick(id); if (id.startsWith('gpu')) 
 // LIVE_SNAPSHOT is the 2026-10-01 collection embedded at build time; when the page is served by
 // netbox_live_sync.py it is replaced by /api/live and refreshed through one-click Sync.
 const LIVE_SNAPSHOT = {"mode":"snapshot","source":"2026-10-01 device collection (baseline CSV)","collected_at":"2026-10-01T06:10:00+00:00","switches_collected":100,"endpoints":{"compared":10032,"active":10010,"init":20,"down":2,"other":0,"not_collected":816},"cables":{"total":5424,"active":5412,"init":10,"down":2,"unknown":0},"exceptions":[[79683,"leaf-gpu-rdma","down","sys1-ice2-p-swi-bel8","sw11p1","Down/Polling/","sys1-ice2-p-phy-gpu1492","RDMA2","not-collected"],[79685,"leaf-gpu-rdma","down","sys1-ice2-p-swi-bel16","sw11p1","Down/Polling/","sys1-ice2-p-phy-gpu1492","RDMA4","not-collected"],[74955,"leaf-spine","init","sys1-ice2-p-swi-bel17","sw40p2","Initialize/LinkUp/","sys1-ice2-p-swi-bes4","sw17p2","Initialize/LinkUp/"],[75205,"leaf-spine","init","sys1-ice2-p-swi-bel20","sw57p2","Initialize/LinkUp/","sys1-ice2-p-swi-bes21","sw20p2","Initialize/LinkUp/"],[75350,"leaf-spine","init","sys1-ice2-p-swi-bel22","sw58p1","Initialize/LinkUp/","sys1-ice2-p-swi-bes22","sw22p1","Initialize/LinkUp/"],[76177,"leaf-spine","init","sys1-ice2-p-swi-bel34","sw39p2","Initialize/LinkUp/","sys1-ice2-p-swi-bes3","sw34p2","Initialize/LinkUp/"],[76582,"leaf-spine","init","sys1-ice2-p-swi-bel39","sw62p1","Initialize/LinkUp/","sys1-ice2-p-swi-bes26","sw39p1","Initialize/LinkUp/"],[76669,"leaf-spine","init","sys1-ice2-p-swi-bel40","sw69p2","Initialize/LinkUp/","sys1-ice2-p-swi-bes33","sw40p2","Initialize/LinkUp/"],[77017,"leaf-spine","init","sys1-ice2-p-swi-bel45","sw63p2","Initialize/LinkUp/","sys1-ice2-p-swi-bes27","sw45p2","Initialize/LinkUp/"],[77257,"leaf-spine","init","sys1-ice2-p-swi-bel49","sw39p2","Initialize/LinkUp/","sys1-ice2-p-swi-bes3","sw49p2","Initialize/LinkUp/"],[77268,"leaf-spine","init","sys1-ice2-p-swi-bel49","sw45p1","Initialize/LinkUp/","sys1-ice2-p-swi-bes9","sw49p1","Initialize/LinkUp/"],[77609,"leaf-spine","init","sys1-ice2-p-swi-bel53","sw71p2","Initialize/LinkUp/","sys1-ice2-p-swi-bes35","sw53p2","Initialize/LinkUp/"]],"ufm":[["ufm1","HCA1","sys1-ice2-p-swi-bel60","fnm1","Active/LinkUp/400G","active"],["ufm1","HCA2","sys1-ice2-p-swi-bel64","fnm1","Active/LinkUp/400G","active"],["ufm2","HCA1","sys1-ice2-p-swi-bel59","fnm1","Active/LinkUp/400G","active"],["ufm2","HCA2","sys1-ice2-p-swi-bel63","fnm1","Active/LinkUp/400G","active"]],"netbox":null,"refresh_running":false,"sync_running":false};
-const LS_COL = {active:'#38d9a0', init:'#ffb547', down:'#ff5e78', unknown:'#8b9db6', nb:'#ff8f4d'};
-const LS_TXT = {active:'Active', init:'Initializing', down:'Down', unknown:'Not collected', nb:'NetBox changed'};
-const LS_RANK = {active:0, unknown:1, init:2, nb:3, down:4};
+const LS_COL = {active:'#38d9a0', init:'#ffb547', down:'#ff5e78', unknown:'#8b9db6', unverified:'#a98bff', nb:'#ff8f4d'};
+const LS_TXT = {active:'Active', init:'Initializing', down:'Down', unknown:'Port not reported', unverified:'Not verified', nb:'NetBox changed'};
+const LS_RANK = {active:0, unknown:1, unverified:1.5, init:2, nb:3, down:4};
 const devId = h => String(h || '').replace(/^sys1-ice2-p-(swi|phy)-/, '');
 const KNOWN = new Set([...MESH.map(r => r[4]), ...GPU.map(r => r[4])].map(Number));
 let LIVE = LIVE_SNAPSHOT, EXC = {}, NBX = {}, DEVS = {}, liveOn = true;
 const SERVICE = /^(127\.0\.0\.1|localhost|\[::1\])$/.test(location.hostname) && location.protocol.startsWith('http');
 
-function cableStatus(cid) { cid = Number(cid); if (NBX[cid]) return 'nb'; if (EXC[cid]) return EXC[cid][2]; return KNOWN.has(cid) ? 'active' : null; }
-function stateText(s) { return s === 'not-collected' ? 'not collected' : String(s).replace(/\/$/, '').replace(/\//g, ' · '); }
+const CABLE_ENDS = {}; MESH.forEach(r => { CABLE_ENDS[Number(r[4])] = ['bel' + r[0], 'bes' + r[2]]; }); GPU.forEach(r => { CABLE_ENDS[Number(r[4])] = ['bel' + r[0]]; });
+let UNV = new Set();
+function cableStatus(cid) { cid = Number(cid); if (NBX[cid]) return 'nb'; if (EXC[cid]) return EXC[cid][2]; if (!KNOWN.has(cid)) return null;
+  return (CABLE_ENDS[cid] || []).some(d => UNV.has(d)) ? 'unverified' : 'active'; }
+function stateText(s) { return s === 'not-collected' ? 'not collected' : s === 'missing-port' ? 'not in switch output' : s === 'stale' ? 'not verified' : String(s).replace(/\/$/, '').replace(/\//g, ' · '); }
 window.liveCell = function (cid) { const s = cableStatus(cid); if (!s) return '<span style="color:var(--faint)">—</span>';
-  const x = EXC[Number(cid)], t = x ? [x[5], x[8]].filter(v => v !== 'not-collected').map(stateText).join(' / ') : 'Active · LinkUp · 800G';
+  const x = EXC[Number(cid)], t = x ? [x[5], x[8]].filter(v => v !== 'not-collected').map(stateText).join(' / ') : s === 'unverified' ? 'switch not reached by the last collection' : 'Active · LinkUp · 800G';
   return `<span class="lpill" style="--c:${LS_COL[s]}" title="${esc(t)}"><i></i>${s === 'active' ? 'up' : LS_TXT[s].toLowerCase()}</span>`; };
 window.cableRef = function (cid) { if (!cid || cid === '0') return '<span style="color:var(--faint)" title="no NetBox cable record for this designed link">—</span>'; return KNOWN.has(Number(cid)) ? `<button type="button" class="cable-ref" data-cable="${cid}">${cid}</button>` : esc(cid); };
 
@@ -593,6 +596,8 @@ function indexLive() {
   ((LIVE.netbox && LIVE.netbox.mismatches) || []).forEach(m => { NBX[m[0]] = m; });
   Object.keys(NBX).forEach(cid => { const r = MESH.find(m => m[4] == cid) || GPU.find(g => g[4] == cid); if (!r) return;
     const ids = MESH.includes(r) ? ['bel' + r[0], 'bes' + r[2]] : ['bel' + r[0], 'gpu' + r[2]]; ids.forEach(d => { if (LS_RANK.nb > LS_RANK[DEVS[d] || 'active']) DEVS[d] = 'nb'; }); });
+  UNV = new Set((LIVE.unverified || []).map(u => devId(u[0])));
+  (LIVE.unverified || []).forEach(u => { const d = devId(u[0]); if (LS_RANK.unverified > LS_RANK[DEVS[d] || 'active']) DEVS[d] = 'unverified'; });
   (LIVE.ufm || []).forEach(u => { if (u[5] !== 'active') { const d = devId(u[2]); if (LS_RANK[u[5]] > LS_RANK[DEVS[d] || 'active']) DEVS[d] = u[5]; } });
 }
 
@@ -634,28 +639,32 @@ const fmtTime = iso => { if (!iso) return '—'; const d = new Date(iso); if (is
   return d.toLocaleString(undefined, {year:'numeric', month:'short', day:'2-digit', hour:'2-digit', minute:'2-digit'}) + (m < 1 ? ' · just now' : m < 120 ? ` · ${m} min ago` : m < 2880 ? ` · ${Math.round(m/60)} h ago` : ` · ${Math.round(m/1440)} d ago`); };
 
 function renderPanels() {
-  const ep = LIVE.endpoints || {}, cb = LIVE.cables || {}, nb = LIVE.netbox, bad = (cb.down || 0) + Object.keys(NBX).length, warn = (cb.init || 0) + (cb.unknown || 0);
+  const ep = LIVE.endpoints || {}, cb = LIVE.cables || {}, nb = LIVE.netbox, bad = (cb.down || 0) + Object.keys(NBX).length, warn = (cb.init || 0) + (cb.unknown || 0) + (cb.unverified || 0);
   railLive.className = bad ? 'lbad' : warn ? 'lwarn' : 'lok';
   railLive.innerHTML = `<b>${(ep.active || 0).toLocaleString()} / ${(ep.compared || 0).toLocaleString()}</b><span>live switch ports active · ${cb.down || 0} down · ${cb.init || 0} init</span>`;
   // status bar
   const dot = document.getElementById('ldot'), st = document.getElementById('sync-state'), dt = document.getElementById('sync-detail');
   dot.style.background = bad ? LS_COL.down : warn ? LS_COL.init : LS_COL.active;
-  st.textContent = SERVICE ? (LIVE.mode === 'service' ? 'LIVE · switches + UFM' : 'Connecting to sync service…') : 'SNAPSHOT · 2026-10-01 device collection';
-  st.className = LIVE.mode === 'service' ? '' : 'warn';
+  const fr = LIVE.freshness || {}, FRT = {verified:'VERIFIED', partial:'PARTIAL', stale:'STALE', snapshot:'NOT VERIFIED'};
+  st.textContent = SERVICE ? (LIVE.mode === 'service' ? `${FRT[fr.state] || 'LIVE'} · ${fr.expected ? `${fr.reached}/${fr.expected} switches` : 'switches + UFM'}` : 'Connecting to sync service…') : 'SNAPSHOT · 2026-10-01 device collection';
+  st.className = LIVE.mode !== 'service' ? 'warn' : fr.state === 'verified' ? '' : fr.state === 'partial' ? 'warn' : 'bad';
+  st.title = fr.note || (fr.state === 'verified' ? 'Every inventory switch was reached and reported every designed port' : '');
   const ufmAt = LIVE.cabling && LIVE.cabling.scanned_at;
-  dt.innerHTML = `Switches: <b>${esc(fmtTime(LIVE.collected_at))}</b> (${LIVE.switches_collected || 100}) · UFM: <b>${ufmAt ? esc(fmtTime(ufmAt)) : 'not fetched'}</b> · <span title="Inventory and cable records; refreshed in the background about once a day">NetBox inventory: ${nb ? esc(fmtTime(nb.synced_at)) + ` · ${nb.mismatches.length} changed, ${nb.missing.length} missing` : 'baseline export 2026-10-01'}</span>`;
+  dot.style.background = LIVE.mode === 'service' && fr.state && fr.state !== 'verified' ? (fr.state === 'partial' ? LS_COL.init : LS_COL.unverified) : dot.style.background;
+  dt.innerHTML = `${fr.note && LIVE.mode === 'service' ? `<span style="color:${fr.state === 'partial' ? LS_COL.init : LS_COL.unverified}">${esc(fr.note)}</span> · ` : ''}Switches: <b>${esc(fmtTime(LIVE.collected_at))}</b> (${LIVE.switches_collected ?? '?'}) · UFM: <b>${ufmAt ? esc(fmtTime(ufmAt)) : 'not fetched'}</b> · <span title="Inventory and cable records; refreshed in the background about once a day">NetBox inventory: ${nb ? esc(fmtTime(nb.synced_at)) + ` · ${nb.mismatches.length} changed, ${nb.missing.length} missing` : 'baseline export 2026-10-01'}</span>`;
   // design check
   let li = document.getElementById('chk-live'); if (!li) { li = document.createElement('li'); li.id = 'chk-live'; document.querySelector('ul.chk').prepend(li); }
   li.className = bad ? '' : 'ok'; li.style.setProperty('--lc', bad ? LS_COL.down : LS_COL.init);
-  li.innerHTML = `<span><b>Live state</b> (${esc(LIVE.mode === 'service' ? 'sync service' : 'embedded snapshot')}, devices ${esc(fmtTime(LIVE.collected_at))}, checked against the ${esc(LIVE.reference || 'NetBox cable list')}): ${(ep.active || 0).toLocaleString()} of ${(ep.compared || 0).toLocaleString()} switch-side endpoints Active/LinkUp. ${cb.active.toLocaleString()} of ${cb.total.toLocaleString()} links fully up, ${cb.init} initializing, ${cb.down} down${Object.keys(NBX).length ? `, ${Object.keys(NBX).length} changed in NetBox` : ''}. GPU-side RDMA ends are not collected (leaf side only). UFM fnm1 ports: ${(LIVE.ufm || []).filter(u => u[5] === 'active').length} / ${(LIVE.ufm || []).length} active.</span>`;
+  li.innerHTML = `<span><b>Live state</b> (${esc(LIVE.mode === 'service' ? 'sync service' : 'embedded snapshot')}, devices ${esc(fmtTime(LIVE.collected_at))}, checked against the ${esc(LIVE.reference || 'NetBox cable list')}): ${(ep.active || 0).toLocaleString()} of ${(ep.compared || 0).toLocaleString()} switch-side endpoints Active/LinkUp. ${cb.active.toLocaleString()} of ${cb.total.toLocaleString()} links up (leaf–spine: both ends Active; GPU: leaf side Active, the GPU side is not collected), ${cb.init} initializing, ${cb.down} down${cb.unverified ? `, ${cb.unverified.toLocaleString()} not verified` : ''}${Object.keys(NBX).length ? `, ${Object.keys(NBX).length} changed in NetBox` : ''}. GPU-side RDMA ends are not collected (leaf side only). UFM fnm1 ports: ${(LIVE.ufm || []).filter(u => u[5] === 'active').length} / ${(LIVE.ufm || []).length} active.</span>`;
   // exceptions card
   const rows = (LIVE.exceptions || []).map(x => [`<span class="lpill" style="--c:${LS_COL[x[2]]}"><i></i>${LS_TXT[x[2]]}</span>`, cableRef(x[0]), x[1] === 'leaf-spine' ? 'spine' : 'GPU',
     `${lk(devId(x[3]), devId(x[3]))} ${esc(x[4])}`, `<span style="color:${x[5].startsWith('Active') ? 'var(--dim)' : LS_COL[x[2]]}">${esc(stateText(x[5]))}</span>`,
     `${lk(devId(x[6]), devId(x[6]))} ${esc(x[7])}`, `<span style="color:${x[8].startsWith('Active') || x[8] === 'not-collected' ? 'var(--dim)' : LS_COL[x[2]]}">${esc(stateText(x[8]))}</span>`]);
   const nbRows = Object.values(NBX).map(m => [`<span class="lpill" style="--c:${LS_COL.nb}"><i></i>NetBox changed</span>`, cableRef(m[0]), esc(m[5]), m[1] ? `${esc(devId(m[1]))} ${esc(m[2])}` : '—', '', m[3] ? `${esc(devId(m[3]))} ${esc(m[4])}` : '—', '']);
   const ufm = (LIVE.ufm || []).map(u => [u[0].toUpperCase() + ' ' + u[1], `${lk(devId(u[2]), devId(u[2]))} ${esc(u[3])}`, `<span class="lpill" style="--c:${LS_COL[u[5]]}"><i></i>${esc(stateText(u[4]))}</span>`]);
-  document.getElementById('live-ex').innerHTML = `<div class="lsum">${[['active', cb.active, 'links up'], ['init', cb.init, 'initializing'], ['down', cb.down, 'down'], ['nb', Object.keys(NBX).length, 'NetBox changed'], ['unknown', cb.unknown, 'not collected']].map(([k, n, t]) => `<div style="--c:${LS_COL[k]}"><b>${(n || 0).toLocaleString()}</b><span>${t}</span></div>`).join('')}</div>
+  document.getElementById('live-ex').innerHTML = `<div class="lsum">${[['active', cb.active, 'links up'], ['init', cb.init, 'initializing'], ['down', cb.down, 'down'], ['unverified', cb.unverified, 'not verified'], ['nb', Object.keys(NBX).length, 'NetBox changed'], ['unknown', cb.unknown, 'port not reported']].map(([k, n, t]) => `<div style="--c:${LS_COL[k]}"><b>${(n || 0).toLocaleString()}</b><span>${t}</span></div>`).join('')}</div>
     ${rows.length + nbRows.length ? tbl(['Status', 'Cable', 'To', 'Endpoint A', 'A state', 'Endpoint B', 'B state'], [...nbRows, ...rows]) : '<p class="small">No exceptions: every designed backend link in use is Active/LinkUp on the switch side.</p>'}
+    ${(LIVE.unverified || []).length ? `<h4>Not verified: switches not reached by the last collection</h4><p class="small">Their links are not counted as up. Last known state is shown for reference only.</p>${tbl(['Switch', 'Links affected', 'Last read', 'Last known'], LIVE.unverified.map(u => [lk(devId(u[0]), devId(u[0]).toUpperCase()), u[1].toLocaleString(), u[2] ? esc(fmtTime(u[2])) : 'never', esc(Object.entries(u[3]).map(([k, v]) => `${v} ${k}`).join(' · '))]))}` : ''}
     ${ufm.length ? `<h4>UFM → backend leaf (fnm1)</h4>${tbl(['HCA', 'Leaf port', 'Live state'], ufm)}` : ''}
     ${nb && nb.missing.length ? `<p class="small" style="color:${LS_COL.down}">Missing from NetBox: ${nb.missing.slice(0, 40).map(c => '#' + c).join(', ')}${nb.missing.length > 40 ? '…' : ''}</p>` : ''}`;
 }
@@ -665,7 +674,7 @@ const _inspect = inspect; inspect = function (id) { _inspect(id); if (!id || !/^
   const mine = [...(LIVE.exceptions || [])].filter(x => devId(x[3]) === id || devId(x[6]) === id), nbm = Object.values(NBX).filter(m => [devId(m[1]), devId(m[3])].includes(id));
   const s = DEVS[id] || 'active', total = id.startsWith('bes') ? (spBy[+id.slice(3)] || []).length : id.startsWith('bel') ? (upBy[+id.slice(3)] || []).length + (gBy[+id.slice(3)] || []).length : (trBy[+id.slice(3)] || []).length;
   const box = document.createElement('div'); box.className = 'live-sum'; box.style.setProperty('--c', LS_COL[s]);
-  box.innerHTML = `<b>${s === 'active' ? 'All backend links up' : mine.length + nbm.length + ' live exception' + (mine.length + nbm.length > 1 ? 's' : '')}</b> · ${total - mine.length} / ${total} cables Active${id.startsWith('gpu') ? ' (leaf side)' : ''}<br>${mine.map(x => `${cableRef(x[0])} ${esc(devId(x[3]) === id ? x[4] : x[7])} → ${esc(devId(devId(x[3]) === id ? x[6] : x[3]))} <span style="color:${LS_COL[x[2]]}">${LS_TXT[x[2]]}</span>`).join('<br>')}${nbm.map(m => `<br>${cableRef(m[0])} <span style="color:${LS_COL.nb}">NetBox endpoint changed</span>`).join('')}<span class="small"> · devices ${esc(fmtTime(LIVE.collected_at))}</span>`;
+  box.innerHTML = `<b>${s === 'unverified' ? 'Not verified: this switch was not reached by the last collection' : s === 'active' ? 'All backend links up' : mine.length + nbm.length + ' live exception' + (mine.length + nbm.length > 1 ? 's' : '')}</b> · ${s === 'unverified' ? `${total} cables not verified (last known state is not shown as current)` : `${total - mine.length} / ${total} cables Active${id.startsWith('gpu') ? ' (leaf side)' : ''}`}<br>${mine.map(x => `${cableRef(x[0])} ${esc(devId(x[3]) === id ? x[4] : x[7])} → ${esc(devId(devId(x[3]) === id ? x[6] : x[3]))} <span style="color:${LS_COL[x[2]]}">${LS_TXT[x[2]]}</span>`).join('<br>')}${nbm.map(m => `<br>${cableRef(m[0])} <span style="color:${LS_COL.nb}">NetBox endpoint changed</span>`).join('')}<span class="small"> · devices ${esc(fmtTime(LIVE.collected_at))}</span>`;
   insp.querySelector('h2').after(box); };
 const _tipFor = tipFor; tipFor = function (e, id) { _tipFor(e, id); const s = DEVS[id]; if (/^(bes|bel|gpu)\d+$/.test(id)) tip.insertAdjacentHTML('beforeend', `<br><span style="color:${LS_COL[s || 'active']}">● live: ${s ? LS_TXT[s].toLowerCase() + ' link(s)' : 'all links up'}</span>`); };
 
@@ -695,7 +704,7 @@ const stepHtml = (name, s) => { const st = (s && s.state) || 'pending', c = st =
   else if (s && name === 'UFM') det = st === 'running' ? `${esc((typeof UFM_STEP !== 'undefined' && UFM_STEP[s.step]) || s.step || '')} ${esc(s.detail || '')}` : st === 'complete' ? `${s.source === 'rest' ? 'live links' : 'scan file'} from ${esc(s.host || '')} · ${s.miscabled ?? '?'} miscabled · ${(s.trays || 0).toLocaleString()} trays` : '';
   else if (s && name === 'NetBox') det = st === 'complete' ? `${s.mode === 'incremental' ? `incremental · ${s.changed} changed in log` : 'full'} · ${s.checked.toLocaleString()} cables · ${s.mismatches} differ · ${s.missing} missing · ${s.requests} API calls` : st === 'running' ? (s.mode === 'incremental' ? `change log · ${s.changed ?? '…'} cables to re-read` : s.pages_total ? `${s.pages_completed}/${s.pages_total} cable pages` : 'reading change log / cable pages…') : '';
   else if (s && (name === 'Devices' || name === 'Switches')) det = st === 'running' ? (s.total ? `${s.done || 0}/${s.total} switches${s.failed ? ` · ${s.failed} failed` : ''}${s.fanout ? ' · ' + s.fanout + ' fan-out' : ''}` : `resolving management IPs${s.address_source ? ' · ' + s.address_source : ''}…`)
-    : (st === 'complete' || st === 'partial') ? `${s.switches || '?'} switches · ${(s.updated_interfaces || 0).toLocaleString()} IB ports${s.failed ? ` · ${s.failed} failed` : ''} · ${fmtS(s.seconds)}${s.address_source ? ' · IPs: ' + s.address_source : ''}${s.fanout_fallback ? ' · fell back to local fan-out: ' + esc(s.fanout_fallback) : ''}` : '';
+    : (st === 'complete' || st === 'partial') ? `${s.coverage ? `${s.coverage.state === 'verified' ? 'verified · ' : ''}${s.coverage.reached}/${s.coverage.expected} switches${s.coverage.missing.length ? ` (not reached: ${s.coverage.missing.slice(0, 6).map(devId).join(', ')}${s.coverage.missing.length > 6 ? '…' : ''})` : ''}${Object.keys(s.coverage.missing_ports || {}).length ? ` · designed ports not reported on ${Object.keys(s.coverage.missing_ports).map(devId).join(', ')}` : ''}` : (s.switches || '?') + ' switches'} · ${(s.updated_interfaces || 0).toLocaleString()} IB ports${s.failed ? ` · ${s.failed} failed` : ''} · ${fmtS(s.seconds)}${s.address_source ? ' · IPs: ' + s.address_source : ''}${s.fanout_fallback ? ' · fell back to local fan-out: ' + esc(s.fanout_fallback) : ''}` : '';
   return `<span class="step" style="--c:${st === 'skipped' ? 'var(--faint)' : c}"><i class="${st === 'running' ? 'spin' : ''}"></i><b>${name}</b> ${st}${det ? ' · ' + det : ''}</span>`; };
 const timingHtml = t => !t ? '' : [['devices', t.devices_s], ['IPs', t.addresses_s], ['UFM', t.ufm_s], ['NetBox', t.netbox_s]].filter(x => x[1] != null).map(([k, v]) => `${k} ${fmtS(v)}`).join(' ‖ ');
 const nbBtn = document.getElementById('nb-btn');
@@ -706,7 +715,12 @@ async function runSync(kind) {
   syncBtn.disabled = nbBtn.disabled = true; steps.hidden = false;
   steps.innerHTML = netboxOnly ? stepHtml('NetBox', {state:'running'}) : stepHtml('Switches', {state:'running'}) + stepHtml('UFM', {state:'pending'});
   try { const r = await fetch(netboxOnly ? '/api/netbox/refresh' : '/api/sync', {method:'POST'}), d = await r.json(); if (!r.ok) throw Error(d.error);
-    const poll = async () => { const p = await fetch(`/api/sync/${d.run_id}`), x = await p.json();
+    let misses = 0;
+    const poll = async () => { let x;
+      try { const p = await fetch(`/api/sync/${d.run_id}`); x = await p.json(); if (!p.ok) throw Error(x.error || 'HTTP ' + p.status); misses = 0; }
+      catch (err) { if (++misses < 6) { steps.insertAdjacentHTML('beforeend', misses === 1 ? `<span class="step" id="sync-retry" style="--c:${LS_COL.init}"><i></i>status unavailable, retrying…</span>` : ''); setTimeout(poll, 2000 * misses); return; }
+        steps.insertAdjacentHTML('beforeend', `<span class="step" style="--c:${LS_COL.down}"><i></i><b>Lost contact with the service</b> ${esc(err.message)} · the sync may still finish; the page refreshes when it does</span>`);
+        syncBtn.disabled = nbBtn.disabled = false; return; }
       steps.innerHTML = (netboxOnly ? stepHtml('NetBox', x.netbox) : allSteps(x)) + (x.finished_at ? `<span class="step" style="--c:${x.state === 'complete' ? LS_COL.active : LS_COL.init}"><b>${netboxOnly ? 'NetBox refresh' : 'Sync'} ${esc(x.state)} in ${fmtS(x.timings && x.timings.total_s)}</b> ${esc(timingHtml(x.timings))} · ${esc(fmtTime(x.finished_at))}</span>` : '');
       if (x.state === 'running') { loadLive(); setTimeout(poll, 1500); return; }
       await loadLive(); if (x.ufm && x.ufm.state === 'complete') { cabStamp = null; loadCab(); if (typeof loadInc === 'function') loadInc(); }
@@ -985,7 +999,11 @@ async function fetchFromUfm() {
   try {
     const r = await fetch('/api/cabling/fetch', {method:'POST'}), d = await r.json(); if (!r.ok) throw Error(d.error);
     const t0 = Date.now();
-    const poll = async () => { const p = await fetch(`/api/cabling/fetch/${d.run_id}`), x = await p.json();
+    let misses = 0;
+    const poll = async () => { let p, x;
+      try { p = await fetch(`/api/cabling/fetch/${d.run_id}`); x = await p.json(); misses = 0; }
+      catch (err) { if (++misses < 6) { setTimeout(poll, 2000 * misses); return; }
+        ufmBusy = false; setUfmMsg(`<span style="color:${CB.err}">✗ Lost contact with the service: ${esc(err.message)}</span>`); document.querySelectorAll('#ufm-fetch').forEach(b => b.disabled = false); return; }
       if (x.state === 'running') { setUfmMsg(`<span class="step" style="--c:${CB.warn}"><i class="spin"></i><b>${esc(UFM_STEP[x.step] || x.step)}</b> ${esc(x.detail || '')} · ${Math.round((Date.now() - t0)/1000)} s</span>`); setTimeout(poll, 1200); return; }
       ufmBusy = false;
       if (x.state === 'complete') { cabStamp = null; await loadCab(); if (typeof loadInc === 'function') loadInc();

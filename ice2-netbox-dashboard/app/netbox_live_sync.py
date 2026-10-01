@@ -43,10 +43,12 @@ from __future__ import annotations
 
 import argparse
 import sys as _sys
+import collections
 import csv
 import getpass
 import gzip
 import hashlib
+import os
 import json
 import secrets
 import shutil
@@ -111,11 +113,29 @@ def next_path(page: dict) -> str | None:
     return nxt[nxt.find("/api/"):] if nxt and "/api/" in nxt else None
 
 
+def termination_problem(cable: dict) -> str:
+    """'' when the cable has exactly one interface termination with a device and port on each side."""
+    for side in ("a", "b"):
+        terms = cable.get(side + "_terminations") or []
+        if len(terms) != 1:
+            return "%d %s-side terminations" % (len(terms), side.upper())
+        term = terms[0]
+        obj = term.get("object") or {}
+        if term.get("object_type") not in (None, "dcim.interface"):
+            return "%s side ends on a %s, not an interface" % (side.upper(), term.get("object_type"))
+        if not (obj.get("device") or {}).get("name") or not obj.get("name"):
+            return "malformed %s-side termination" % side.upper()
+    return ""
+
+
 def cable_endpoints(cable: dict) -> list | None:
-    terms_a, terms_b = cable.get("a_terminations") or [], cable.get("b_terminations") or []
-    if not terms_a or not terms_b:
-        return None
-    ea, eb = endpoint_from_termination(terms_a[0]), endpoint_from_termination(terms_b[0])
+    """[a_dev, a_port, b_dev, b_port], or None plus nothing usable. A cable that is not exactly
+    one interface on each side returns ["", "", "", "", "<problem>"] so it is never counted as matching."""
+    problem = termination_problem(cable)
+    if problem:
+        return ["", "", "", "", problem]
+    ea = endpoint_from_termination(cable["a_terminations"][0])
+    eb = endpoint_from_termination(cable["b_terminations"][0])
     return [ea["device"], ea["port"], eb["device"], eb["port"]]
 
 
@@ -134,18 +154,35 @@ def device_details(device: dict) -> dict:
     }
 
 
-def link_status(states: list[str]) -> str:
-    """Collapse the collected endpoint states of one cable into a single status."""
-    collected = [s for s in states if s and s != "not-collected"]
-    if not collected:
-        return "unknown"
+def link_status(states: list[str], required: int | None = None) -> str:
+    """Collapse the endpoint states of one cable into a single status.
+
+    `required` is how many ends must be collected and Active for "active": 2 for a
+    leaf-spine cable, 1 for a leaf-GPU cable (the GPU side is never collected).
+    A required end that was not collected in the latest run ("stale"/"not-collected")
+    makes an otherwise healthy cable "unverified", never "active"."""
+    collected = [s for s in states if s and s not in ("not-collected", "stale", "missing-port")]
     if any(s.startswith("Down/") for s in collected):
         return "down"
     if any(s.startswith("Initialize/") or s.startswith("Armed/") for s in collected):
         return "init"
-    if all(s.startswith("Active/LinkUp/") for s in collected):
+    need = len(states) if required is None else required
+    if len(collected) < need:
+        return "unknown" if any(s == "missing-port" for s in states) else "unverified"
+    if collected and all(s.startswith("Active/LinkUp/") for s in collected):
         return "active"
     return "unknown"
+
+
+def file_fingerprint(*paths) -> str:
+    """Short hash of the topology and inventory files the evidence was collected against."""
+    digest = hashlib.sha256()
+    for path in paths:
+        try:
+            digest.update(Path(path).read_bytes() if path else b"-")
+        except OSError:
+            digest.update(b"missing")
+    return digest.hexdigest()[:16]
 
 
 class SyncState:
@@ -174,6 +211,14 @@ class SyncState:
         self.device_parallel = getattr(opts, "device_parallel", 10)
         self.fanout = getattr(opts, "fanout", "local")
         self.netbox_every_hours = getattr(opts, "netbox_every_hours", 24.0)
+        self.stale_after_minutes = getattr(opts, "stale_after_minutes", 60.0)
+        # Evidence freshness: which switches the latest finished collection reached, when each
+        # switch was last read, and the coverage of that collection.
+        self.last_ok: set[str] = set()
+        self.run_ok: set[str] = set()
+        self.switch_at: dict[str, str] = {}
+        self.coverage: dict | None = None
+        self.evidence_note = ""
         self.fields_ok: bool | None = None          # NetBox `fields=` support, learned on first use
         self.nb_cables: dict[str, list | None] = {}  # cable id -> [a_dev, a_port, b_dev, b_port]
         self.nb_full_at: str | None = None
@@ -181,10 +226,10 @@ class SyncState:
         self.version = 0
         self._live_cache: tuple | None = None
         self.load_baseline()
-        self.load_latest()
         self.load_cable_cache()
         self.ufm_scan = Path(getattr(opts, "ufm_scan", None) or DEFAULT_UFM_SCAN)
         self.expected_topology = Path(getattr(opts, "expected_topology", None) or DEFAULT_EXPECTED)
+        self.load_latest()
         self.ufm_master = Path(getattr(opts, "ufm_master", None) or DEFAULT_UFM_MASTER)
         self.ufm_report = Path(getattr(opts, "ufm_report", None) or DEFAULT_UFM_REPORT)
         self._cabling: tuple | None = None
@@ -205,18 +250,37 @@ class SyncState:
                 self.live[(row["endpoint_a_device"], row["endpoint_a_port"])] = row["endpoint_a_live_state"]
                 self.live[(row["endpoint_b_device"], row["endpoint_b_port"])] = row["endpoint_b_live_state"]
 
+    def evidence_fingerprint(self) -> str:
+        return file_fingerprint(self.connections, self.expected_topology, self.devices)
+
     def load_latest(self) -> None:
-        """Re-apply the most recent successful collection so a restart keeps the newest evidence."""
+        """Re-apply the most recent collection so a restart keeps the newest evidence.
+
+        The saved evidence is trusted as current only if it was collected against the same
+        topology and inventory files (fingerprint); otherwise it is kept for display but
+        every switch counts as not verified until the next sync."""
         if not LATEST.is_file():
             return
         try:
             saved = json.loads(LATEST.read_text(encoding="utf-8"))
+            if saved.get("version") == 2:
+                # the saved snapshot is complete per switch: drop the bundled export's states for those switches
+                read = set(saved.get("switch_at", {}))
+                for key in [k for k in self.live if k[0] in read]:
+                    del self.live[key]
             for key, state in saved.get("ports", {}).items():
                 device, port = key.split("|", 1)
                 self.live[(device, port)] = state
             self.collected_at = saved.get("collected_at", self.collected_at)
             self.switches = saved.get("switches", [])
+            self.switch_at = saved.get("switch_at", {})
+            self.coverage = saved.get("coverage")
             self.source = "device collection %s (%d switches)" % (self.collected_at, len(self.switches))
+            if saved.get("version") == 2 and saved.get("fingerprint") == self.evidence_fingerprint():
+                self.last_ok = set(saved.get("last_ok", []))
+            else:
+                self.evidence_note = ("saved evidence was collected against a different topology or inventory; sync to verify"
+                                      if saved.get("version") == 2 else "saved evidence predates coverage tracking; sync to verify")
         except (OSError, ValueError) as error:
             print("[netbox-live-sync] ignoring unreadable %s: %s" % (LATEST, error))
 
@@ -492,16 +556,30 @@ class SyncState:
         with self.lock:
             live = dict(self.live)
             collected_at, source, switches = self.collected_at, self.source, list(self.switches)
-        counts = {"active": 0, "init": 0, "down": 0, "other": 0, "not_collected": 0}
-        cable_counts = {"active": 0, "init": 0, "down": 0, "unknown": 0}
+        with self.lock:
+            fresh = set(self.last_ok) | set(self.run_ok)
+            switch_at = dict(self.switch_at)
+        counts = {"active": 0, "init": 0, "down": 0, "other": 0, "not_collected": 0, "stale": 0}
+        cable_counts = {"active": 0, "init": 0, "down": 0, "unverified": 0, "unknown": 0}
         exceptions = []
+        unverified = collections.defaultdict(lambda: {"links": 0, "last_seen": None, "last_states": collections.Counter()})
         links = self.live_links()
+
+        def endpoint(dev: str, port: str) -> str:
+            """The state used for status: only switches reached by the latest collection count."""
+            if "-swi-" not in dev:
+                return "not-collected"            # GPU side: never collected
+            if dev not in fresh:
+                return "stale"
+            return live.get((dev, port), "missing-port")
+
         for cable_id, ctype, a_dev, a_port, b_dev, b_port, _src in links:
-            a = live.get((a_dev, a_port), "not-collected")
-            b = live.get((b_dev, b_port), "not-collected")
+            a, b = endpoint(a_dev, a_port), endpoint(b_dev, b_port)
             for state in (a, b):
                 if state == "not-collected":
                     counts["not_collected"] += 1
+                elif state in ("stale", "missing-port"):
+                    counts["stale"] += 1
                 elif state.startswith("Active/LinkUp/"):
                     counts["active"] += 1
                 elif state.startswith("Initialize/") or state.startswith("Armed/"):
@@ -510,19 +588,31 @@ class SyncState:
                     counts["down"] += 1
                 else:
                     counts["other"] += 1
-            status = link_status([a, b])
+            status = link_status([a, b], required=2 if ctype == "leaf-spine" else 1)
             cable_counts[status] += 1
-            if status != "active":
-                exceptions.append([int(cable_id) if cable_id else 0, ctype, status, a_dev, a_port, a, b_dev, b_port, b])
+            if status == "unverified":
+                for dev, port, state in ((a_dev, a_port, a), (b_dev, b_port, b)):
+                    if state == "stale":
+                        item = unverified[dev]
+                        item["links"] += 1
+                        item["last_seen"] = switch_at.get(dev)
+                        item["last_states"][(live.get((dev, port)) or "never collected").split("/")[0] or "?"] += 1
+            elif status != "active":
+                shown = [live.get((a_dev, a_port), "not-collected") if a in ("stale",) else a, live.get((b_dev, b_port), "not-collected") if b in ("stale",) else b]
+                exceptions.append([int(cable_id) if cable_id else 0, ctype, status, a_dev, a_port, shown[0], b_dev, b_port, shown[1]])
         exceptions.sort(key=lambda r: ({"down": 0, "init": 1, "unknown": 2}.get(r[2], 3), r[0]))
+        unverified_rows = sorted([[dev, v["links"], v["last_seen"], dict(v["last_states"])] for dev, v in unverified.items()], key=lambda r: -r[1])
         view = {
             "mode": "service",
             "source": source,
             "collected_at": collected_at,
             "served_at": now_iso(),
-            "switches_collected": len(switches) or 100,
-            "endpoints": {"compared": sum(counts.values()) - counts["not_collected"], **counts},
+            "switches_collected": len(switches),
+            "endpoints": {"compared": sum(counts.values()) - counts["not_collected"] - counts["stale"], **counts},
             "cables": {"total": len(links), **cable_counts},
+            "unverified": unverified_rows,
+            "freshness": self.freshness(),
+            "coverage": self.coverage,
             "reference": "design topology" if links and links[0][6] == "design" else "NetBox",
             "exceptions": exceptions,
             "ufm": [],
@@ -631,7 +721,7 @@ class SyncState:
         except Exception as error:
             report = None
             print("[netbox-live-sync] cabling report unavailable for incidents:", error)
-        key = (self._cabling[0] if self._cabling else None, live.get("collected_at"), len(live.get("exceptions") or []),
+        key = (self._cabling[0] if self._cabling else None, live.get("collected_at"), len(live.get("exceptions") or []), json.dumps(live.get("freshness"), sort_keys=True),
                json.dumps((self.ufm_fetch_state().get("last") or {}).get("state")), int(time.time() // 900))
         cached = getattr(self, "_incidents", None)
         if cached and cached[0] == key:
@@ -743,11 +833,10 @@ class SyncState:
         if not cable_id.isdigit():
             raise RuntimeError("Cable ID must be numeric.")
         cable = self.get_netbox("/api/dcim/cables/%s/" % cable_id)
-        terms_a = cable.get("a_terminations") or []
-        terms_b = cable.get("b_terminations") or []
-        if not terms_a or not terms_b:
-            raise RuntimeError("Cable %s does not have two interface terminations in NetBox." % cable_id)
-        endpoints = [endpoint_from_termination(terms_a[0]), endpoint_from_termination(terms_b[0])]
+        problem = termination_problem(cable)
+        if problem:
+            raise RuntimeError("Cable %s cannot be verified: %s in NetBox (exactly one interface per side is required)." % (cable_id, problem))
+        endpoints = [endpoint_from_termination(cable["a_terminations"][0]), endpoint_from_termination(cable["b_terminations"][0])]
         baseline = self.baseline.get(cable_id)
         with self.lock:
             live = [{**ep, "live_state": self.live.get((ep["device"], ep["port"]), "not-collected")} for ep in endpoints]
@@ -913,6 +1002,9 @@ class SyncState:
             ends = self.nb_cables[cable_id]
             if not ends:
                 mismatches.append([int(cable_id), "", "", "", "", "missing termination"])
+                continue
+            if len(ends) > 4:
+                mismatches.append([int(cable_id), "", "", "", "", ends[4]])
                 continue
             expected = sorted([(row["endpoint_a_device"], row["endpoint_a_port"]), (row["endpoint_b_device"], row["endpoint_b_port"])])
             if sorted([(ends[0], ends[1]), (ends[2], ends[3])]) != expected:
@@ -1090,6 +1182,7 @@ class SyncState:
             log_file = STATE_DIR / (run_id + ".log")
             log_handle = log_file.open("w", encoding="utf-8")
             process = subprocess.Popen(command, stdout=log_handle, stderr=subprocess.STDOUT, text=True)
+            self.run_ok = set()
             self.refreshes[run_id] = {"state": "running", "process": process, "command": command, "output_dir": output_dir, "log": str(log_file),
                                       "management_addresses_from_netbox": address_count, "started_at": now_iso(), "fanout": self.fanout,
                                       "done": 0, "failed": 0, "total": self.device_count()}
@@ -1121,12 +1214,20 @@ class SyncState:
             if ports:
                 fresh.update(ports)
                 record.setdefault("switches_ok", []).append(host)
+                record.setdefault("ports_by_switch", {})[host] = ports
         failed = sum(1 for f in err_dir.glob("*.txt") if f.stat().st_size) if err_dir.is_dir() else 0
         failed += len(record.get("unparsable", []))
         record.update(done=len(list(raw_dir.glob("*.txt"))) if raw_dir.is_dir() else 0, failed=failed)
         if fresh:
             parsed.update(fresh)
+            stamp = now_iso()
             with self.lock:
+                for host in {dev for dev, _ in fresh}:
+                    # replace the switch's ports entirely: a port it no longer reports is not kept
+                    for key in [k for k in self.live if k[0] == host and k not in fresh]:
+                        del self.live[key]
+                    self.switch_at[host] = stamp
+                    self.run_ok.add(host)
                 self.live.update(fresh)
                 self.source = "device collection in progress (%d/%d switches)" % (record["done"], record.get("total") or record["done"])
                 self.bump()
@@ -1163,30 +1264,93 @@ class SyncState:
                 raise RuntimeError("collector exited with %s and produced no parsable interface output" % code)
             stamp = now_iso()
             switches = sorted(record.get("switches_ok", []))
-            state = "complete" if not record.get("failed") else "partial"
+            coverage = self.collection_coverage(record, switches, stamp)
+            record.pop("ports_by_switch", None)
+            state = "complete" if coverage["state"] == "verified" else "partial"
             with self.lock:
                 self.collected_at = stamp
                 self.switches = switches
-                self.source = "device collection %s (%d switches)" % (stamp, len(switches))
+                self.last_ok = set(switches)
+                self.coverage = coverage
+                self.evidence_note = ""
+                self.source = "device collection %s (%d of %d switches)" % (stamp, len(switches), coverage["expected"])
                 record.update(state=state, updated_interfaces=len(parsed), switches=len(switches), finished_at=stamp,
-                              seconds=round(time.monotonic() - t0, 1))
+                              seconds=round(time.monotonic() - t0, 1), coverage={k: coverage[k] for k in ("state", "expected", "reached", "missing", "missing_ports")})
+                snapshot = {"%s|%s" % key: value for key, value in self.live.items() if "-swi-" in key[0]}
                 self.bump()
-            if record.get("failed"):
+            if coverage["missing"]:
                 ADDRESS_CACHE.unlink(missing_ok=True)  # an IP may have moved; re-resolve next time
-            previous = {}
-            if LATEST.is_file():
-                try:
-                    previous = json.loads(LATEST.read_text(encoding="utf-8")).get("ports", {})
-                except (OSError, ValueError):
-                    previous = {}
-            previous.update({"%s|%s" % key: value for key, value in parsed.items()})
-            LATEST.write_text(json.dumps({"collected_at": stamp, "switches": switches, "ports": previous}), encoding="utf-8")
+            self.write_json_atomic(LATEST, {"version": 2, "fingerprint": self.evidence_fingerprint(), "collected_at": stamp,
+                                            "switches": switches, "last_ok": switches, "switch_at": self.switch_at,
+                                            "coverage": coverage, "ports": snapshot})
         except (RuntimeError, OSError) as error:
             if not log_handle.closed:
                 log_handle.close()
             record.update(state="failed", error=str(error), exit_code=record["process"].returncode)
             with self.lock:
                 self.bump()
+
+    def expected_switches(self) -> list[str]:
+        try:
+            with self.devices.open(newline="", encoding="utf-8-sig") as handle:  # type: ignore[union-attr]
+                return [row["hostname"].strip() for row in csv.DictReader(handle) if (row.get("hostname") or "").strip()]
+        except (OSError, AttributeError, KeyError):
+            return []
+
+    def collection_coverage(self, record: dict, switches: list[str], stamp: str) -> dict:
+        """How complete a collection is: switches reached vs. the inventory, and designed
+        ports each reached switch did not report."""
+        expected = self.expected_switches()
+        reached = set(switches)
+        err_dir = record["output_dir"] / "errors"
+        failed = sorted(f.stem for f in err_dir.glob("*.txt") if f.stat().st_size) if err_dir.is_dir() else []
+        unparsable = sorted(record.get("unparsable", []))
+        missing = sorted(set(expected) - reached)
+        designed = collections.defaultdict(set)
+        for _cid, _t, a_dev, a_port, b_dev, b_port, _src in self.live_links():
+            for dev, port in ((a_dev, a_port), (b_dev, b_port)):
+                if "-swi-" in dev:
+                    designed[dev].add(port)
+        by_switch = record.get("ports_by_switch", {})
+        missing_ports = {}
+        for host in switches:
+            seen = {port for _dev, port in by_switch.get(host, {})}
+            gone = sorted(designed.get(host, set()) - seen)
+            if gone:
+                missing_ports[host] = gone[:20] + (["… %d more" % (len(gone) - 20)] if len(gone) > 20 else [])
+        state = "verified" if not missing and not missing_ports and expected else "partial"
+        return {"state": state, "collected_at": stamp, "expected": len(expected), "reached": len(reached & set(expected)) if expected else len(reached),
+                "missing": missing, "failed": failed, "unparsable": unparsable, "missing_ports": missing_ports,
+                "missing_port_count": sum(len(v) for v in missing_ports.values())}
+
+    @staticmethod
+    def write_json_atomic(path: Path, payload: dict) -> None:
+        """Write to a temporary file in the same folder, then rename: never a half-written file."""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(".%s.%d.tmp" % (path.name, os.getpid()))
+        with tmp.open("w", encoding="utf-8") as handle:
+            json.dump(payload, handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+
+    def freshness(self) -> dict:
+        """verified / partial / stale / snapshot, for the status bar and the API."""
+        cov = self.coverage
+        age = age_hours(self.collected_at) * 60 if self.collected_at else None
+        if age is not None and age == float("inf"):
+            age = None
+        if not cov or not self.last_ok:
+            return {"state": "snapshot" if not cov else "stale", "note": self.evidence_note or "no verified collection yet; press Sync fabric",
+                    "collected_at": self.collected_at, "age_minutes": round(age) if age is not None else None}
+        if age is not None and age > self.stale_after_minutes:
+            return {"state": "stale", "note": "last collection is %d min old (stale after %g min)" % (age, self.stale_after_minutes),
+                    "collected_at": self.collected_at, "age_minutes": round(age), "reached": cov["reached"], "expected": cov["expected"]}
+        return {"state": cov["state"], "collected_at": self.collected_at, "age_minutes": round(age) if age is not None else None,
+                "reached": cov["reached"], "expected": cov["expected"], "missing": cov["missing"],
+                "missing_port_count": cov.get("missing_port_count", 0),
+                "note": "" if cov["state"] == "verified" else "%d of %d switches reached%s" % (
+                    cov["reached"], cov["expected"], ", %d designed ports not reported" % cov["missing_port_count"] if cov.get("missing_port_count") else "")}
 
     def parse_raw_file(self, raw_file: Path) -> dict[tuple[str, str], str] | None:
         text = raw_file.read_text(encoding="utf-8", errors="replace")
@@ -1221,7 +1385,7 @@ class SyncState:
         item = self.refreshes.get(run_id)
         if not item:
             raise RuntimeError("Unknown refresh run.")
-        return {key: value for key, value in item.items() if key not in {"process", "output_dir", "log", "command", "switches_ok"}}
+        return {key: value for key, value in item.items() if key not in {"process", "output_dir", "log", "command", "switches_ok", "ports_by_switch"}}
 
 class Handler(BaseHTTPRequestHandler):
     state: SyncState
@@ -1328,8 +1492,10 @@ class Handler(BaseHTTPRequestHandler):
         except RuntimeError as error:
             self.respond(HTTPStatus.BAD_GATEWAY, {"error": str(error)})
         except (OSError, ValueError) as error:
-            where = "UFM scan" if path.startswith("/api/cabling") else "request"
+            where = "UFM scan" if path.startswith("/api/cabling") else "dashboard file" if path in {"/", "/index.html"} else "request"
             self.respond(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "Could not complete the %s: %s" % (where, error)})
+        except Exception as error:  # never an empty reply: report any other failure as JSON
+            self.respond(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "%s: %s" % (type(error).__name__, error)})
 
     def do_POST(self) -> None:
         path = urlparse(self.path).path
@@ -1342,6 +1508,8 @@ class Handler(BaseHTTPRequestHandler):
             self.respond(HTTPStatus.ACCEPTED, actions[path]())
         except RuntimeError as error:
             self.respond(HTTPStatus.CONFLICT, {"error": str(error)})
+        except Exception as error:  # never an empty reply
+            self.respond(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "%s: %s" % (type(error).__name__, error)})
 
 
 def main() -> int:
@@ -1374,13 +1542,15 @@ def main() -> int:
     tuning.add_argument("--ufm-fetch-every-minutes", type=float, default=0,
                         help="Fetch UFM's fabric files in the background on this interval (0 = only with the Fetch from UFM button).")
     tuning.add_argument("--sync-every-minutes", type=float, default=0, help="Run the fabric sync (switches + UFM) in the background on this interval (0 = on demand only).")
+    tuning.add_argument("--stale-after-minutes", type=float, default=60.0,
+                        help="Show switch evidence as STALE when the last collection is older than this.")
     tuning.add_argument("--netbox-every-hours", type=float, default=24.0,
                         help="Refresh NetBox inventory (IPs, models, cable records) in the background this often; 0 = only with Refresh NetBox.")
     args = parser.parse_args()
     if not 1 <= args.device_parallel <= 25:
         raise SystemExit("--device-parallel must be between 1 and 25")
     if not args.diagram.is_file() or not args.connections.is_file():
-        raise SystemExit("Diagram or backend connection CSV is missing.")
+        raise SystemExit("Missing file: %s" % (args.diagram if not args.diagram.is_file() else args.connections))
     Handler.state = SyncState(args.netbox_url, args.netbox_host_header, args.connections, args.device_profile, args.devices, args.known_hosts, args.commands, args)
     if args.ufm_fetch_every_minutes > 0:
         threading.Thread(target=Handler.state.ufm_schedule, args=(args.ufm_fetch_every_minutes,), daemon=True).start()

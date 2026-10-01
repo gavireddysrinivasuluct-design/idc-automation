@@ -247,7 +247,7 @@ curl -s http://127.0.0.1:8765/api/health; echo        # expect "netbox": "reacha
 Open **http://127.0.0.1:8765/** in a browser and press **⟳ Sync fabric**. The first sync also does a **full** NetBox pull, because there is no inventory yet. A successful result looks like this:
 
 ```
-Switches complete · 100 switches · 14,500 IB ports · 33.4 s · IPs: netbox bulk
+Switches complete · verified · 100/100 switches · 14,500 IB ports · 33.4 s · IPs: netbox bulk
 UFM      complete · live links from 10.1.67.190 · 8 miscabled · 1,120 trays     (or "skipped" until 4.9 is done)
 NetBox   complete · full · 5,424 cables · 0 differ · 0 missing · 25 API calls
 Sync complete in 34.2 s   devices … ‖ IPs … ‖ UFM … ‖ NetBox …
@@ -329,7 +329,7 @@ pkill -f app/netbox_live_sync.py                     # stop it
 ### What a successful sync looks like
 
 ```
-Switches complete · 100 switches · 14,500 IB ports · 33.4 s · IPs: local cache
+Switches complete · verified · 100/100 switches · 14,500 IB ports · 33.4 s · IPs: local cache
 UFM      complete · live links from 10.1.67.190 · 8 miscabled · 1,120 trays
 NetBox   skipped · inventory refreshes every 24 h · last Oct 02, 09:12
 Sync complete in 34.2 s   devices 34.2 s ‖ IPs 0.0 s ‖ UFM 6.9 s
@@ -348,7 +348,14 @@ Sync complete in 34.2 s   devices 34.2 s ‖ IPs 0.0 s ‖ UFM 6.9 s
 
 ## 6. Using the dashboard
 
-- **Status bar.** Shows LIVE or SNAPSHOT, when the switches, UFM and NetBox inventory were last read, and the **Refresh NetBox** and **⟳ Sync fabric** buttons. The page re-checks for new data every 15 seconds.
+- **Status bar.** Says how far the switch evidence can be trusted, when the switches, UFM and NetBox inventory were last read, and has the **Refresh NetBox** and **⟳ Sync fabric** buttons. The page re-checks for new data every 15 seconds.
+
+  | Label | Meaning |
+  | --- | --- |
+  | **VERIFIED · 100/100 switches** | The last collection reached every inventory switch, and each one reported every designed port |
+  | **PARTIAL · 98/100 switches** | Some switches were not reached, or did not report designed ports. Their links show as *not verified*, never as up. |
+  | **STALE** | The last collection is older than `--stale-after-minutes` (60), or was made against a different topology or inventory file |
+  | **NOT VERIFIED** | No collection yet since the service started with these files; press **⟳ Sync fabric** |
 - **Canvas.**
   - Every spine and leaf has a status dot: green up, amber initializing, red down, orange changed in NetBox.
   - Leaf–spine links with a problem are drawn as dashed overlay lines.
@@ -363,7 +370,11 @@ Sync complete in 34.2 s   devices 34.2 s ‖ IPs 0.0 s ‖ UFM 6.9 s
   - A **GPU tray** shows its four RDMA links as UFM sees them, and its frontend (eth0/eth1 to the SpectrumX leaves) and out-of-band ports (BMC, OS MGMT, BF MGMT) from NetBox. UFM sees only the RDMA fabric, and the frontend and OOB switches are not collected, so those have no live state.
 - **Incident banner** under the status bar: how many critical, major, minor and info incidents there are, and the most severe one. **View incidents** opens the Incidents tab. See [6.2](#62-incidents).
 - **Check tabs** below the diagram: **Incidents**, **Cabling vs UFM** and **Live link state**. Each tab shows a count of items to review, or ✓ when there are none. Click a tab or use the arrow keys to switch; the page remembers your last tab.
-- **Live link state tab.** Every designed link in use, as the switches report it: counts, the problem list (down, initializing, plus NetBox records that changed or are missing), and the UFM `fnm1` port states. A `—` in the cable column means NetBox has no cable record for that designed link.
+- **Live link state tab.** Every designed link in use, as the switches report it: counts, the problem list (down, initializing, port not reported, plus NetBox records that changed or are missing), the switches not reached by the last collection, and the UFM `fnm1` port states. A `—` in the cable column means NetBox has no cable record for that designed link.
+  - A **leaf–spine** link is *up* only when **both** switches were reached and both ends are Active.
+  - A **GPU** link is *up* when its leaf end is Active; the GPU side is never collected.
+  - A link with an end on a switch that the last collection did not reach is **not verified**. Its last known state is listed for reference only.
+  - **Port not reported** means the switch answered but did not list a designed port (renamed, breakout changed, or not an IB port).
 
 GPU-side RDMA ports are not collected by the switch sync; only the leaf side of each GPU link is checked there. The UFM cabling check below covers both ends.
 
@@ -495,6 +506,7 @@ What it cannot see: link errors, congestion and UFM alarms (not collected yet), 
 | `--fanout local\|jump` | `local` | `jump` runs one Teleport session to `jmp0`, which logs in to the switches in parallel. Recommended. Falls back to `local` automatically if it can't be used. |
 | `--device-parallel N` | `10` | Concurrent switch logins (1–25). Raise gradually, for example 15 → 20 → 25, and watch for failures. |
 | `--sync-every-minutes N` | `0` (off) | Background fabric sync (switches and UFM), so the dashboard is already fresh when you open it |
+| `--stale-after-minutes N` | `60` | Show the switch evidence as **STALE** when the last collection is older than this |
 | `--netbox-every-hours H` | `24` | Refresh NetBox inventory in the background this often. `0` = only with **Refresh NetBox**. |
 | `--full-netbox-every-hours H` | `6` | Do a full cable pull this often; between pulls the sync is incremental. `0` forces a full pull every time. |
 | `--address-cache-hours H` | `24` | Reuse switch management IPs from NetBox for this long. `0` always re-queries. |
@@ -523,10 +535,16 @@ What it cannot see: link errors, congestion and UFM alarms (not collected yet), 
      - Other runs ask the NetBox **change log** which cables changed since the last refresh, and re-read only those, usually in 1–3 API calls.
      - A NetBox failure never fails a fabric sync; the previous copy stays in use.
    - **Live link state** compares the switch port states with the **design topology**: every designed leaf–spine link, and every designed GPU port in use (seen by UFM now or before, or recorded in NetBox), so empty tray slots are not reported as down. NetBox cable IDs are shown where NetBox has the cable.
-2. **Jump-host fan-out.** With `--fanout jump`, one `tsh ssh` session starts a small worker on `jmp0`.
+2. **Coverage and replacement.** When the collection finishes, it is checked against the 100 inventory switches and the designed ports of each:
+   - Each reached switch's ports **replace** its previous ports entirely, so a port it no longer reports is not kept.
+   - Switches not reached keep their last known states only for display; their links count as *not verified*.
+   - The result is *verified* (every switch, every designed port) or *partial*, and is shown as such in the status bar, the Sync line and the Incidents tab.
+   - The snapshot is saved **atomically** (temporary file, then rename) to `.netbox-live-sync/latest-live.json`, with the coverage, each switch's last-read time and a fingerprint of `connections.csv`, `expected_topology.csv` and `devices.csv`. After a restart it is trusted only if those files are unchanged; otherwise everything shows as not verified until the next sync.
+3. **Strict NetBox validation.** A NetBox cable must have exactly one interface termination on each side, with a device and port. A cable with several terminations, a front/rear port, or a malformed termination is reported as differing, never as matching.
+4. **Jump-host fan-out.** With `--fanout jump`, one `tsh ssh` session starts a small worker on `jmp0`.
    - The switch password is passed only on the worker's input. It never appears in a command line, an environment variable or a file.
    - The worker logs in to each switch with strict host-key checking, using your approved `known_hosts`.
-3. **Progressive results.** Each switch's result is shown as soon as it arrives. The latest evidence is saved locally, so a restart keeps it.
+5. **Progressive results.** Each switch's result is shown as soon as it arrives.
 
 Typical timings: switches about 34 s for 100 switches at `--device-parallel 15`; UFM live links 3–10 s, in parallel; NetBox about 1 s when incremental (2 API calls).
 
@@ -565,6 +583,9 @@ Typical timings: switches about 34 s for 100 switches at `--device-parallel 15`;
 | Devices: `Permission denied` | Wrong switch password, or the account is locked | `./scripts/configure_device_access.sh` |
 | Devices: `Host key verification failed` | A switch's key changed, or is missing from `known_hosts` | Get an updated approved file ([4.7](#47-install-the-approved-switch-host-keys)). Never just accept a changed key. |
 | Devices: some switches failed | The switch is unreachable or timed out | `ls -t .netbox-live-sync/` (newest first), then read `<run>/errors/<hostname>.txt` |
+| Status bar says **PARTIAL** | Switches not reached, or designed ports not reported | The Sync line and the Incidents tab name them; see the errors folder above. Their links show as *not verified* until a sync reaches them. |
+| Status bar says **STALE** after a restart or `git pull` | The topology or inventory files changed since the saved evidence | Press **⟳ Sync fabric** |
+| Cable check: "cannot be verified: 2 A-side terminations" | The NetBox cable has several terminations, or ends on a front/rear port | Fix the cable record in NetBox: one interface on each side |
 | Cabling tab says "No UFM data yet" | Nothing fetched from UFM yet | Press **⟳ Fetch from UFM**, or run `./scripts/fetch_ufm_scan.sh` |
 | Sync: `UFM skipped · UFM access not set up` | [4.9](#49-optional-let-the-dashboard-fetch-from-ufm) not done, or the service was not restarted after it | `./scripts/configure_ufm_access.sh`, then restart the service |
 | Switches: `IPs: cached IPs from … (NetBox unavailable)` | NetBox or its proxy is down; the sync used the last known IPs | Nothing urgent. Fix the proxy (rows above) so IPs and inventory stay current. |

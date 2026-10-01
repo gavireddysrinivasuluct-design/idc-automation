@@ -302,6 +302,24 @@ def data_age(out: Incidents, r: dict, fetch: dict | None) -> None:
 
 
 def switches(out: Incidents, live: dict) -> None:
+    fresh = live.get("freshness") or {}
+    cov = live.get("coverage") or {}
+    if fresh.get("state") in ("snapshot", "stale"):
+        out.add("info" if fresh.get("state") == "stale" else "major", "data",
+                "Switch states are %s" % ("stale" if fresh.get("state") == "stale" else "not verified yet"),
+                (fresh.get("note") or "") + ". Live link state shows the last known values, not current ones.",
+                "Press Sync fabric (or start the service with --sync-every-minutes).", tab="live")
+    if cov.get("missing"):
+        out.add("major", "switch", n(len(cov["missing"]), "switch") + " not reached by the last collection",
+                "Their links are shown as unverified, not as up: unreachable, login refused, or down.",
+                "Check the sync errors (.netbox-live-sync/<run>/errors/) and the switches.", scope=cov["missing"], tab="live",
+                evidence=["%s%s" % (short(d), " (login/collection error)" if d in cov.get("failed", []) else " (unparsable output)" if d in cov.get("unparsable", []) else "")
+                          for d in cov["missing"]])
+    if cov.get("missing_ports"):
+        out.add("minor", "switch", n(cov.get("missing_port_count", 0), "designed port") + " not reported by their switch",
+                "The switch answered but did not list these ports (renamed, breakout changed, or not an IB port).",
+                "Compare the port names on the switch with the design topology.", scope=list(cov["missing_ports"]), tab="live",
+                evidence=["%s: %s" % (short(d), ", ".join(ports)) for d, ports in sorted(cov["missing_ports"].items())])
     ex = live.get("exceptions") or []
     if not ex or not live.get("collected_at"):
         return
@@ -311,20 +329,14 @@ def switches(out: Incidents, live: dict) -> None:
         for dev, port, state in ((a_dev, a_port, a_state), (b_dev, b_port, b_state)):
             if "-swi-" not in dev:
                 continue
-            kind = "uncollected" if state == "not-collected" else "down" if state.startswith("Down/") else "init" if state.startswith(("Initialize/", "Armed/")) else None
+            kind = "down" if state.startswith("Down/") else "init" if state.startswith(("Initialize/", "Armed/")) else None
             if kind:
                 per_switch[dev][kind] += 1
-                rows[(dev, kind)].append("%s %s (cable %s)" % (short(dev), port, cid))
-    unreachable = [d for d, c in per_switch.items() if c["uncollected"] >= 20]
-    if unreachable:
-        out.add("major", "switch", n(len(unreachable), "switch") + " could not be read",
-                "The last device sync got no interface data from them: unreachable, login refused, or down.",
-                "Check the sync errors (.netbox-live-sync/<run>/errors/) and the switches.", scope=unreachable, tab="live",
-                evidence=["%s: %d NetBox ports not collected" % (short(d), per_switch[d]["uncollected"]) for d in sorted(unreachable)])
+                rows[(dev, kind)].append("%s %s%s" % (short(dev), port, " (cable %s)" % cid if cid else ""))
     down = {d: c["down"] for d, c in per_switch.items() if c["down"]}
     if down:
-        heavy = [d for d, n in down.items() if n >= 8]
+        heavy = [d for d, k in down.items() if k >= 8]
         out.add("major" if heavy else "minor", "switch", "%s down on %s" % (n(sum(down.values()), "switch port"), n(len(down), "switch")),
-                "Switches report NetBox-documented ports as Down." + (" %s has many down ports." % ", ".join(short(d) for d in heavy) if heavy else ""),
+                "Switches report designed ports as Down." + (" %s has many down ports." % ", ".join(short(d) for d in heavy) if heavy else ""),
                 "See the Live link state tab.", scope=list(down), tab="live",
                 evidence=[e for d in sorted(down) for e in rows[(d, "down")]])
