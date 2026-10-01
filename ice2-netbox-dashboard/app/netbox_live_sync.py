@@ -133,7 +133,7 @@ class SyncState:
         request = Request(self.netbox_url + path, headers=headers, method="GET")
         for attempt in range(3):
             try:
-                with urlopen(request, timeout=12) as response:
+                with urlopen(request, timeout=20) as response:
                     return json.loads(response.read().decode("utf-8"))
             except HTTPError as error:
                 body = error.read().decode("utf-8", errors="replace")
@@ -160,16 +160,15 @@ class SyncState:
                 raise RuntimeError("NetBox has no primary management IP for %s." % name)
             return address
 
-        # NetBox supports an `__in` lookup. Batch first to avoid 100 serial
-        # requests; retain exact-name lookups as a compatibility fallback.
+        # NetBox supports an `__in` lookup. One bulk request normally resolves
+        # the complete inventory; retain exact-name lookups as a compatibility
+        # fallback if an older API proxy does not support the lookup.
         addresses: dict[str, str] = {}
-        for start in range(0, len(names), 20):
-            batch = names[start:start + 20]
-            payload = self.get_netbox("/api/dcim/devices/?limit=100&name__in=" + quote(",".join(batch), safe=","))
-            for device in payload.get("results") or []:
-                name = device.get("name")
-                if name in batch:
-                    addresses[name] = address_from_device(device, name)
+        payload = self.get_netbox("/api/dcim/devices/?limit=200&name__in=" + quote(",".join(names), safe=","))
+        for device in payload.get("results") or []:
+            name = device.get("name")
+            if name in names:
+                addresses[name] = address_from_device(device, name)
 
         def lookup(name: str) -> tuple[str, str]:
             payload = self.get_netbox("/api/dcim/devices/?limit=2&name=" + quote(name, safe=""))
@@ -179,7 +178,7 @@ class SyncState:
             return name, address_from_device(matches[0], name)
 
         unresolved = [name for name in names if name not in addresses]
-        with ThreadPoolExecutor(max_workers=8) as pool:
+        with ThreadPoolExecutor(max_workers=4) as pool:
             futures = {pool.submit(lookup, name): name for name in unresolved}
             for future in as_completed(futures):
                 name, address = future.result()
@@ -320,7 +319,10 @@ class SyncState:
             pages.extend(base + "&offset=%d" % offset for offset in range(250, first.get("count", 0), 250))
         if progress is not None:
             progress.update(state="running", pages_completed=len(ranges), pages_total=len(ranges) + len(pages))
-        with ThreadPoolExecutor(max_workers=4) as pool:
+        # Teleport's local app forward has limited upstream capacity. Two
+        # in-flight expanded cable pages is materially faster than serial but
+        # avoids starving the following device-address lookup.
+        with ThreadPoolExecutor(max_workers=2) as pool:
             futures = [pool.submit(self.get_netbox, path) for path in pages]
             for future in as_completed(futures):
                 page = future.result()
