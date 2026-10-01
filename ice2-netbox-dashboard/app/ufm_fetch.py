@@ -260,36 +260,103 @@ def _pick(record: dict, *names):
     return None
 
 
-def links_to_lst(links: list, host: str) -> tuple[str, int]:
-    """UFM REST links -> ibdiagnet2.lst lines the cabling engine already reads."""
-    import ufm_cabling
+SW_AGG = re.compile(r"^([^:]+):sw\d+p\d+$")        # one record per cable, all 4 planes up
+SW_CHIP = re.compile(r"^([^:]+):A(\d+)/(\d+)$")    # one record per plane (chip A1..A4)
+SW_OTHER = re.compile(r"^(\S*-swi-\S+?):(\S+)$")   # e.g. FNM1 (UFM management port)
+LST_END = re.compile(r"\{ (?:SW|CA) Ports:\S+ SystemGUID:\S+ NodeGUID:(\S+) .*?\{([^}]*)\} LID:")
+
+
+def scan_names(path: Path) -> dict:
+    """Node GUID -> node description from the last scan file (adapter names such as
+    'nvl72d031-T14 mlx5_2'); UFM REST shows host:interface names instead."""
+    names = {}
+    try:
+        with gzip.open(path, "rt", encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                if line.startswith("{"):
+                    for guid, desc in LST_END.findall(line):
+                        names[guid.lower()] = desc
+    except (OSError, EOFError):
+        pass
+    return names
+
+
+def links_to_lst(links: list, host: str, names: dict | None = None) -> tuple[str, dict]:
+    """UFM REST links -> ibdiagnet2.lst lanes the cabling engine already reads.
+
+    UFM REST (checked on ICE2, UFM 6.x) reports:
+      * one record per cable when all four planes are up: switch end 'bel1:sw37p1',
+        port = NVOS number; adapter end 'host:ibB..p1s3' -> expanded to 4 lanes, U1..U4
+      * one record per plane otherwise: switch end 'bel2:A2/58' (chip 2, port 58),
+        adapter end '<name> mlx5_0', port = plane
+    Adapter names come from the last scan (by node GUID), because REST shows
+    host:interface names that do not carry the mlx5 index used for the rail.
+    """
+    names = names or {}
     out = ['# This database file was created by the IDC dashboard from UFM REST %s' % LINKS_PATH,
            '# Running version: "UFM REST live links (%s)"' % host, '']
-    skipped = 0
+    stats = {"records": len(links), "lanes": 0, "cables": 0, "planes": 0, "skipped": 0, "unnamed_new": 0}
+
+    def ends(link, side, planes):
+        desc = str(link.get(side + "_port_node_description") or "").strip()
+        port = int(re.findall(r"\d+", str(link.get(side + "_port") or "0"))[-1] or 0)
+        guid = str(link.get(side + "_port_name") or "").split("_")[0].lower() or str(link.get(side + "_guid") or "0").lower()
+        m = SW_AGG.match(desc)
+        if m:
+            return [("SW", "MF0;%s:Q3400_RA/U%d" % (m.group(1), u), port, guid) for u in planes]
+        m = SW_CHIP.match(desc)
+        if m:
+            return [("SW", "MF0;%s:Q3400_RA/U%s" % (m.group(1), m.group(2)), int(m.group(3)), guid)]
+        m = SW_OTHER.match(desc)
+        if m:
+            return [("SW", "MF0;%s:Q3400_RA/U1" % m.group(1), port, guid)]
+        name = names.get(guid)
+        if not name:
+            name = desc if " mlx5_" in desc else desc.split(":")[0]
+            stats["unnamed_new"] += 1
+        if "{" in name or "}" in name:
+            return []
+        return [("CA", name, p, guid) for p in (planes if len(planes) > 1 else [port])]
+
     for link in links:
-        ends = []
-        for side in ("source", "destination"):
-            desc = _pick(link, side + "_port_node_description", side + "_node_description", side + "_description")
-            port = _pick(link, side + "_port", side + "_port_number", side + "_port_num")
-            guid = str(_pick(link, side + "_guid", side + "_node_guid") or "0").lower().replace("0x", "")
-            digits = re.findall(r"\d+", str(port or ""))
-            if not desc or not digits or "{" in str(desc) or "}" in str(desc):
-                ends = None
-                break
-            kind = "SW" if ufm_cabling.SWITCH.match(str(desc).strip()) else "CA"
-            ends.append("{ %s Ports:00 SystemGUID:%s NodeGUID:%s PortGUID:%s VenID:0 DevID:0 Rev:0 {%s} LID:0 PN:%x }"
-                        % (kind, guid, guid, guid, str(desc).strip(), int(digits[-1])))
-        if not ends:
-            skipped += 1
+        agg = any(SW_AGG.match(str(link.get(s + "_port_node_description") or "")) for s in ("source", "destination"))
+        planes = [1, 2, 3, 4] if agg else [0]
+        a, b = ends(link, "source", planes), ends(link, "destination", planes)
+        if not a or not b or len(a) != len(b):
+            stats["skipped"] += 1
             continue
-        width = re.findall(r"\d+x", str(link.get("width") or "").lower())
-        speed = re.findall(r"\d+", str(link.get("speed") or ""))
-        out.append("%s %s PHY=%s LOG=ACT SPD=%s" % (ends[0], ends[1], width[0] if width else "?", speed[0] if speed else "?"))
-    if len(out) == 3:
+        stats["cables" if agg else "planes"] += 1
+        for x, y in zip(a, b):
+            out.append("%s %s PHY=4x LOG=ACT SPD=?" % tuple(
+                "{ %s Ports:00 SystemGUID:%s NodeGUID:%s PortGUID:%s VenID:0 DevID:0 Rev:0 {%s} LID:0 PN:%x }"
+                % (kind, g, g, g, desc, num) for kind, desc, num, g in (x, y)))
+            stats["lanes"] += 1
+    if not stats["lanes"]:
         fields = sorted(links[0].keys()) if links and isinstance(links[0], dict) else []
-        raise RuntimeError("UFM REST answered with %d links, but none had node descriptions and ports. Fields seen: %s"
+        raise RuntimeError("UFM REST answered with %d links, but none could be read. Fields seen: %s"
                            % (len(links), ", ".join(fields)[:300]))
-    return "\n".join(out) + "\n", skipped
+    return "\n".join(out) + "\n", stats
+
+
+def check_plausible(text: str, previous: Path) -> None:
+    """Refuse a conversion that would wipe the dashboard (e.g. an unknown REST format):
+    the live result must name about as many leaf-spine lanes as the last scan."""
+    import ufm_cabling
+    def leaf_spine(lines):
+        n = 0
+        for line in lines:
+            if line.startswith("{"):
+                hosts = [m.group(1) for m in (ufm_cabling.SWITCH.match(d) for _, d, _ in ufm_cabling.END.findall(line)) if m]
+                n += len(hosts) == 2 and any(ufm_cabling.LEAF.search(h) for h in hosts) and any(ufm_cabling.SPINE.search(h) for h in hosts)
+        return n
+    now = leaf_spine(text.splitlines())
+    try:
+        with gzip.open(previous, "rt", encoding="utf-8", errors="replace") as handle:
+            before = leaf_spine(handle)
+    except (OSError, EOFError):
+        before = 0
+    if now == 0 or (before and now < before * 0.5):
+        raise RuntimeError("UFM live links look incomplete (%d leaf-spine lanes, last scan had %d); the previous data is kept." % (now, before))
 
 
 def fetch_rest(prof: dict, target_dir: Path, progress: dict, timeout: int = 120) -> dict:
@@ -312,7 +379,8 @@ def fetch_rest(prof: dict, target_dir: Path, progress: dict, timeout: int = 120)
         raise RuntimeError("No UFM host answered the REST API. " + " | ".join(errors[-2:]))
     progress.update(step="saving", detail="converting %s live links from UFM %s" % (format(got["count"], ","), got["host"]))
     raw = gzip.decompress(base64.b64decode(got["data"], validate=True))
-    text, unusable = links_to_lst(json.loads(raw), got["host"])
+    text, stats = links_to_lst(json.loads(raw), got["host"], scan_names(target_dir / "ibdiagnet2.lst.gz"))
+    check_plausible(text, target_dir / "ibdiagnet2.lst.gz")
     target_dir.mkdir(parents=True, exist_ok=True)
     if pins.get(got["host"]) != got["fingerprint"]:
         pins[got["host"]] = got["fingerprint"]
@@ -327,7 +395,7 @@ def fetch_rest(prof: dict, target_dir: Path, progress: dict, timeout: int = 120)
             handle.write(data)
         os.chmod(partial, 0o600)
         partial.replace(target)
-    return {"host": got["host"], "links": got["count"], "unusable": unusable, "skipped": errors,
+    return {"host": got["host"], "links": got["count"], "stats": stats, "skipped": errors,
             "files": {"ibdiagnet2.lst.gz": {"bytes": len(text), "ufm_time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}}}
 
 

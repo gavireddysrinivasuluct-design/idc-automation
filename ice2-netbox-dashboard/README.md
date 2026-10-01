@@ -391,6 +391,7 @@ UFM's report compares only against its master, so it mostly lists trays added af
 - When it is done, the button line says what was read (*live links* or *scan file*), the UFM host, the time taken, the number of miscabled cables, the trays seen and the master date. The tab, GPU area and inspector update without a page reload.
 - Live links: one HTTPS GET from `jmp0` to the UFM REST API. Scan file: the same three files as the script below. Either way it is one Teleport session, and passwords go from Keychain to the jump host on standard input only.
 - If live links fail (for example a wrong web password) and an SSH login is stored, it falls back to the scan file and shows a ⚠ note.
+- Live links list one record per cable when all four planes are up, and one record per plane otherwise; both become the same four-plane lanes as the scan file. GPU adapter names (`nvl72dXXX-TNN mlx5_N`) are matched by GUID from the last scan file, because the REST API shows host:interface names. If a live result names far fewer leaf–spine links than the last scan, it is refused and the previous data stays.
 - Live links show which ports are connected, not link training states. A cable stuck in *Init* still appears in the **Live link state** tab, which reads the switches.
 - If the first UFM address does not answer (for example it is the standby), it tries the next one.
 - If the fetch fails, the reason is shown and the previous files stay in use.
