@@ -225,18 +225,21 @@ def collect_one(device: Device, user: str, password: str, known_hosts: Optional[
             ready, _, _ = select.select([master_fd], [], [], 0.5)
             if ready:
                 try:
-                    data = os.read(master_fd, 4096)
+                    data = os.read(master_fd, 65536)
                 except OSError:
                     data = b""
-                if data:
-                    output_parts.append(data.decode("utf-8", errors="replace"))
-                    if not password_sent and "password:" in "".join(output_parts).lower():
-                        os.write(master_fd, password.encode("utf-8") + b"\n")
-                        password_sent = True
-            if child.poll() is not None:
-                # A closed PTY reports EIO on macOS; the loop has already
-                # captured all command output available before process exit.
+                if not data:
+                    break  # EOF / EIO: the child closed the PTY and everything was read
+                output_parts.append(data.decode("utf-8", errors="replace"))
+                if not password_sent and "password:" in "".join(output_parts[-4:]).lower():
+                    os.write(master_fd, password.encode("utf-8") + b"\n")
+                    password_sent = True
+            elif child.poll() is not None:
+                # Exited and nothing left to read. Breaking only when the PTY is
+                # idle (not as soon as the child exits) avoids truncating the
+                # tail of large outputs such as `nv show interface`.
                 break
+        child.wait()
         output = "".join(output_parts)
         code = child.returncode or 0
         if code == 0:
@@ -251,9 +254,139 @@ def collect_one(device: Device, user: str, password: str, known_hosts: Optional[
             os.close(slave_fd)
 
 
+# ---------------------------------------------------------------------------
+# Jump-host fan-out: one Teleport session for the whole collection.
+#
+# The local-mode loop above opens a new `tsh ssh --tty` session per switch, so
+# Teleport session setup dominates the run. In jump mode a small worker is
+# started once on the jump host (shipped base64-encoded on the command line; it
+# contains no secrets). The switch password is written to the worker's stdin
+# only, so it never appears in argv, the environment, or a file. The worker
+# runs the same read-only SSH command against each switch in parallel from the
+# jump host and streams one JSON line per device back as each one finishes.
+# ---------------------------------------------------------------------------
+FANOUT_WORKER = r'''
+import json, os, pty, select, subprocess, sys, threading, time
+from concurrent.futures import ThreadPoolExecutor
+cfg = json.loads(sys.stdin.readline())
+secret = cfg.pop("password").encode("utf-8") + b"\n"
+lock = threading.Lock()
+
+def emit(obj):
+    with lock:
+        sys.stdout.write(json.dumps(obj) + "\n")
+        sys.stdout.flush()
+
+def run(device):
+    host, address = device
+    started = time.time()
+    cmd = ["ssh", "-o", "ConnectTimeout=15", "-o", "StrictHostKeyChecking=yes", "-o", "NumberOfPasswordPrompts=1"]
+    if cfg.get("known_hosts"):
+        cmd += ["-o", "UserKnownHostsFile=" + cfg["known_hosts"]]
+    cmd += ["%s@%s" % (cfg["user"], address), cfg["command"]]
+    master, slave = pty.openpty()
+    try:
+        child = subprocess.Popen(cmd, stdin=slave, stdout=slave, stderr=slave, close_fds=True)
+    except Exception as error:
+        os.close(master); os.close(slave)
+        emit({"host": host, "code": 1, "out": "", "err": str(error), "seconds": 0}); return
+    os.close(slave)
+    parts, sent, tail = [], False, ""
+    deadline = started + cfg.get("timeout", 60)
+    try:
+        while True:
+            if time.time() > deadline and child.poll() is None:
+                child.kill(); child.wait()
+                emit({"host": host, "code": 124, "out": "", "err": "Timed out before SSH completed", "seconds": round(time.time() - started, 2)}); return
+            ready, _, _ = select.select([master], [], [], 0.5)
+            if ready:
+                try:
+                    data = os.read(master, 65536)
+                except OSError:
+                    data = b""
+                if not data:
+                    break
+                text = data.decode("utf-8", "replace")
+                parts.append(text)
+                if not sent:
+                    tail = (tail + text)[-256:]
+                    if "password:" in tail.lower():
+                        os.write(master, secret); sent = True
+            elif child.poll() is not None:
+                break
+    finally:
+        os.close(master)
+    child.wait()
+    output = "".join(parts)
+    code = child.returncode or 0
+    emit({"host": host, "code": code, "out": output if code == 0 else "", "err": "" if code == 0 else (output or "SSH exited without output"), "seconds": round(time.time() - started, 2)})
+
+with ThreadPoolExecutor(max_workers=cfg.get("parallel", 10)) as pool:
+    list(pool.map(run, cfg["devices"]))
+emit({"done": True})
+'''
+
+
+class FanoutUnavailable(RuntimeError):
+    """The jump-host worker could not start (for example python3 is missing)."""
+
+
+def collect_via_jump(devices: List[Device], user: str, password: str, known_hosts: Optional[str], jump_host: str, jump_user: Optional[str],
+                     remote_command: str, parallel: int, timeout: int, on_result) -> None:
+    import base64
+    import json
+    import threading
+    encoded = base64.b64encode(FANOUT_WORKER.encode("utf-8")).decode("ascii")
+    bootstrap = "import base64,sys;exec(base64.b64decode(sys.argv[1]))"
+    remote = "python3 -u -c %s %s" % (shlex.quote(bootstrap), encoded)
+    command = ["tsh", "ssh", "--login", jump_user or user, jump_host, "--", remote]
+    child = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
+    by_host = {device.hostname: device for device in devices}
+    payload = {"password": password, "user": user, "known_hosts": known_hosts, "command": remote_command,
+               "devices": [[d.hostname, d.address] for d in devices], "parallel": parallel, "timeout": timeout}
+    budget = timeout * (len(devices) // max(parallel, 1) + 2) + 60
+    watchdog = threading.Timer(budget, child.kill)
+    watchdog.daemon = True
+    watchdog.start()
+    stderr_tail: List[str] = []
+    threading.Thread(target=lambda: stderr_tail.extend(child.stderr), daemon=True).start()
+    seen = set()
+    try:
+        assert child.stdin is not None and child.stdout is not None
+        child.stdin.write(json.dumps(payload) + "\n")
+        child.stdin.close()
+        del payload
+        for line in child.stdout:
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                item = json.loads(line)
+            except ValueError:
+                continue
+            host = item.get("host")
+            if host not in by_host or host in seen:
+                continue
+            seen.add(host)
+            on_result(Result(by_host[host], int(item.get("code", 1)), item.get("out", ""), item.get("err", "")))
+        child.wait()
+    finally:
+        watchdog.cancel()
+    if not seen and child.returncode:
+        raise FanoutUnavailable("jump-host fan-out failed (exit %s): %s" % (child.returncode, "".join(stderr_tail)[-400:].strip()))
+    for device in devices:
+        if device.hostname not in seen:
+            on_result(Result(device, 1, "", "No result from jump-host fan-out (exit %s)" % child.returncode))
+
+
 def save(output_dir: Path, result: Result) -> None:
-    (output_dir / "raw" / (result.device.hostname + ".txt")).write_text(result.stdout, encoding="utf-8")
-    (output_dir / "errors" / (result.device.hostname + ".txt")).write_text(result.stderr, encoding="utf-8")
+    # Errors first, raw last, each via an atomic rename: a reader polling raw/
+    # for progressive results never sees a half-written file.
+    for folder, text in (("errors", result.stderr), ("raw", result.stdout)):
+        target = output_dir / folder / (result.device.hostname + ".txt")
+        partial = target.with_suffix(".part")
+        partial.write_text(text, encoding="utf-8")
+        partial.replace(target)
 
 
 def build_xlsx(script_dir: Path, output_dir: Path, args: argparse.Namespace) -> Optional[Path]:
@@ -314,6 +447,9 @@ def main() -> int:
     parser.add_argument("--known-hosts", type=Path)
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--parallel", type=int, default=10)
+    parser.add_argument("--fanout", choices=["local", "jump"], default="local",
+                        help="local: one Teleport session per device (default). jump: one Teleport session runs a fan-out worker on the jump host.")
+    parser.add_argument("--device-timeout", type=int, default=60, help="Seconds allowed per device.")
     parser.add_argument("--allow-missing", action="store_true", help="Use only for an intentional limited test.")
     parser.add_argument("--no-resolve-missing", action="store_true", help="Use only when DNS must not be used as an IP fallback.")
     parser.add_argument("--dry-run", action="store_true")
@@ -336,6 +472,8 @@ def main() -> int:
         raise ValueError("--parallel must be between 1 and 25")
     if args.known_hosts and not args.known_hosts.is_file():
         raise ValueError("Approved known-hosts file does not exist: %s" % args.known_hosts)
+    if args.fanout == "jump" and not args.jump_host:
+        raise ValueError("--fanout jump requires --jump-host (or a profile with jump_host)")
     if args.jump_host and not shutil.which("tsh"):
         raise RuntimeError("Teleport CLI (tsh) is required with --jump-host")
     devices = load_devices(args.devices, args.addresses, args.allow_missing, not args.no_resolve_missing)
@@ -353,14 +491,25 @@ def main() -> int:
     remote_known_hosts = stage_known_hosts(args.known_hosts, args.jump_host, args.jump_user) if args.jump_host else str(args.known_hosts) if args.known_hosts else None
     results: List[Result] = []
     try:
-        print("Collecting NTP evidence from %d devices (parallel=%d)." % (len(devices), args.parallel))
-        with ThreadPoolExecutor(max_workers=args.parallel) as pool:
-            futures = [pool.submit(collect_one, device, args.ssh_user, password, remote_known_hosts, args.jump_host, args.jump_user, remote_command) for device in devices]
-            for future in as_completed(futures):
-                result = future.result()
-                save(output_dir, result)
-                results.append(result)
-                print("%s: %s" % (result.device.hostname, "ok" if result.code == 0 else "failed"))
+        print("Collecting evidence from %d devices (parallel=%d, fanout=%s)." % (len(devices), args.parallel, args.fanout), flush=True)
+
+        def record(result: Result) -> None:
+            save(output_dir, result)
+            results.append(result)
+            print("%s: %s" % (result.device.hostname, "ok" if result.code == 0 else "failed"), flush=True)
+
+        if args.fanout == "jump":
+            try:
+                collect_via_jump(devices, args.ssh_user, password, remote_known_hosts, args.jump_host, args.jump_user,
+                                 remote_command, args.parallel, args.device_timeout, record)
+            except FanoutUnavailable as error:
+                print("Error: %s" % error, file=sys.stderr)
+                return 3
+        else:
+            with ThreadPoolExecutor(max_workers=args.parallel) as pool:
+                futures = [pool.submit(collect_one, device, args.ssh_user, password, remote_known_hosts, args.jump_host, args.jump_user, remote_command) for device in devices]
+                for future in as_completed(futures):
+                    record(future.result())
     finally:
         remove_staged_known_hosts(remote_known_hosts if args.jump_host else None, args.jump_host, args.jump_user)
     with (output_dir / "collection_summary.csv").open("w", newline="", encoding="utf-8") as handle:

@@ -82,6 +82,45 @@ Open `http://127.0.0.1:8765/`. The browser only talks to the local service; the 
 
 If an approved local proxy requires an HTTP Host header, add `--netbox-host-header '<approved-hostname>'` to the command. Do not guess this value; obtain it from the platform owner.
 
+## Faster sync
+
+Recommended once `python3` is confirmed on the jump host:
+
+```bash
+python3 app/netbox_live_sync.py \
+  --netbox-url 'http://127.0.0.1:8444' \
+  --device-profile "$HOME/.config/idc-automation/device-access.ini" \
+  --fanout jump --device-parallel 15 --sync-every-minutes 15
+```
+
+What each speed-up does:
+
+- **Concurrent phases.** The NetBox cable check and the device collection run at the same time, so a sync takes about as long as its slowest phase rather than the sum of both.
+- **Progressive results.** Each switch is applied to the dashboard as soon as it returns. The Sync bar shows `37/100 switches`, and the final line shows per-phase timings.
+- **Management IPs.** These come from one bulk NetBox query per site and role, instead of 100 single lookups. They are cached for `--address-cache-hours` (default 24). The cache is dropped automatically when any switch fails, in case an IP moved.
+- **Incremental cable sync.**
+  - Between full syncs (`--full-netbox-every-hours`, default 6), only cables named in the NetBox change log since the last sync are re-read. That covers edits, deletions and re-terminations.
+  - If the change log is unavailable to your token, or its time filter is not honoured, the sync falls back to a full pull.
+  - Cable pages are trimmed with `fields=` on NetBox 4.x, which keeps the payload small.
+- **`--fanout jump`.**
+  - Opens one Teleport session to the jump host and runs a small fan-out worker there, instead of a new `tsh ssh` session per switch.
+  - The switch password is sent only on the worker's stdin. It never appears in argv, the environment or a file. The commands run on each switch are unchanged.
+  - If the worker cannot start (for example, `python3` is missing on the jump host), the service falls back to `--fanout local` automatically.
+- **`--device-parallel`** sets the number of concurrent switch sessions (1–25, default 10). Raise it gradually and watch jump-host load.
+- **`/api/live`** is rebuilt only when the data changes and is served with an ETag and gzip. Dashboard polling (every 15 s) is mostly `304 Not Modified`.
+- **`--sync-every-minutes`** runs the sync in the background, so the dashboard opens on fresh evidence.
+
+Measured in a simulated run (1.5 s Teleport setup, 1 s per switch command, 150 ms per NetBox request, 100 switches):
+
+| Configuration | Sync time | NetBox requests |
+| --- | --- | --- |
+| Previous version | 39.4 s | 123 |
+| New, `--fanout local`, first run | 32.7 s | 25 |
+| New, `--fanout jump`, parallel 10, first run | 18.7 s | 25 |
+| New, `--fanout jump`, parallel 20, repeat run | 13.4 s | 2 |
+
+Real timings depend on Teleport and switch response times. Compare them using the per-phase timings shown after each sync.
+
 ## Repository contents
 
 - `assets/` — shared dashboard, topology, device inventory, and command file.
