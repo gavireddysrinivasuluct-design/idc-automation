@@ -348,6 +348,7 @@ Sync complete in 34.2 s   NetBox 1.0 s ‖ IPs 0.0 s ‖ devices 34.2 s
   - The device's NetBox **vendor, model, management IP and status**, taken from the most recent sync. Clicking a device makes no NetBox call, so this works even when the NetBox proxy is down. A device not seen by any sync yet is looked up once, then remembered.
   - A **Live** column in every cable table.
   - Click any **cable ID** to check that one cable against NetBox right now.
+  - A **GPU tray** shows its four RDMA links as UFM sees them, and its frontend (eth0/eth1 to the SpectrumX leaves) and out-of-band ports (BMC, OS MGMT, BF MGMT) from NetBox. UFM sees only the RDMA fabric, and the frontend and OOB switches are not collected, so those have no live state.
 - **Incident banner** under the status bar: how many critical, major, minor and info incidents there are, and the most severe one. **View incidents** opens the Incidents tab. See [6.2](#62-incidents).
 - **Check tabs** below the diagram: **Incidents**, **Cabling vs UFM** and **Live link state**. Each tab shows a count of items to review, or ✓ when there are none. Click a tab or use the arrow keys to switch; the page remembers your last tab.
 - **Live link state tab.** Every designed link in use, as the switches report it: counts, the problem list (down, initializing, plus NetBox records that changed or are missing), and the UFM `fnm1` port states. A `—` in the cable column means NetBox has no cable record for that designed link.

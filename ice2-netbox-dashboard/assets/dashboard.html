@@ -841,7 +841,20 @@ function trayHtml(s) { const t = s.tray, su = s.su;
     ${tbl(['Rail', 'Leaf', 'Port', 'Adapter', 'UFM', 'NetBox'], [1, 2, 3, 4].map(r => { const a = t.adapters.find(x => x[0] === r);
       return a ? [pill(R[r - 1], 'R' + r), lk('bel' + a[1], 'BEL' + a[1]), a[2], esc(a[3]) + (a[7] ? ` <span class="small">${esc(a[7])}</span>` : ''), stTxt(a[5]) + ` <span class="small">${a[4]}/4</span>`, a[6] ? cableRef(a[6]) : `<span style="color:${CB.ufm}">missing</span>`]
         : [pill(R[r - 1], 'R' + r), lk('bel' + su.leaves[r - 1], 'BEL' + su.leaves[r - 1]), slotLabel(s.slot), '—', pill(CB.err, 'no link'), '—']; }))}
-    <p class="small">${t.host ? 'NetBox host learned from the NetBox cables ending on this tray’s adapters.' : 'To document it: download the NetBox import file from the Cabling vs UFM tab, fill in the host name for this tray, and import.'}</p>`; }
+    <p class="small">${t.host ? 'NetBox host learned from the NetBox cables ending on this tray’s adapters.' : 'To document it: download the NetBox import file from the Cabling vs UFM tab, fill in the host name for this tray, and import.'}</p>
+    ${trayOtherHtml(t)}`; }
+// Frontend (eth0/eth1 → SpectrumX leaves) and out-of-band ports: UFM only sees the RDMA fabric, so these come from NetBox.
+function trayOtherHtml(t) {
+  const n = t.host && (t.host.match(/gpu(\d+)$/) || [])[1], at = (n && ATT[+n]) || [], other = at.filter(x => PLANE(x[0]) !== 'backend');
+  if (!t.host) return `<h4 class="inch" style="margin-top:14px">Frontend and out-of-band</h4><p class="small">Unknown: the tray is not in NetBox, and UFM sees only the RDMA fabric. Each tray also has eth0/eth1 (2 × 400G frontend) and BMC / OS MGMT / BF MGMT (1G out-of-band).</p>`;
+  if (!other.length) return `<h4 class="inch" style="margin-top:14px">Frontend and out-of-band</h4><p class="small">NetBox has no frontend or out-of-band cables for ${esc(sh(t.host).toUpperCase())}. Expected: eth0/eth1 (2 × 400G frontend) and BMC / OS MGMT / BF MGMT (1G).</p>`;
+  const order = ['eth0', 'eth1', 'BMC', 'OS MGMT', 'BF MGMT'];
+  const rows = other.slice().sort((a, b) => order.indexOf(a[0]) - order.indexOf(b[0])).map(([nm, cid, fp, fpp]) => { const fe = PLANE(nm) === 'frontend', col = fe ? '#4ea8ff' : '#38d9a0';
+    return [`<span style="color:${col}" title="${PTYPE(nm)}">${esc(nm)}</span>`, `<span class="tag" style="color:${col}">${fe ? 'FRONT' : 'OOB'}</span>`,
+      fp ? `<span style="color:${col}">${esc(String(fp).toUpperCase())}</span>` : '<span style="color:var(--faint)">not exported</span>', fp ? esc(fpp || '') : '—', esc(cid)]; });
+  const missing = order.filter(nm => !other.some(x => x[0] === nm));
+  return `<h4 class="inch" style="margin-top:14px">Frontend and out-of-band (from NetBox)</h4>${tbl(['Port', 'Plane', 'Peer', 'Peer port', 'NetBox'], rows)}
+    <p class="small">UFM sees only the RDMA fabric, so these come from the NetBox cable records${missing.length ? `; <span style="color:${CB.warn}">no NetBox cable for ${missing.map(esc).join(', ')}</span>` : ''}. eth0/eth1 are 400G QSFP112, the OOB ports 1G. Their switches (SpectrumX frontend leaves, OOB leaves) are not collected yet, so there is no live state for them.</p>`; }
 const _insp2 = inspect; inspect = function (id) {
   const s = slotInfo[id]; if (s && ufmOn) { insp.innerHTML = trayHtml(s); return; }
   _insp2(id); if (!CAB || !id || !/^(bel|bes)\d+$/.test(id)) return;
