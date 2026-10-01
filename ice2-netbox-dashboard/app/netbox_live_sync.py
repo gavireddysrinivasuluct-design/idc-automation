@@ -1069,7 +1069,8 @@ class Handler(BaseHTTPRequestHandler):
         except RuntimeError as error:
             self.respond(HTTPStatus.BAD_GATEWAY, {"error": str(error)})
         except (OSError, ValueError) as error:
-            self.respond(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "Could not read the UFM scan: %s" % error})
+            where = "UFM scan" if path.startswith("/api/cabling") else "request"
+            self.respond(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "Could not complete the %s: %s" % (where, error)})
 
     def do_POST(self) -> None:
         path = urlparse(self.path).path

@@ -316,7 +316,8 @@ Sync complete in 34.2 s   NetBox 1.0 s ‖ IPs 0.0 s ‖ devices 34.2 s
   - The device's NetBox **vendor, model, management IP and status**, taken from the most recent sync. Clicking a device makes no NetBox call, so this works even when the NetBox proxy is down. A device not seen by any sync yet is looked up once, then remembered.
   - A **Live** column in every cable table.
   - Click any **cable ID** to check that one cable against NetBox right now.
-- **Live link state card.** Counts, the full problem list (down, initializing, NetBox changed or missing), and the UFM `fnm1` port states.
+- **Check tabs** below the diagram: **Cabling vs UFM** and **Live link state**. Each tab shows a count of items to review, or ✓ when there are none. Click a tab or use the arrow keys to switch; the page remembers your last tab.
+- **Live link state tab.** Counts, the full problem list (down, initializing, NetBox changed or missing), and the UFM `fnm1` port states.
 
 GPU-side RDMA ports are not collected by the switch sync; only the leaf side of each GPU link is checked there. The UFM cabling check below covers both ends.
 
@@ -354,13 +355,13 @@ The dashboard picks up the new file automatically; reload the page if it is open
   The four small bars in each tile are the tray's rails 1–4. Click a tray to see its four links, adapter by adapter, with the NetBox cable for each.
 - **Leaves** take their rail colour and show their real GPU downlink count from UFM.
 - **Miscabled leaf–spine cables** are drawn in **magenta** on the mesh, and both switches get a ◆ marker. The **Miscabling** chip turns the layer on or off.
-- **Cabling vs UFM card**, in five sections:
+- **Cabling vs UFM tab**, in five sections:
   1. Miscabled cables, grouped per leaf, with *NetBox says* next to *UFM sees* and the two ways to fix it.
   2. GPU trays per scalable unit.
   3. Trays needing attention.
   4. Links not fully Active.
   5. Adapters without a name.
-- **Downloads** from the card:
+- **Downloads** from the tab:
   - **Findings CSV**: every difference, one row each, for a ticket or a spreadsheet.
   - **NetBox import CSV**: every GPU cable UFM sees but NetBox lacks, in NetBox's cable bulk-import columns. The UFM tray name is in `label`. Fill in `side_b_device` (the tray's NetBox host) before importing in NetBox (*Cables → Import*).
 
