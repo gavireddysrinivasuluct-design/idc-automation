@@ -65,6 +65,8 @@ STATE_DIR = PROJECT_ROOT / ".netbox-live-sync"
 LATEST = STATE_DIR / "latest-live.json"
 ADDRESS_CACHE = STATE_DIR / "management-addresses.csv"
 CABLE_CACHE = STATE_DIR / "netbox-cables.json"
+DEVICE_CACHE = STATE_DIR / "netbox-devices.json"
+DEVICE_FIELDS = "name,primary_ip4,primary_ip,device_type,status"
 CABLE_FIELDS = "id,a_terminations,b_terminations"
 BASELINE_COLLECTED_AT = "not-collected"
 
@@ -104,6 +106,21 @@ def cable_endpoints(cable: dict) -> list | None:
     return [ea["device"], ea["port"], eb["device"], eb["port"]]
 
 
+def device_details(device: dict) -> dict:
+    """The NetBox facts shown in the inspector, from a full or `fields=`-trimmed device record."""
+    device_type = device.get("device_type") or {}
+    manufacturer = device_type.get("manufacturer") or {}
+    primary = device.get("primary_ip4") or device.get("primary_ip") or {}
+    status = device.get("status") or {}
+    return {
+        "hostname": device.get("name"),
+        "primary_ip": primary.get("address") or "not assigned",
+        "vendor": manufacturer.get("name") or manufacturer.get("display") or "not recorded",
+        "model": device_type.get("model") or device_type.get("display") or "not recorded",
+        "status": (status.get("value") or status.get("label") or "unknown") if isinstance(status, dict) else str(status),
+    }
+
+
 def link_status(states: list[str]) -> str:
     """Collapse the collected endpoint states of one cable into a single status."""
     collected = [s for s in states if s and s != "not-collected"]
@@ -130,7 +147,7 @@ class SyncState:
         self.baseline: dict[str, dict] = {}
         self.live: dict[tuple[str, str], str] = {}
         self.refreshes: dict[str, dict] = {}
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()  # re-entrant: address lookup may run inside start_refresh
         self.collected_at = BASELINE_COLLECTED_AT
         self.source = "local topology snapshot"
         self.switches: list[str] = []
@@ -152,6 +169,9 @@ class SyncState:
         self.load_baseline()
         self.load_latest()
         self.load_cable_cache()
+        self.device_info: dict[str, dict] = {}
+        self.device_info_at: str | None = None
+        self.load_device_cache()
 
     def bump(self) -> None:
         """Invalidate the cached /api/live payload (call after any state change)."""
@@ -190,6 +210,31 @@ class SyncState:
             self.netbox_sync = saved.get("result")
         except (OSError, ValueError) as error:
             print("[netbox-live-sync] ignoring unreadable %s: %s" % (CABLE_CACHE, error))
+
+    def load_device_cache(self) -> None:
+        if not DEVICE_CACHE.is_file():
+            return
+        try:
+            saved = json.loads(DEVICE_CACHE.read_text(encoding="utf-8"))
+            self.device_info, self.device_info_at = saved.get("devices", {}), saved.get("synced_at")
+        except (OSError, ValueError) as error:
+            print("[netbox-live-sync] ignoring unreadable %s: %s" % (DEVICE_CACHE, error))
+
+    def remember_devices(self, details: dict[str, dict], replace: bool = False) -> None:
+        """Keep the NetBox device facts from the latest sync so the inspector never waits on NetBox."""
+        with self.lock:
+            if replace:
+                self.device_info = dict(details)
+                self.device_info_at = now_iso()
+            else:
+                self.device_info.update(details)
+                self.device_info_at = self.device_info_at or now_iso()
+            snapshot = {"synced_at": self.device_info_at, "devices": self.device_info}
+            self.bump()
+        STATE_DIR.mkdir(exist_ok=True)
+        partial = DEVICE_CACHE.with_suffix(".part")
+        partial.write_text(json.dumps(snapshot), encoding="utf-8")
+        partial.replace(DEVICE_CACHE)
 
     def save_cable_cache(self) -> None:
         STATE_DIR.mkdir(exist_ok=True)
@@ -273,22 +318,25 @@ class SyncState:
         if ADDRESS_CACHE.is_file() and (time.time() - ADDRESS_CACHE.stat().st_mtime) < self.address_cache_hours * 3600:
             with ADDRESS_CACHE.open(newline="", encoding="utf-8") as handle:
                 cached = {r["hostname"]: r["management_address"] for r in csv.DictReader(handle) if r.get("management_address")}
-            if all(name in cached for name in names):
+            if all(name in cached for name in names) and all(name in self.device_info for name in names):
                 self.write_addresses(output, names, cached)
                 self.address_source = "local cache"
                 return len(names)
         wanted = set(names)
         addresses: dict[str, str] = {}
+        details: dict[str, dict] = {}
         groups = sorted({(row.get("site", ""), row.get("netbox_role", "")) for row in inventory if row.get("site") and row.get("netbox_role")})
         for site, role in groups:
             try:
                 path: str | None = "/api/dcim/devices/?site=%s&role=%s&limit=1000" % (quote(site, safe=""), quote(role, safe=""))
                 first = True
                 while path:
-                    page = self.get_list(path, "name,primary_ip4,primary_ip", ("name",)) if first else self.get_netbox(path)
+                    page = self.get_list(path, DEVICE_FIELDS, ("name", "device_type")) if first else self.get_netbox(path)
                     first = False
                     for device in page.get("results") or []:
                         name = device.get("name")
+                        if name in wanted:
+                            details[name] = device_details(device)
                         primary = device.get("primary_ip4") or device.get("primary_ip") or {}
                         address = (primary.get("address") or "").split("/", 1)[0]
                         if name in wanted and address:
@@ -298,6 +346,8 @@ class SyncState:
                 print("[netbox-live-sync] bulk address query %s/%s failed, falling back per device: %s" % (site, role, error))
         if addresses:
             self.address_source = "netbox bulk"
+        if details:
+            self.remember_devices(details, replace=len(details) == len(wanted))
         names_left = [name for name in names if name not in addresses]
         if not names_left:
             self.write_addresses(output, names, addresses)
@@ -319,6 +369,7 @@ class SyncState:
             matches = payload.get("results") or []
             if len(matches) != 1:
                 raise RuntimeError("NetBox returned %d devices for %s." % (len(matches), name))
+            details[name] = device_details(matches[0])
             return name, address_from_device(matches[0], name)
 
         # The Teleport app proxy reliably handles exact device lookups, but
@@ -330,6 +381,8 @@ class SyncState:
                 name, address = future.result()
                 addresses[name] = address
         all_names = [row.get("hostname", "") for row in inventory if row.get("hostname")]
+        if details:
+            self.remember_devices(details, replace=len(details) == len(wanted))
         self.write_addresses(output, all_names, addresses)
         STATE_DIR.mkdir(exist_ok=True)
         self.write_addresses(ADDRESS_CACHE, all_names, addresses)
@@ -380,6 +433,8 @@ class SyncState:
             "cables": {"total": len(self.baseline), **cable_counts},
             "exceptions": exceptions,
             "ufm": [],
+            "devices": {name: [d.get("primary_ip"), d.get("vendor"), d.get("model"), d.get("status")] for name, d in self.device_info.items()},
+            "devices_synced_at": self.device_info_at,
             "netbox": self.netbox_sync,
             "refresh_running": any(item.get("state") == "running" for item in self.refreshes.values()),
             "sync_running": any(item.get("state") == "running" for item in self.syncs.values()),
@@ -452,22 +507,23 @@ class SyncState:
             "verdict": verdict,
         }
 
-    def device(self, hostname: str) -> dict:
-        payload = self.get_netbox("/api/dcim/devices/?limit=2&name=" + quote(hostname, safe=""))
+    def device(self, hostname: str, live: bool = False) -> dict:
+        """Device facts for the inspector: from the latest sync, or NetBox live if not known yet."""
+        cached = self.device_info.get(hostname)
+        if cached and not live:
+            return {**cached, "source": "last sync", "synced_at": self.device_info_at}
+        try:
+            payload = self.get_list("/api/dcim/devices/?limit=2&name=" + quote(hostname, safe=""), DEVICE_FIELDS, ("name", "device_type"))
+        except RuntimeError:
+            if cached:  # NetBox unreachable: the last sync is still the best answer
+                return {**cached, "source": "last sync", "synced_at": self.device_info_at}
+            raise
         devices = payload.get("results") or []
         if len(devices) != 1:
             raise RuntimeError("NetBox returned %d devices for %s." % (len(devices), hostname))
-        device = devices[0]
-        device_type = device.get("device_type") or {}
-        manufacturer = device_type.get("manufacturer") or {}
-        primary = device.get("primary_ip4") or device.get("primary_ip") or {}
-        return {
-            "hostname": device.get("name"),
-            "primary_ip": primary.get("address") or "not assigned",
-            "vendor": manufacturer.get("name") or manufacturer.get("display") or "not recorded",
-            "model": device_type.get("model") or device_type.get("display") or "not recorded",
-            "status": (device.get("status") or {}).get("value") or (device.get("status") or {}).get("label") or "unknown",
-        }
+        details = device_details(devices[0])
+        self.remember_devices({hostname: details})
+        return {**details, "source": "netbox live", "synced_at": now_iso()}
 
     # ---------- NetBox cable sync ----------
     def baseline_ranges(self) -> list[tuple[int, int]]:
@@ -880,7 +936,8 @@ class Handler(BaseHTTPRequestHandler):
             elif path.startswith("/api/verify/"):
                 self.respond(HTTPStatus.OK, self.state.verify(unquote(path.rsplit("/", 1)[-1])))
             elif path.startswith("/api/device/"):
-                self.respond(HTTPStatus.OK, self.state.device(unquote(path.rsplit("/", 1)[-1])))
+                live = "live=1" in (urlparse(self.path).query or "")
+                self.respond(HTTPStatus.OK, self.state.device(unquote(path.rsplit("/", 1)[-1]), live))
             elif path.startswith("/api/refresh/"):
                 self.respond(HTTPStatus.OK, self.state.refresh_status(unquote(path.rsplit("/", 1)[-1])))
             elif path.startswith("/api/sync/"):
