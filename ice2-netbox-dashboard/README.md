@@ -1,8 +1,8 @@
 # NetBox dashboard launcher
 
-This repository contains safe, reusable code and credential-setup scripts for a read-only NetBox/device dashboard. Internal topology, device inventories, dashboard HTML, host keys, tokens, and collected evidence are intentionally **not** stored here.
+This repository contains the shared dashboard HTML, topology snapshot, device inventory, and read-only command file for a read-only NetBox/device dashboard. SSH host keys, tokens, passwords, and collected runtime evidence are intentionally **not** stored here.
 
-Every user obtains the operational inputs through the approved internal process and keeps them only on their own machine. Never add those files or any credentials to Git.
+Every user keeps their own credentials and approved SSH host keys only on their own machine. Never add those files or collected evidence to Git.
 
 ## Prerequisites
 
@@ -22,33 +22,26 @@ tsh login
 
 The scripts prompt for credentials and save them only in the logged-in user's macOS Keychain. The device script writes a mode-`600` metadata profile outside the repository, normally at `~/.config/idc-automation/device-access.ini`.
 
-## Local operational inputs
+## SSH host-key setup
 
-Create a local directory that is outside Git, then obtain these approved files from your local machine or the authorized internal distribution location:
+Obtain the approved SSH `known_hosts` file from the platform owner, then install it locally:
 
-- dashboard HTML
-- backend cable topology CSV
-- device inventory CSV
-- approved SSH host-key file
-- read-only device-command file
+```bash
+./scripts/configure_known_hosts.sh
+```
 
-The `.gitignore` protects the conventional `local-inputs/` directory. The files are not interchangeable: request the current approved package if any are missing or stale.
+The script copies the supplied file to `local-inputs/known_hosts` with mode `600`. That directory is ignored by Git.
 
 Management IPs are different: they are fetched read-only from NetBox during each device refresh. The generated address map is written only to the ignored runtime directory and is never committed.
 
 ## Run
 
-Use the shared NetBox endpoint below and replace only the local input paths:
+Use the shared NetBox endpoint. All dashboard and device inputs are bundled; only the private device profile and local host-key file need setup:
 
 ```bash
 python3 app/netbox_live_sync.py \
   --netbox-url 'https://netbox-prod-europe-west2-netbox.nscale.teleport.sh' \
-  --diagram local-inputs/dashboard.html \
-  --connections local-inputs/connections.csv \
-  --device-profile "$HOME/.config/idc-automation/device-access.ini" \
-  --devices local-inputs/devices.csv \
-  --known-hosts local-inputs/known_hosts \
-  --commands local-inputs/read_only_commands.txt
+  --device-profile "$HOME/.config/idc-automation/device-access.ini"
 ```
 
 Open `http://127.0.0.1:8765/`. The browser only talks to the local service; the NetBox token and switch password never reach the browser. The service uses read-only NetBox GET requests, fetches each listed device's current primary management IP from NetBox during refresh, and executes only the command supplied in the approved local command file.
@@ -57,9 +50,10 @@ If an approved local proxy requires an HTTP Host header, add `--netbox-host-head
 
 ## Repository contents
 
+- `assets/` — shared dashboard, topology, device inventory, and command file.
 - `app/netbox_live_sync.py` — local-only service.
 - `collector/run_ntp_audit.py` — read-only collector.
-- `scripts/` — personal Keychain setup.
+- `scripts/` — personal Keychain and local host-key setup.
 - `config/` — non-secret profile example.
 
 The collector and service write runtime evidence only to ignored local paths.

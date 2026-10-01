@@ -38,6 +38,7 @@ from urllib.request import Request, urlopen
 
 APP_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = APP_DIR.parent
+ASSETS_DIR = PROJECT_ROOT / "assets"
 COLLECTOR = PROJECT_ROOT / "collector" / "run_ntp_audit.py"
 STATE_DIR = PROJECT_ROOT / ".netbox-live-sync"
 LATEST = STATE_DIR / "latest-live.json"
@@ -488,12 +489,12 @@ def main() -> int:
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--netbox-url", required=True, help="Approved NetBox URL or local proxy URL.")
     parser.add_argument("--netbox-host-header", help="Host header required by an approved local proxy.")
-    parser.add_argument("--diagram", type=Path, required=True, help="Locally obtained dashboard HTML.")
-    parser.add_argument("--connections", type=Path, required=True, help="Locally obtained topology CSV.")
+    parser.add_argument("--diagram", type=Path, default=ASSETS_DIR / "dashboard.html", help="Dashboard HTML (bundled by default).")
+    parser.add_argument("--connections", type=Path, default=ASSETS_DIR / "connections.csv", help="Topology CSV (bundled by default).")
     parser.add_argument("--device-profile", type=Path, help="Private per-user device profile created by scripts/configure_device_access.sh.")
-    parser.add_argument("--devices", type=Path, help="Locally obtained device inventory CSV.")
-    parser.add_argument("--known-hosts", type=Path, help="Locally obtained approved SSH host-key file.")
-    parser.add_argument("--commands", type=Path, help="Locally obtained read-only command file.")
+    parser.add_argument("--devices", type=Path, default=ASSETS_DIR / "devices.csv", help="Device inventory CSV (bundled by default).")
+    parser.add_argument("--known-hosts", type=Path, default=PROJECT_ROOT / "local-inputs" / "known_hosts", help="Local approved SSH host-key file installed by scripts/configure_known_hosts.sh.")
+    parser.add_argument("--commands", type=Path, default=ASSETS_DIR / "read_only_commands.txt", help="Read-only command file (bundled by default).")
     args = parser.parse_args()
     if not args.diagram.is_file() or not args.connections.is_file():
         raise SystemExit("Diagram or backend connection CSV is missing.")
