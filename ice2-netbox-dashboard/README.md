@@ -9,10 +9,11 @@ Every user keeps their own credentials and approved SSH host keys only on their 
 From the project directory, complete these steps in order:
 
 ```bash
+git pull
 tsh login
-./scripts/netbox_proxy.sh start
 ./scripts/configure_netbox_token.sh
 ./scripts/configure_device_access.sh
+./scripts/netbox_proxy.sh start
 ./scripts/configure_known_hosts.sh --collect-live
 python3 app/netbox_live_sync.py \
   --netbox-url 'http://127.0.0.1:8444' \
@@ -20,6 +21,12 @@ python3 app/netbox_live_sync.py \
 ```
 
 Then open `http://127.0.0.1:8765/` in a browser. The dashboard, topology, device list, and read-only command file are already included under `assets/`.
+
+When you finish, stop the local NetBox proxy:
+
+```bash
+./scripts/netbox_proxy.sh stop
+```
 
 ## Prerequisites
 
