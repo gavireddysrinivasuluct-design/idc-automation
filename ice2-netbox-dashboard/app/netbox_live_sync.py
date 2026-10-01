@@ -14,6 +14,22 @@ GET  /api/health          NetBox reachability + live-evidence summary (never fai
 GET  /api/verify/<id>     one cable: current NetBox record vs. live switch state
 POST /api/refresh         start a read-only collection across the 100 backend switches
 GET  /api/refresh/<run>   collection progress
+POST /api/sync            one-click sync: NetBox cables and device collection, run concurrently
+GET  /api/sync/<run>      sync progress with per-phase timings
+
+Performance notes
+-----------------
+* /api/live is computed once per data change and served with an ETag (304 when
+  unchanged) and gzip, so frequent dashboard polling is nearly free.
+* Management IPs come from one bulk NetBox query per (site, role) group and are
+  cached locally (default 24 h); per-device lookups are only a fallback.
+* Cable sync trims the REST payload with `fields=` and, between periodic full
+  syncs, is incremental: only cables named in the NetBox change log since the
+  last sync are fetched (deleted cables are detected the same way).
+* The NetBox phase and the device phase run concurrently; device results are
+  applied to the live view as each switch finishes.
+* `--fanout jump` replaces one Teleport session per switch with a single
+  session that fans out from the jump host.
 """
 
 from __future__ import annotations
@@ -21,14 +37,17 @@ from __future__ import annotations
 import argparse
 import csv
 import getpass
+import gzip
+import hashlib
 import json
 import secrets
+import shutil
 import socket
 import subprocess
 import sys
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -44,6 +63,9 @@ ASSETS_DIR = PROJECT_ROOT / "assets"
 COLLECTOR = PROJECT_ROOT / "collector" / "run_ntp_audit.py"
 STATE_DIR = PROJECT_ROOT / ".netbox-live-sync"
 LATEST = STATE_DIR / "latest-live.json"
+ADDRESS_CACHE = STATE_DIR / "management-addresses.csv"
+CABLE_CACHE = STATE_DIR / "netbox-cables.json"
+CABLE_FIELDS = "id,a_terminations,b_terminations"
 BASELINE_COLLECTED_AT = "not-collected"
 
 
@@ -55,6 +77,31 @@ def endpoint_from_termination(termination: dict) -> dict:
     obj = termination.get("object") or {}
     device = obj.get("device") or {}
     return {"device": device.get("name", "unknown"), "port": obj.get("name", "unknown")}
+
+
+def parse_iso(value: str | None) -> datetime | None:
+    try:
+        return datetime.fromisoformat(value) if value else None
+    except ValueError:
+        return None
+
+
+def age_hours(value: str | None) -> float:
+    stamp = parse_iso(value)
+    return float("inf") if not stamp else (datetime.now(timezone.utc) - stamp).total_seconds() / 3600
+
+
+def next_path(page: dict) -> str | None:
+    nxt = page.get("next")
+    return nxt[nxt.find("/api/"):] if nxt and "/api/" in nxt else None
+
+
+def cable_endpoints(cable: dict) -> list | None:
+    terms_a, terms_b = cable.get("a_terminations") or [], cable.get("b_terminations") or []
+    if not terms_a or not terms_b:
+        return None
+    ea, eb = endpoint_from_termination(terms_a[0]), endpoint_from_termination(terms_b[0])
+    return [ea["device"], ea["port"], eb["device"], eb["port"]]
 
 
 def link_status(states: list[str]) -> str:
@@ -72,7 +119,7 @@ def link_status(states: list[str]) -> str:
 
 
 class SyncState:
-    def __init__(self, netbox_url: str, netbox_host_header: str | None, connections: Path, device_profile: Path | None, devices: Path | None, known_hosts: Path | None, commands: Path | None) -> None:
+    def __init__(self, netbox_url: str, netbox_host_header: str | None, connections: Path, device_profile: Path | None, devices: Path | None, known_hosts: Path | None, commands: Path | None, options: argparse.Namespace | None = None) -> None:
         self.netbox_url = netbox_url.rstrip("/")
         self.netbox_host_header = netbox_host_header
         self.connections = connections
@@ -89,8 +136,26 @@ class SyncState:
         self.switches: list[str] = []
         self.syncs: dict[str, dict] = {}
         self.netbox_sync: dict | None = None
+        opts = options or argparse.Namespace()
+        self.page_size = getattr(opts, "netbox_page_size", 250)
+        self.nb_concurrency = getattr(opts, "netbox_concurrency", 2)
+        self.address_cache_hours = getattr(opts, "address_cache_hours", 24.0)
+        self.full_every_hours = getattr(opts, "full_netbox_every_hours", 6.0)
+        self.device_parallel = getattr(opts, "device_parallel", 10)
+        self.fanout = getattr(opts, "fanout", "local")
+        self.fields_ok: bool | None = None          # NetBox `fields=` support, learned on first use
+        self.nb_cables: dict[str, list | None] = {}  # cable id -> [a_dev, a_port, b_dev, b_port]
+        self.nb_full_at: str | None = None
+        self.nb_synced_at: str | None = None        # start time of the last successful cable sync
+        self.version = 0
+        self._live_cache: tuple | None = None
         self.load_baseline()
         self.load_latest()
+        self.load_cable_cache()
+
+    def bump(self) -> None:
+        """Invalidate the cached /api/live payload (call after any state change)."""
+        self.version += 1
 
     # ---------- evidence loading ----------
     def load_baseline(self) -> None:
@@ -115,6 +180,24 @@ class SyncState:
         except (OSError, ValueError) as error:
             print("[netbox-live-sync] ignoring unreadable %s: %s" % (LATEST, error))
 
+    def load_cable_cache(self) -> None:
+        if not CABLE_CACHE.is_file():
+            return
+        try:
+            saved = json.loads(CABLE_CACHE.read_text(encoding="utf-8"))
+            self.nb_cables = saved.get("cables", {})
+            self.nb_full_at, self.nb_synced_at = saved.get("full_at"), saved.get("synced_at")
+            self.netbox_sync = saved.get("result")
+        except (OSError, ValueError) as error:
+            print("[netbox-live-sync] ignoring unreadable %s: %s" % (CABLE_CACHE, error))
+
+    def save_cable_cache(self) -> None:
+        STATE_DIR.mkdir(exist_ok=True)
+        partial = CABLE_CACHE.with_suffix(".part")
+        partial.write_text(json.dumps({"full_at": self.nb_full_at, "synced_at": self.nb_synced_at,
+                                       "cables": self.nb_cables, "result": self.netbox_sync}), encoding="utf-8")
+        partial.replace(CABLE_CACHE)
+
     # ---------- NetBox ----------
     def netbox_token(self) -> str:
         if self.token:
@@ -131,6 +214,7 @@ class SyncState:
         if self.netbox_host_header:
             headers["Host"] = self.netbox_host_header
         request = Request(self.netbox_url + path, headers=headers, method="GET")
+        self.netbox_requests = getattr(self, "netbox_requests", 0) + 1
         for attempt in range(3):
             try:
                 with urlopen(request, timeout=20) as response:
@@ -144,15 +228,84 @@ class SyncState:
                 time.sleep(0.5 * (attempt + 1))
         raise AssertionError("NetBox request retry loop did not return")
 
+    def get_list(self, base: str, fields: str | None, required: tuple[str, ...] = ()) -> dict:
+        """GET a NetBox list page, trimming the payload with `fields=` when NetBox supports it.
+
+        NetBox 4.x honours `fields`; older versions ignore it or reject it, in which
+        case the full payload is requested and the feature is switched off.
+        """
+        if fields and self.fields_ok is not False:
+            try:
+                page = self.get_netbox(base + "&fields=" + fields)
+                results = page.get("results") or []
+                if results and any(key not in results[0] for key in required):
+                    self.fields_ok = False
+                else:
+                    if results:
+                        self.fields_ok = True
+                    return page
+            except RuntimeError as error:
+                if "HTTP 400" not in str(error):
+                    raise
+                self.fields_ok = False
+        return self.get_netbox(base)
+
+    def write_addresses(self, output: Path, names: list[str], addresses: dict[str, str]) -> None:
+        with output.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.writer(handle)
+            writer.writerow(["hostname", "management_address"])
+            writer.writerows((name, addresses[name]) for name in names)
+
     def fetch_management_addresses(self, output: Path) -> int:
-        """Build an ephemeral device-IP map from NetBox; never persist it in Git."""
+        """Build an ephemeral device-IP map; never persist it in Git.
+
+        Order of preference: fresh local cache (no NetBox calls), one bulk query per
+        (site, role) group from the inventory, then per-device lookups for any gaps.
+        """
         if not self.devices:
             raise RuntimeError("A local device inventory is required to fetch management addresses.")
         with self.devices.open(newline="", encoding="utf-8-sig") as handle:
-            names = [(row.get("hostname") or "").strip() for row in csv.DictReader(handle)]
-        names = [name for name in names if name]
+            inventory = [{k: (v or "").strip() for k, v in row.items()} for row in csv.DictReader(handle)]
+        names = [row.get("hostname", "") for row in inventory if row.get("hostname")]
         if not names or len(names) != len(set(names)):
             raise RuntimeError("The device inventory must contain unique non-empty hostname values.")
+        self.address_source = "netbox"
+        if ADDRESS_CACHE.is_file() and (time.time() - ADDRESS_CACHE.stat().st_mtime) < self.address_cache_hours * 3600:
+            with ADDRESS_CACHE.open(newline="", encoding="utf-8") as handle:
+                cached = {r["hostname"]: r["management_address"] for r in csv.DictReader(handle) if r.get("management_address")}
+            if all(name in cached for name in names):
+                self.write_addresses(output, names, cached)
+                self.address_source = "local cache"
+                return len(names)
+        wanted = set(names)
+        addresses: dict[str, str] = {}
+        groups = sorted({(row.get("site", ""), row.get("netbox_role", "")) for row in inventory if row.get("site") and row.get("netbox_role")})
+        for site, role in groups:
+            try:
+                path: str | None = "/api/dcim/devices/?site=%s&role=%s&limit=1000" % (quote(site, safe=""), quote(role, safe=""))
+                first = True
+                while path:
+                    page = self.get_list(path, "name,primary_ip4,primary_ip", ("name",)) if first else self.get_netbox(path)
+                    first = False
+                    for device in page.get("results") or []:
+                        name = device.get("name")
+                        primary = device.get("primary_ip4") or device.get("primary_ip") or {}
+                        address = (primary.get("address") or "").split("/", 1)[0]
+                        if name in wanted and address:
+                            addresses[name] = address
+                    path = next_path(page)
+            except RuntimeError as error:
+                print("[netbox-live-sync] bulk address query %s/%s failed, falling back per device: %s" % (site, role, error))
+        if addresses:
+            self.address_source = "netbox bulk"
+        names_left = [name for name in names if name not in addresses]
+        if not names_left:
+            self.write_addresses(output, names, addresses)
+            STATE_DIR.mkdir(exist_ok=True)
+            self.write_addresses(ADDRESS_CACHE, names, addresses)
+            return len(addresses)
+        names_bulk = addresses
+        names = names_left
         def address_from_device(device: dict, name: str) -> str:
             primary = device.get("primary_ip4") or device.get("primary_ip") or {}
             address = (primary.get("address") or "").split("/", 1)[0]
@@ -160,7 +313,7 @@ class SyncState:
                 raise RuntimeError("NetBox has no primary management IP for %s." % name)
             return address
 
-        addresses: dict[str, str] = {}
+        addresses = dict(names_bulk)
         def lookup(name: str) -> tuple[str, str]:
             payload = self.get_netbox("/api/dcim/devices/?limit=2&name=" + quote(name, safe=""))
             matches = payload.get("results") or []
@@ -176,10 +329,14 @@ class SyncState:
             for future in as_completed(futures):
                 name, address = future.result()
                 addresses[name] = address
-        with output.open("w", newline="", encoding="utf-8") as handle:
-            writer = csv.writer(handle)
-            writer.writerow(["hostname", "management_address"])
-            writer.writerows((name, addresses[name]) for name in names)
+        all_names = [row.get("hostname", "") for row in inventory if row.get("hostname")]
+        self.write_addresses(output, all_names, addresses)
+        STATE_DIR.mkdir(exist_ok=True)
+        self.write_addresses(ADDRESS_CACHE, all_names, addresses)
+        if names_bulk:
+            self.address_source = "netbox bulk + %d per-device" % len(names)
+        else:
+            self.address_source = "netbox per-device"
         return len(addresses)
 
     # ---------- live view ----------
@@ -227,6 +384,27 @@ class SyncState:
             "refresh_running": any(item.get("state") == "running" for item in self.refreshes.values()),
             "sync_running": any(item.get("state") == "running" for item in self.syncs.values()),
         }
+
+    def live_payload(self) -> tuple[str, bytes, bytes]:
+        """(etag, json, gzipped json) for /api/live, rebuilt only when state changed."""
+        version = self.version
+        cached = self._live_cache
+        if cached and cached[0] == version:
+            return cached[1], cached[2], cached[3]
+        body = json.dumps(self.live_view(), separators=(",", ":")).encode("utf-8")
+        etag = '"%d-%s"' % (version, hashlib.sha1(body).hexdigest()[:12])
+        packed = gzip.compress(body, compresslevel=5)
+        self._live_cache = (version, etag, body, packed)
+        return etag, body, packed
+
+    def schedule(self, minutes: float) -> None:
+        """Background sync so the dashboard opens on fresh evidence."""
+        while True:
+            time.sleep(minutes * 60)
+            try:
+                print("[netbox-live-sync] scheduled sync:", self.start_sync())
+            except RuntimeError as error:
+                print("[netbox-live-sync] scheduled sync skipped:", error)
 
     def health(self) -> dict:
         view = self.live_view()
@@ -291,9 +469,8 @@ class SyncState:
             "status": (device.get("status") or {}).get("value") or (device.get("status") or {}).get("label") or "unknown",
         }
 
-    # ---------- NetBox bulk sync ----------
-    def fetch_cables(self, progress: dict | None = None) -> dict[str, dict]:
-        """Pull every backend cable (IDs in the baseline CSV ranges) from NetBox, paginated."""
+    # ---------- NetBox cable sync ----------
+    def baseline_ranges(self) -> list[tuple[int, int]]:
         ids = sorted(int(k) for k in self.baseline)
         ranges, lo, prev = [], ids[0], ids[0]
         for cid in ids[1:]:
@@ -302,20 +479,25 @@ class SyncState:
                 lo = cid
             prev = cid
         ranges.append((lo, prev))
+        return ranges
+
+    def fetch_cables(self, progress: dict | None = None) -> dict[str, dict]:
+        """Pull every backend cable (IDs in the baseline CSV ranges) from NetBox, paginated."""
         cables: dict[str, dict] = {}
         pages: list[str] = []
+        ranges = self.baseline_ranges()
         for lo, hi in ranges:
-            base = "/api/dcim/cables/?id__gte=%d&id__lte=%d&limit=250" % (lo, hi)
-            first = self.get_netbox(base + "&offset=0")
+            base = "/api/dcim/cables/?id__gte=%d&id__lte=%d&limit=%d" % (lo, hi, self.page_size)
+            first = self.get_list(base + "&offset=0", CABLE_FIELDS, ("a_terminations", "b_terminations"))
             for cable in first.get("results", []):
                 cables[str(cable["id"])] = cable
-            pages.extend(base + "&offset=%d" % offset for offset in range(250, first.get("count", 0), 250))
+            suffix = ("&fields=" + CABLE_FIELDS) if self.fields_ok else ""
+            pages.extend(base + "&offset=%d%s" % (offset, suffix) for offset in range(self.page_size, first.get("count", 0), self.page_size))
         if progress is not None:
-            progress.update(state="running", pages_completed=len(ranges), pages_total=len(ranges) + len(pages))
-        # Teleport's local app forward has limited upstream capacity. Two
-        # in-flight expanded cable pages is materially faster than serial but
-        # avoids starving the following device-address lookup.
-        with ThreadPoolExecutor(max_workers=2) as pool:
+            progress.update(state="running", mode="full", pages_completed=len(ranges), pages_total=len(ranges) + len(pages))
+        # Teleport's local app forward has limited upstream capacity; keep the
+        # number of in-flight expanded cable pages small (configurable).
+        with ThreadPoolExecutor(max_workers=self.nb_concurrency) as pool:
             futures = [pool.submit(self.get_netbox, path) for path in pages]
             for future in as_completed(futures):
                 page = future.result()
@@ -325,26 +507,100 @@ class SyncState:
                     progress["pages_completed"] += 1
         return cables
 
+    def changed_cable_ids(self, since: str) -> set[str] | None:
+        """Cable IDs touched in the NetBox change log since `since` (None = cannot tell; do a full sync).
+
+        Covers edits, deletions and re-terminations (dcim.cabletermination rows carry
+        the cable ID). Any doubt about the filter being honoured falls back to full.
+        """
+        cutoff = parse_iso(since)
+        if not cutoff:
+            return None
+        for base in ("/api/core/object-changes/", "/api/extras/object-changes/"):
+            try:
+                ids: set[str] = set()
+                for object_type in ("dcim.cable", "dcim.cabletermination"):
+                    path: str | None = "%s?changed_object_type=%s&time_after=%s&limit=1000" % (base, object_type, quote(since, safe=""))
+                    pages = 0
+                    while path:
+                        page = self.get_netbox(path)
+                        pages += 1
+                        if page.get("count", 0) > 20000 or pages > 25:
+                            return None
+                        for change in page.get("results") or []:
+                            stamp = parse_iso((change.get("time") or "").replace("Z", "+00:00"))
+                            if stamp and stamp < cutoff:
+                                return None  # time filter not honoured by this NetBox
+                            if object_type == "dcim.cable":
+                                ids.add(str(change.get("changed_object_id")))
+                            else:
+                                for data in (change.get("postchange_data") or {}, change.get("prechange_data") or {}):
+                                    if data.get("cable"):
+                                        ids.add(str(data["cable"]))
+                        path = next_path(page)
+                return ids
+            except RuntimeError as error:
+                if "HTTP 404" in str(error):
+                    continue
+                print("[netbox-live-sync] change log unavailable, using a full cable sync: %s" % error)
+                return None
+        return None
+
+    def fetch_cable_ids(self, ids: list[str]) -> dict[str, dict]:
+        found: dict[str, dict] = {}
+        for start in range(0, len(ids), 50):
+            chunk = ids[start:start + 50]
+            base = "/api/dcim/cables/?limit=%d&%s" % (len(chunk), "&".join("id=%s" % quote(i) for i in chunk))
+            for cable in self.get_list(base, CABLE_FIELDS, ("a_terminations", "b_terminations")).get("results", []):
+                found[str(cable["id"])] = cable
+        return found
+
     def sync_netbox(self, progress: dict | None = None) -> dict:
-        cables = self.fetch_cables(progress)
+        started = now_iso()
+        t0 = time.monotonic()
+        requests_before = getattr(self, "netbox_requests", 0)
+        mode, changed = "full", None
+        if self.nb_cables and self.nb_synced_at and age_hours(self.nb_full_at) < self.full_every_hours:
+            since = (parse_iso(self.nb_synced_at) - timedelta(seconds=120)).isoformat(timespec="seconds")
+            ids = self.changed_cable_ids(since)
+            if ids is not None:
+                mode = "incremental"
+                relevant = sorted(i for i in ids if i in self.baseline)
+                if progress is not None:
+                    progress.update(state="running", mode=mode, changed=len(relevant))
+                found = self.fetch_cable_ids(relevant)
+                for cid in relevant:
+                    if cid in found:
+                        self.nb_cables[cid] = cable_endpoints(found[cid])
+                    else:
+                        self.nb_cables.pop(cid, None)
+                changed = len(relevant)
+        if mode == "full":
+            cables = self.fetch_cables(progress)
+            self.nb_cables = {cid: cable_endpoints(c) for cid, c in cables.items()}
+            self.nb_full_at = started
         mismatches, missing = [], []
         for cable_id, row in self.baseline.items():
-            cable = cables.get(cable_id)
-            if not cable:
+            if cable_id not in self.nb_cables:
                 missing.append(int(cable_id))
                 continue
-            terms_a, terms_b = cable.get("a_terminations") or [], cable.get("b_terminations") or []
-            if not terms_a or not terms_b:
+            ends = self.nb_cables[cable_id]
+            if not ends:
                 mismatches.append([int(cable_id), "", "", "", "", "missing termination"])
                 continue
-            ea, eb = endpoint_from_termination(terms_a[0]), endpoint_from_termination(terms_b[0])
             expected = sorted([(row["endpoint_a_device"], row["endpoint_a_port"]), (row["endpoint_b_device"], row["endpoint_b_port"])])
-            if sorted([(ea["device"], ea["port"]), (eb["device"], eb["port"])]) != expected:
-                mismatches.append([int(cable_id), ea["device"], ea["port"], eb["device"], eb["port"], "endpoint changed"])
-        result = {"synced_at": now_iso(), "checked": len(cables), "missing": missing, "mismatches": mismatches,
-                  "extra_in_range": len([c for c in cables if c not in self.baseline])}
+            if sorted([(ends[0], ends[1]), (ends[2], ends[3])]) != expected:
+                mismatches.append([int(cable_id), ends[0], ends[1], ends[2], ends[3], "endpoint changed"])
+        result = {"synced_at": now_iso(), "checked": len([c for c in self.baseline if c in self.nb_cables]), "missing": missing,
+                  "mismatches": mismatches, "extra_in_range": len([c for c in self.nb_cables if c not in self.baseline]),
+                  "mode": mode, "changed": changed, "full_at": self.nb_full_at,
+                  "seconds": round(time.monotonic() - t0, 2), "requests": getattr(self, "netbox_requests", 0) - requests_before,
+                  "fields_trimmed": bool(self.fields_ok)}
         with self.lock:
             self.netbox_sync = result
+            self.nb_synced_at = started
+            self.bump()
+        self.save_cable_cache()
         return result
 
     def start_sync(self) -> dict:
@@ -354,38 +610,63 @@ class SyncState:
                 raise RuntimeError("A sync is already running.")
             run_id = secrets.token_hex(6)
             self.syncs[run_id] = {"state": "running", "started_at": now_iso(),
-                                  "netbox": {"state": "running"}, "devices": {"state": "pending"}}
+                                  "netbox": {"state": "running"}, "devices": {"state": "pending"}, "timings": {}}
+            self.bump()
         threading.Thread(target=self.run_sync, args=(run_id,), daemon=True).start()
         return {"run_id": run_id, "state": "running"}
 
     def run_sync(self, run_id: str) -> None:
+        """NetBox cable sync and the device phase (address lookup -> collection) run concurrently."""
         record = self.syncs[run_id]
-        address_file: Path | None = None
-        try:
-            STATE_DIR.mkdir(exist_ok=True)
-            candidate_address_file = STATE_DIR / (run_id + "-management-addresses.csv")
-            address_count = self.fetch_management_addresses(candidate_address_file)
-            address_file = candidate_address_file
-            record["devices"] = {"state": "pending", "management_addresses_from_netbox": address_count}
-        except Exception as error:
-            record["devices"] = {"state": "failed", "error": "Management-IP lookup failed: " + str(error)}
-        try:
-            nb = self.sync_netbox(record["netbox"])
-            record["netbox"] = {"state": "complete", "checked": nb["checked"], "mismatches": len(nb["mismatches"]), "missing": len(nb["missing"])}
-        except Exception as error:
-            record["netbox"] = {"state": "failed", "error": str(error)}
-        if address_file:
+        timings = record.setdefault("timings", {})
+        t0 = time.monotonic()
+
+        def netbox_phase() -> None:
+            start = time.monotonic()
             try:
-                record["devices"] = {"state": "running"}
+                nb = self.sync_netbox(record["netbox"])
+                record["netbox"] = {"state": "complete", "checked": nb["checked"], "mismatches": len(nb["mismatches"]),
+                                    "missing": len(nb["missing"]), "mode": nb["mode"], "changed": nb["changed"],
+                                    "requests": nb["requests"], "fields_trimmed": nb["fields_trimmed"]}
+            except Exception as error:
+                record["netbox"] = {"state": "failed", "error": str(error)}
+            timings["netbox_s"] = round(time.monotonic() - start, 1)
+
+        def device_phase() -> None:
+            start = time.monotonic()
+            try:
+                STATE_DIR.mkdir(exist_ok=True)
+                address_file = STATE_DIR / (run_id + "-management-addresses.csv")
+                count = self.fetch_management_addresses(address_file)
+                timings["addresses_s"] = round(time.monotonic() - start, 1)
+                record["devices"] = {"state": "running", "management_addresses": count, "address_source": self.address_source}
+            except Exception as error:
+                record["devices"] = {"state": "failed", "error": "Management-IP lookup failed: " + str(error)}
+                return
+            try:
                 refresh = self.start_refresh(address_file)
                 while self.refreshes[refresh["run_id"]]["state"] == "running":
-                    time.sleep(2)
-                record["devices"] = self.refresh_status(refresh["run_id"])
+                    record["devices"] = {**self.refresh_status(refresh["run_id"]), "address_source": self.address_source}
+                    time.sleep(1)
+                record["devices"] = {**self.refresh_status(refresh["run_id"]), "address_source": self.address_source}
             except Exception as error:
                 record["devices"] = {"state": "failed", "error": str(error)}
+            finally:
+                address_file.unlink(missing_ok=True)
+                timings["devices_s"] = round(time.monotonic() - start, 1)
+
+        phases = [threading.Thread(target=netbox_phase, daemon=True), threading.Thread(target=device_phase, daemon=True)]
+        for phase in phases:
+            phase.start()
+        for phase in phases:
+            phase.join()
         ok = [record["netbox"]["state"], record["devices"]["state"]]
-        record["state"] = "complete" if all(s == "complete" for s in ok) else "partial" if "complete" in ok else "failed"
+        record["state"] = "complete" if all(s == "complete" for s in ok) else "partial" if any(s in ("complete", "partial") for s in ok) else "failed"
+        timings["total_s"] = round(time.monotonic() - t0, 1)
         record["finished_at"] = now_iso()
+        with self.lock:
+            self.bump()
+        print("[netbox-live-sync] sync %s %s in %.1fs %s" % (run_id, record["state"], timings["total_s"], timings))
 
     def sync_status(self, run_id: str) -> dict:
         item = self.syncs.get(run_id)
@@ -414,66 +695,144 @@ class SyncState:
                 sys.executable, str(COLLECTOR), "--profile", str(self.device_profile),
                 "--devices", str(self.devices), "--addresses", str(generated_addresses),
                 "--known-hosts", str(self.known_hosts), "--commands-file", str(self.commands),
-                "--report-format", "none", "--parallel", "10", "--output-dir", str(output_dir),
+                "--report-format", "none", "--parallel", str(self.device_parallel), "--fanout", self.fanout,
+                "--output-dir", str(output_dir),
             ]
             log_file = STATE_DIR / (run_id + ".log")
             log_handle = log_file.open("w", encoding="utf-8")
             process = subprocess.Popen(command, stdout=log_handle, stderr=subprocess.STDOUT, text=True)
-            self.refreshes[run_id] = {"state": "running", "process": process, "output_dir": output_dir, "log": str(log_file), "management_addresses_from_netbox": address_count, "started_at": now_iso()}
+            self.refreshes[run_id] = {"state": "running", "process": process, "command": command, "output_dir": output_dir, "log": str(log_file),
+                                      "management_addresses_from_netbox": address_count, "started_at": now_iso(), "fanout": self.fanout,
+                                      "done": 0, "failed": 0, "total": self.device_count()}
+            self.bump()
         threading.Thread(target=self.finish_refresh, args=(run_id, log_handle), daemon=True).start()
         return {"run_id": run_id, "state": "running"}
 
+    def device_count(self) -> int:
+        try:
+            with self.devices.open(newline="", encoding="utf-8-sig") as handle:  # type: ignore[union-attr]
+                return sum(1 for row in csv.DictReader(handle) if (row.get("hostname") or "").strip())
+        except (OSError, AttributeError):
+            return 0
+
+    def ingest(self, record: dict, parsed: dict[tuple[str, str], str], seen: set[str], final: bool = False) -> None:
+        """Apply every newly finished switch to the live view (progressive results)."""
+        raw_dir, err_dir = record["output_dir"] / "raw", record["output_dir"] / "errors"
+        fresh: dict[tuple[str, str], str] = {}
+        for raw_file in sorted(raw_dir.glob("*.txt")) if raw_dir.is_dir() else []:
+            host = raw_file.stem
+            if host in seen:
+                continue
+            ports = self.parse_raw_file(raw_file)
+            if ports is None and not final:
+                continue  # empty (failed) or unparsable yet; checked again at the end
+            seen.add(host)
+            if ports is None and raw_file.stat().st_size:
+                record.setdefault("unparsable", []).append(host)
+            if ports:
+                fresh.update(ports)
+                record.setdefault("switches_ok", []).append(host)
+        failed = sum(1 for f in err_dir.glob("*.txt") if f.stat().st_size) if err_dir.is_dir() else 0
+        failed += len(record.get("unparsable", []))
+        record.update(done=len(list(raw_dir.glob("*.txt"))) if raw_dir.is_dir() else 0, failed=failed)
+        if fresh:
+            parsed.update(fresh)
+            with self.lock:
+                self.live.update(fresh)
+                self.source = "device collection in progress (%d/%d switches)" % (record["done"], record.get("total") or record["done"])
+                self.bump()
+
     def finish_refresh(self, run_id: str, log_handle) -> None:
         record = self.refreshes[run_id]
-        record["process"].wait()
-        log_handle.close()
+        parsed: dict[tuple[str, str], str] = {}
+        seen: set[str] = set()
+        t0 = time.monotonic()
         try:
-            if record["process"].returncode != 0:
-                raise RuntimeError("collector exited with %s" % record["process"].returncode)
-            parsed, switches = self.parse_live_directory(record["output_dir"])
+            while True:
+                while record["process"].poll() is None:
+                    self.ingest(record, parsed, seen)
+                    time.sleep(1.0)
+                code = record["process"].returncode
+                if code != 0 and record.get("fanout") == "jump" and not parsed:
+                    # The jump-host worker could not start (exit 3, e.g. no python3 there) or
+                    # not a single switch succeeded through it: retry this run, and use for
+                    # later runs, one Teleport session per device (the proven path).
+                    reason = "worker unavailable" if code == 3 else "no switch succeeded (exit %s)" % code
+                    errors = sorted((record["output_dir"] / "errors").glob("*.txt")) if (record["output_dir"] / "errors").is_dir() else []
+                    sample = errors[0].read_text(encoding="utf-8", errors="replace").strip()[-200:] if errors else ""
+                    record["fanout_fallback"] = "%s%s" % (reason, (": " + sample) if sample else "")
+                    print("[netbox-live-sync] jump fan-out %s; falling back to --fanout local" % record["fanout_fallback"])
+                    self.fanout = record["fanout"] = "local"
+                    command = [("local" if part == "jump" else part) for part in record["command"]]
+                    shutil.rmtree(record["output_dir"], ignore_errors=True)  # the collector creates it afresh
+                    record["process"] = subprocess.Popen(command, stdout=log_handle, stderr=subprocess.STDOUT, text=True)
+                    continue
+                break
+            self.ingest(record, parsed, seen, final=True)
+            log_handle.close()
             if not parsed:
-                raise RuntimeError("collector produced no parsable interface output")
+                raise RuntimeError("collector exited with %s and produced no parsable interface output" % code)
             stamp = now_iso()
+            switches = sorted(record.get("switches_ok", []))
+            state = "complete" if not record.get("failed") else "partial"
             with self.lock:
-                self.live.update(parsed)
                 self.collected_at = stamp
                 self.switches = switches
                 self.source = "device collection %s (%d switches)" % (stamp, len(switches))
-                record.update(state="complete", updated_interfaces=len(parsed), switches=len(switches), finished_at=stamp)
-            LATEST.write_text(json.dumps({
-                "collected_at": stamp, "switches": switches,
-                "ports": {"%s|%s" % key: value for key, value in parsed.items()},
-            }), encoding="utf-8")
+                record.update(state=state, updated_interfaces=len(parsed), switches=len(switches), finished_at=stamp,
+                              seconds=round(time.monotonic() - t0, 1))
+                self.bump()
+            if record.get("failed"):
+                ADDRESS_CACHE.unlink(missing_ok=True)  # an IP may have moved; re-resolve next time
+            previous = {}
+            if LATEST.is_file():
+                try:
+                    previous = json.loads(LATEST.read_text(encoding="utf-8")).get("ports", {})
+                except (OSError, ValueError):
+                    previous = {}
+            previous.update({"%s|%s" % key: value for key, value in parsed.items()})
+            LATEST.write_text(json.dumps({"collected_at": stamp, "switches": switches, "ports": previous}), encoding="utf-8")
         except (RuntimeError, OSError) as error:
+            if not log_handle.closed:
+                log_handle.close()
             record.update(state="failed", error=str(error), exit_code=record["process"].returncode)
+            with self.lock:
+                self.bump()
+
+    def parse_raw_file(self, raw_file: Path) -> dict[tuple[str, str], str] | None:
+        text = raw_file.read_text(encoding="utf-8", errors="replace")
+        start = text.find("__ICE2_COMMAND_001_START__")
+        end = text.find("__ICE2_COMMAND_001_END__")
+        if start < 0 or end < 0:
+            return None
+        try:
+            interfaces = json.loads(text[start + len("__ICE2_COMMAND_001_START__"):end].strip())
+        except json.JSONDecodeError:
+            return None
+        hostname = raw_file.stem
+        data: dict[tuple[str, str], str] = {}
+        for port, info in interfaces.items():
+            if not isinstance(info, dict) or (info.get("type") != "ib" and not port.startswith("fnm")):
+                continue
+            link = info.get("link") or {}
+            data[(hostname, port)] = "%s/%s/%s" % (link.get("logical-state", ""), link.get("physical-state", ""), link.get("speed", ""))
+        return data
 
     def parse_live_directory(self, output_dir: Path) -> tuple[dict[tuple[str, str], str], list[str]]:
         data: dict[tuple[str, str], str] = {}
         switches: list[str] = []
         for raw_file in sorted((output_dir / "raw").glob("*.txt")):
-            text = raw_file.read_text(encoding="utf-8", errors="replace")
-            start = text.find("__ICE2_COMMAND_001_START__")
-            end = text.find("__ICE2_COMMAND_001_END__")
-            if start < 0 or end < 0:
-                continue
-            try:
-                interfaces = json.loads(text[start + len("__ICE2_COMMAND_001_START__"):end].strip())
-            except json.JSONDecodeError:
-                continue
-            hostname = raw_file.stem
-            switches.append(hostname)
-            for port, info in interfaces.items():
-                if not isinstance(info, dict) or (info.get("type") != "ib" and not port.startswith("fnm")):
-                    continue
-                link = info.get("link") or {}
-                data[(hostname, port)] = "%s/%s/%s" % (link.get("logical-state", ""), link.get("physical-state", ""), link.get("speed", ""))
+            ports = self.parse_raw_file(raw_file)
+            if ports is not None:
+                switches.append(raw_file.stem)
+                data.update(ports)
         return data, switches
 
     def refresh_status(self, run_id: str) -> dict:
         item = self.refreshes.get(run_id)
         if not item:
             raise RuntimeError("Unknown refresh run.")
-        return {key: value for key, value in item.items() if key not in {"process", "output_dir", "log"}}
+        return {key: value for key, value in item.items() if key not in {"process", "output_dir", "log", "command", "switches_ok"}}
 
 class Handler(BaseHTTPRequestHandler):
     state: SyncState
@@ -498,7 +857,24 @@ class Handler(BaseHTTPRequestHandler):
             if path in {"/", "/index.html"}:
                 self.respond(HTTPStatus.OK, self.diagram.read_text(encoding="utf-8"), "text/html; charset=utf-8")
             elif path == "/api/live":
-                self.respond(HTTPStatus.OK, self.state.live_view())
+                etag, body, packed = self.state.live_payload()
+                if self.headers.get("If-None-Match") == etag:
+                    self.send_response(HTTPStatus.NOT_MODIFIED)
+                    self.send_header("ETag", etag)
+                    self.send_header("Cache-Control", "no-cache")
+                    self.end_headers()
+                    return
+                use_gzip = "gzip" in (self.headers.get("Accept-Encoding") or "")
+                data = packed if use_gzip else body
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(data)))
+                self.send_header("ETag", etag)
+                self.send_header("Cache-Control", "no-cache")
+                if use_gzip:
+                    self.send_header("Content-Encoding", "gzip")
+                self.end_headers()
+                self.wfile.write(data)
             elif path == "/api/health":
                 self.respond(HTTPStatus.OK, self.state.health())
             elif path.startswith("/api/verify/"):
@@ -537,10 +913,23 @@ def main() -> int:
     parser.add_argument("--devices", type=Path, default=ASSETS_DIR / "devices.csv", help="Device inventory CSV (bundled by default).")
     parser.add_argument("--known-hosts", type=Path, default=PROJECT_ROOT / "local-inputs" / "known_hosts", help="Local approved SSH host-key file installed by scripts/configure_known_hosts.sh.")
     parser.add_argument("--commands", type=Path, default=ASSETS_DIR / "read_only_commands.txt", help="Read-only command file (bundled by default).")
+    tuning = parser.add_argument_group("performance")
+    tuning.add_argument("--fanout", choices=["local", "jump"], default="local",
+                        help="jump: one Teleport session fans out from the jump host (needs python3 there; falls back to local automatically).")
+    tuning.add_argument("--device-parallel", type=int, default=10, help="Concurrent switch sessions (1-25). Raise gradually.")
+    tuning.add_argument("--netbox-page-size", type=int, default=250, help="Cable page size (NetBox max_page_size permitting).")
+    tuning.add_argument("--netbox-concurrency", type=int, default=2, help="In-flight NetBox cable pages through the Teleport forward.")
+    tuning.add_argument("--address-cache-hours", type=float, default=24.0, help="Reuse NetBox management IPs for this long (0 = always re-query).")
+    tuning.add_argument("--full-netbox-every-hours", type=float, default=6.0, help="Between full cable syncs, sync only cables in the NetBox change log.")
+    tuning.add_argument("--sync-every-minutes", type=float, default=0, help="Run the full sync in the background on this interval (0 = on demand only).")
     args = parser.parse_args()
+    if not 1 <= args.device_parallel <= 25:
+        raise SystemExit("--device-parallel must be between 1 and 25")
     if not args.diagram.is_file() or not args.connections.is_file():
         raise SystemExit("Diagram or backend connection CSV is missing.")
-    Handler.state = SyncState(args.netbox_url, args.netbox_host_header, args.connections, args.device_profile, args.devices, args.known_hosts, args.commands)
+    Handler.state = SyncState(args.netbox_url, args.netbox_host_header, args.connections, args.device_profile, args.devices, args.known_hosts, args.commands, args)
+    if args.sync_every_minutes > 0:
+        threading.Thread(target=Handler.state.schedule, args=(args.sync_every_minutes,), daemon=True).start()
     Handler.diagram = args.diagram
     server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     print("Live evidence: %s" % Handler.state.source)

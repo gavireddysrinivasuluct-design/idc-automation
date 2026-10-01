@@ -6,8 +6,10 @@ machine or in approved internal systems.
 
 ## Projects
 
-- [NetBox dashboard launcher](ice2-netbox-dashboard/README.md) — read-only
-  NetBox/device dashboard code with per-user local-input setup.
+- [ICE2 NetBox + live device dashboard](ice2-netbox-dashboard/README.md) — read-only
+  dashboard that compares NetBox cabling with live switch state for the ICE2
+  backend fabric, with one-click sync. See its README for requirements, setup,
+  daily use and troubleshooting.
 
 Each project documents its own per-user access setup. Never commit credentials,
 tokens, passwords, or collected operational evidence.

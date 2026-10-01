@@ -580,18 +580,25 @@ document.addEventListener('click', async e => { const b = e.target.closest('.cab
 // ---- service: manual one-click sync ----
 const syncBtn = document.getElementById('sync-btn'), steps = document.getElementById('sync-steps');
 function applyLive(v) { LIVE = v; indexLive(); drawLive(); renderPanels(); if (cur) { const keep = insp.querySelector('.sync-result'); inspect(cur); if (keep) insp.prepend(keep); } }
-async function loadLive() { try { const r = await fetch('/api/live', {cache:'no-store'}); if (!r.ok || !(r.headers.get('content-type') || '').includes('json')) throw Error('HTTP ' + r.status); const v = await r.json();
+let liveEtag = null;
+async function loadLive() { try { const r = await fetch('/api/live', {cache:'no-cache'}); if (!r.ok || !(r.headers.get('content-type') || '').includes('json')) throw Error('HTTP ' + r.status); const tag = r.headers.get('etag'); if (tag && tag === liveEtag) { renderPanels(); return LIVE; } liveEtag = tag; const v = await r.json();
     applyLive(v); syncBtn.disabled = !!v.sync_running; return v; }
   catch (err) { document.getElementById('sync-state').textContent = 'Sync service unreachable · showing last known state'; document.getElementById('sync-state').className = 'bad'; return null; } }
-const stepHtml = (name, s) => { const st = (s && s.state) || 'pending', c = st === 'complete' ? LS_COL.active : st === 'failed' ? LS_COL.down : st === 'running' ? LS_COL.init : 'var(--faint)';
-  const det = !s ? '' : st === 'failed' ? esc(s.error || ('exit ' + s.exit_code)) : name === 'NetBox' && st === 'complete' ? `${s.checked.toLocaleString()} cables · ${s.mismatches} changed · ${s.missing} missing` : name === 'Devices' && st === 'complete' ? `${s.switches || '?'} switches · ${(s.updated_interfaces || 0).toLocaleString()} IB ports` : st === 'running' ? (name === 'Devices' ? 'nv show interface on 100 switches…' : s.pages_total ? `${s.pages_completed}/${s.pages_total} cable pages` : 'pulling cable records…') : '';
+const fmtS = v => v == null ? '' : v < 60 ? v.toFixed(1) + ' s' : Math.floor(v / 60) + ' min ' + Math.round(v % 60) + ' s';
+const stepHtml = (name, s) => { const st = (s && s.state) || 'pending', c = st === 'complete' ? LS_COL.active : st === 'failed' ? LS_COL.down : st === 'running' || st === 'partial' ? LS_COL.init : 'var(--faint)';
+  let det = '';
+  if (s && st === 'failed') det = esc(s.error || ('exit ' + s.exit_code));
+  else if (s && name === 'NetBox') det = st === 'complete' ? `${s.mode === 'incremental' ? `incremental · ${s.changed} changed in log` : 'full'} · ${s.checked.toLocaleString()} cables · ${s.mismatches} differ · ${s.missing} missing · ${s.requests} API calls` : st === 'running' ? (s.mode === 'incremental' ? `change log · ${s.changed ?? '…'} cables to re-read` : s.pages_total ? `${s.pages_completed}/${s.pages_total} cable pages` : 'reading change log / cable pages…') : '';
+  else if (s && name === 'Devices') det = st === 'running' ? (s.total ? `${s.done || 0}/${s.total} switches${s.failed ? ` · ${s.failed} failed` : ''}${s.fanout ? ' · ' + s.fanout + ' fan-out' : ''}` : `resolving management IPs${s.address_source ? ' · ' + s.address_source : ''}…`)
+    : (st === 'complete' || st === 'partial') ? `${s.switches || '?'} switches · ${(s.updated_interfaces || 0).toLocaleString()} IB ports${s.failed ? ` · ${s.failed} failed` : ''} · ${fmtS(s.seconds)}${s.address_source ? ' · IPs: ' + s.address_source : ''}${s.fanout_fallback ? ' · fell back to local fan-out: ' + esc(s.fanout_fallback) : ''}` : '';
   return `<span class="step" style="--c:${c}"><i class="${st === 'running' ? 'spin' : ''}"></i><b>${name}</b> ${st}${det ? ' · ' + det : ''}</span>`; };
+const timingHtml = t => !t ? '' : [['NetBox', t.netbox_s], ['IPs', t.addresses_s], ['devices', t.devices_s]].filter(x => x[1] != null).map(([k, v]) => `${k} ${fmtS(v)}`).join(' ‖ ');
 async function runSync() {
   if (!SERVICE) { steps.hidden = false; steps.innerHTML = `<span class="step" style="--c:${LS_COL.init}"><i></i><b>Sync needs the local service.</b> Run <code>python3 netbox_live_sync.py</code> in the Netbox folder and open <code>http://127.0.0.1:8765/</code> — the token and switch credentials stay on your Mac.</span>`; return; }
   syncBtn.disabled = true; steps.hidden = false; steps.innerHTML = stepHtml('NetBox', {state:'running'}) + stepHtml('Devices', null);
   try { const r = await fetch('/api/sync', {method:'POST'}), d = await r.json(); if (!r.ok) throw Error(d.error);
-    const poll = async () => { const p = await fetch(`/api/sync/${d.run_id}`), s = await p.json(); steps.innerHTML = stepHtml('NetBox', s.netbox) + stepHtml('Devices', s.devices) + (s.finished_at ? `<span class="step" style="--c:${s.state === 'complete' ? LS_COL.active : LS_COL.init}"><b>Sync ${esc(s.state)}</b> ${esc(fmtTime(s.finished_at))}</span>` : '');
-      if (s.state === 'running') { if (s.netbox && s.netbox.state === 'complete') loadLive(); setTimeout(poll, 2500); return; } await loadLive(); syncBtn.disabled = false; };
+    const poll = async () => { const p = await fetch(`/api/sync/${d.run_id}`), s = await p.json(); steps.innerHTML = stepHtml('NetBox', s.netbox) + stepHtml('Devices', s.devices) + (s.finished_at ? `<span class="step" style="--c:${s.state === 'complete' ? LS_COL.active : LS_COL.init}"><b>Sync ${esc(s.state)} in ${fmtS(s.timings && s.timings.total_s)}</b> ${esc(timingHtml(s.timings))} · ${esc(fmtTime(s.finished_at))}</span>` : '');
+      if (s.state === 'running') { loadLive(); setTimeout(poll, 1500); return; } await loadLive(); syncBtn.disabled = false; };
     poll();
   } catch (err) { steps.innerHTML = `<span class="step" style="--c:${LS_COL.down}"><i></i><b>Sync could not start</b> ${esc(err.message)}</span>`; syncBtn.disabled = false; } }
 syncBtn.onclick = runSync;
@@ -599,7 +606,7 @@ syncBtn.onclick = runSync;
   b.onclick = () => { liveOn = !liveOn; b.setAttribute('aria-pressed', liveOn); svg.classList.toggle('nolive', !liveOn); }; document.getElementById('layers').appendChild(b); }
 if (!SERVICE) { syncBtn.title = 'Sync runs through the local netbox_live_sync.py service'; }
 indexLive(); drawLive(); renderPanels();
-if (SERVICE) { loadLive(); }
+if (SERVICE) { loadLive(); setInterval(() => { if (!document.hidden) loadLive(); }, 15000); }
 else setInterval(renderPanels, 60000);
 
 function ufmLive(j, lp) { const u = (LIVE.ufm || []).find(x => devId(x[2]) === 'bel' + j && x[3] === lp); return u ? `<span class="lpill" style="--c:${LS_COL[u[5]]}"><i></i>${esc(stateText(u[4]))}</span>` : '—'; }
