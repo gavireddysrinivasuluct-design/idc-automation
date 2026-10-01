@@ -266,7 +266,7 @@ def collect_one(device: Device, user: str, password: str, known_hosts: Optional[
 # jump host and streams one JSON line per device back as each one finishes.
 # ---------------------------------------------------------------------------
 FANOUT_WORKER = r'''
-import json, os, pty, select, subprocess, sys, threading, time
+import json, os, pty, select, signal, sys, threading, time
 from concurrent.futures import ThreadPoolExecutor
 cfg = json.loads(sys.stdin.readline())
 secret = cfg.pop("password").encode("utf-8") + b"\n"
@@ -284,19 +284,28 @@ def run(device):
     if cfg.get("known_hosts"):
         cmd += ["-o", "UserKnownHostsFile=" + cfg["known_hosts"]]
     cmd += ["%s@%s" % (cfg["user"], address), cfg["command"]]
-    master, slave = pty.openpty()
+    # pty.fork() makes the PTY the child's *controlling* terminal. OpenSSH reads
+    # the password from /dev/tty, so a plain PTY on stdin is not enough.
     try:
-        child = subprocess.Popen(cmd, stdin=slave, stdout=slave, stderr=slave, close_fds=True)
-    except Exception as error:
-        os.close(master); os.close(slave)
-        emit({"host": host, "code": 1, "out": "", "err": str(error), "seconds": 0}); return
-    os.close(slave)
+        pid, master = pty.fork()
+    except OSError as error:
+        emit({"host": host, "code": 1, "out": "", "err": "pty.fork failed: %s" % error, "seconds": 0}); return
+    if pid == 0:
+        try:
+            os.execvp(cmd[0], cmd)
+        finally:
+            os._exit(127)
     parts, sent, tail = [], False, ""
     deadline = started + cfg.get("timeout", 60)
+    status = None
     try:
         while True:
-            if time.time() > deadline and child.poll() is None:
-                child.kill(); child.wait()
+            if time.time() > deadline:
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except OSError:
+                    pass
+                os.waitpid(pid, 0)
                 emit({"host": host, "code": 124, "out": "", "err": "Timed out before SSH completed", "seconds": round(time.time() - started, 2)}); return
             ready, _, _ = select.select([master], [], [], 0.5)
             if ready:
@@ -312,13 +321,16 @@ def run(device):
                     tail = (tail + text)[-256:]
                     if "password:" in tail.lower():
                         os.write(master, secret); sent = True
-            elif child.poll() is not None:
-                break
+            else:
+                done, status = os.waitpid(pid, os.WNOHANG)
+                if done:
+                    break
     finally:
         os.close(master)
-    child.wait()
+    if status is None:
+        _, status = os.waitpid(pid, 0)
+    code = os.WEXITSTATUS(status) if os.WIFEXITED(status) else 128 + (os.WTERMSIG(status) if os.WIFSIGNALED(status) else 0)
     output = "".join(parts)
-    code = child.returncode or 0
     emit({"host": host, "code": code, "out": output if code == 0 else "", "err": "" if code == 0 else (output or "SSH exited without output"), "seconds": round(time.time() - started, 2)})
 
 with ThreadPoolExecutor(max_workers=cfg.get("parallel", 10)) as pool:

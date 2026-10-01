@@ -753,10 +753,15 @@ class SyncState:
                     self.ingest(record, parsed, seen)
                     time.sleep(1.0)
                 code = record["process"].returncode
-                if code == 3 and record.get("fanout") == "jump" and not seen:
-                    # Jump-host worker could not start (e.g. python3 missing on the jump host):
-                    # fall back to one Teleport session per device for this and later runs.
-                    print("[netbox-live-sync] jump fan-out unavailable; falling back to --fanout local")
+                if code != 0 and record.get("fanout") == "jump" and not parsed:
+                    # The jump-host worker could not start (exit 3, e.g. no python3 there) or
+                    # not a single switch succeeded through it: retry this run, and use for
+                    # later runs, one Teleport session per device (the proven path).
+                    reason = "worker unavailable" if code == 3 else "no switch succeeded (exit %s)" % code
+                    errors = sorted((record["output_dir"] / "errors").glob("*.txt")) if (record["output_dir"] / "errors").is_dir() else []
+                    sample = errors[0].read_text(encoding="utf-8", errors="replace").strip()[-200:] if errors else ""
+                    record["fanout_fallback"] = "%s%s" % (reason, (": " + sample) if sample else "")
+                    print("[netbox-live-sync] jump fan-out %s; falling back to --fanout local" % record["fanout_fallback"])
                     self.fanout = record["fanout"] = "local"
                     command = [("local" if part == "jump" else part) for part in record["command"]]
                     shutil.rmtree(record["output_dir"], ignore_errors=True)  # the collector creates it afresh
