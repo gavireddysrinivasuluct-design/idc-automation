@@ -240,6 +240,7 @@ svg.ufm .lvlayer circle.lbadge{display:none}
 .mastergrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px}
 .mastergrid div{border:1px solid var(--line);border-left:3px solid #9aa8bb;border-radius:8px;padding:9px 11px;background:#0b1523;display:flex;flex-direction:column;gap:2px}
 .mastergrid b{font:600 20px var(--display);color:var(--fg)}.mastergrid span{font-size:12.5px}.mastergrid small{font-size:11.5px;color:var(--dim)}
+.ufmfetch{display:inline-flex;flex-wrap:wrap;gap:6px 10px;align-items:center}.ufmfetch .step{font:12px var(--mono)}
 </style>
 
 <div class="wrap">
@@ -830,9 +831,9 @@ document.getElementById('q').addEventListener('change', e => { if (!ufmOn) retur
 // ---- the Cabling vs UFM card ----
 function renderCab(err) {
   const box = document.getElementById('cab-body'), meta = document.getElementById('cab-meta');
-  if (!CAB) { meta.textContent = ''; box.innerHTML = `<div class="cab-empty"><b>No UFM fabric scan loaded yet.</b> ${err ? esc(err) + '<br>' : ''}This check compares every NetBox cable with what UFM actually sees. To load UFM's latest scan (read-only), run in the project folder:<br><code>./scripts/fetch_ufm_scan.sh</code><br>then reload this page. ${SERVICE ? '' : 'Open the dashboard through <code>netbox_live_sync.py</code> to use it.'}</div>`; return; }
+  if (!CAB) { meta.textContent = ''; box.innerHTML = `<div class="cab-empty"><b>No UFM data loaded yet.</b> This check compares every cable with the design topology, using what UFM actually sees. ${SERVICE ? `Press <b>Fetch from UFM</b> to read UFM's current fabric scan, master topology and Topology Compare report (read-only).<div style="margin-top:8px">${fetchUi()}</div>` : 'Open the dashboard through <code>netbox_live_sync.py</code> to use it.'}<div class="small" style="margin-top:8px">Alternative from a terminal: <code>./scripts/fetch_ufm_scan.sh</code></div></div>`; return; }
   const S = CAB.summary, src = CAB.source;
-  meta.innerHTML = `<span class="refs"><span><i style="background:${CB.ok}"></i><b>Expected</b> design topology (expected_topology.csv)</span><span><i style="background:${CB.mis}"></i><b>Current</b> UFM scan ${esc(fmtTime(src.scanned_at))} · ${num(src.lanes)} lanes</span>${CAB.master ? `<span><i style="background:${MCOL}"></i><b>Master</b> UFM master topology saved ${esc(mDate())} ${esc(CAB.master.saved_at.slice(11, 16))} UTC</span>` : '<span class="small">no UFM master topology loaded</span>'}<span><i style="background:${CB.ufm}"></i><b>NetBox</b> for reference</span></span> &nbsp; <a class="btn" href="/api/cabling/findings.csv">⬇ Findings CSV</a> <a class="btn" href="/api/cabling/netbox-import.csv">⬇ NetBox import CSV</a>`;
+  meta.innerHTML = `<span class="refs"><span><i style="background:${CB.ok}"></i><b>Expected</b> design topology (expected_topology.csv)</span><span><i style="background:${CB.mis}"></i><b>Current</b> UFM scan ${esc(fmtTime(src.scanned_at))} · ${num(src.lanes)} lanes</span>${CAB.master ? `<span><i style="background:${MCOL}"></i><b>Master</b> UFM master topology saved ${esc(mDate())} ${esc(CAB.master.saved_at.slice(11, 16))} UTC</span>` : '<span class="small">no UFM master topology loaded</span>'}<span><i style="background:${CB.ufm}"></i><b>NetBox</b> for reference</span></span> &nbsp; <a class="btn" href="/api/cabling/findings.csv">⬇ Findings CSV</a> <a class="btn" href="/api/cabling/netbox-import.csv">⬇ NetBox import CSV</a> ${fetchUi()}`;
   const tile = (c, n, t, sub) => `<div class="cabt" style="--c:${c}"><b>${n}</b><span>${t}</span>${sub ? `<small>${sub}</small>` : ''}</div>`;
   const att = CAB.sus.reduce((n, su) => n + su.trays.filter(t => t.status !== 'ok').length, 0);
   let h = `<div class="cabtiles">
@@ -911,14 +912,41 @@ function applyCab() {
   if (cur) inspect(cur);
 }
 async function loadCab() { if (!SERVICE) { renderCab(); return; }
-  try { const r = await fetch('/api/cabling', {cache:'no-cache'}); const d = await r.json(); if (!r.ok) throw Error(d.error); const tag = r.headers.get('etag');
+  try { const r = await fetch('/api/cabling', {cache:'no-cache'}); const d = await r.json(); if (!r.ok) throw Error(d.error); if (d.available === false) { CAB = null; renderCab(); return; } const tag = r.headers.get('etag');
     if (tag && tag === cabStamp && CAB) return; cabStamp = tag; CAB = d; applyCab(); }
   catch (err) { if (!CAB) renderCab(err.message); } }
-const _applyLive2 = applyLive; applyLive = function (v) { _applyLive2(v); const s = v.cabling && v.cabling.scanned_at; if (s && (!CAB || CAB.source.scanned_at !== s)) loadCab(); };
+const _applyLive2 = applyLive; applyLive = function (v) { _applyLive2(v); if (!CAB) renderCab(); const s = v.cabling && v.cabling.scanned_at; if (s && (!CAB || CAB.source.scanned_at !== s)) loadCab(); };
 { const b = document.createElement('button'); b.className = 'chip'; b.style.setProperty('--c', CB.mis); b.innerHTML = '<i></i>Miscabling'; b.setAttribute('aria-pressed', 'true');
   b.onclick = () => { const v = b.getAttribute('aria-pressed') !== 'true'; b.setAttribute('aria-pressed', v); svg.classList.toggle('nomis', !v); }; document.getElementById('layers').appendChild(b); }
 loadCab();
 
+
+// ---- Fetch from UFM (button) ----
+let ufmMsg = '', ufmBusy = false;
+const UFM_STEP = {starting:'Starting…', connecting:'Connecting', reading:'Reading UFM files', saving:'Saving', analysing:'Comparing with the design', done:'Done', failed:'Failed'};
+function fetchUi() {
+  if (!SERVICE) return '';
+  const st = LIVE.ufm_fetch || {}, last = st.last;
+  if (st.configured === false) return `<span class="ufmfetch"><button class="btn" type="button" disabled>⟳ Fetch from UFM</button><span class="small">Set up once: <code>./scripts/configure_ufm_access.sh</code>, then restart the service.</span></span>`;
+  const msg = ufmMsg || (last ? (last.state === 'complete' ? `Last fetch ${esc(fmtTime(last.finished_at))} from UFM ${esc(last.host || '')}` : last.state === 'failed' ? `<span style="color:${CB.err}">Last fetch failed: ${esc(last.error || '')}</span>` : '') : '');
+  return `<span class="ufmfetch"><button class="btn primary" id="ufm-fetch" type="button" ${ufmBusy || st.running ? 'disabled' : ''}>⟳ Fetch from UFM</button><span id="ufm-fetch-st" class="small">${msg}</span></span>`; }
+function setUfmMsg(html) { ufmMsg = html; const e = document.getElementById('ufm-fetch-st'); if (e) e.innerHTML = html; }
+async function fetchFromUfm() {
+  ufmBusy = true; document.querySelectorAll('#ufm-fetch').forEach(b => b.disabled = true);
+  setUfmMsg(`<span class="step" style="--c:${CB.warn}"><i class="spin"></i>${UFM_STEP.starting}</span>`);
+  try {
+    const r = await fetch('/api/cabling/fetch', {method:'POST'}), d = await r.json(); if (!r.ok) throw Error(d.error);
+    const t0 = Date.now();
+    const poll = async () => { const p = await fetch(`/api/cabling/fetch/${d.run_id}`), x = await p.json();
+      if (x.state === 'running') { setUfmMsg(`<span class="step" style="--c:${CB.warn}"><i class="spin"></i><b>${esc(UFM_STEP[x.step] || x.step)}</b> ${esc(x.detail || '')} · ${Math.round((Date.now() - t0)/1000)} s</span>`); setTimeout(poll, 1200); return; }
+      ufmBusy = false;
+      if (x.state === 'complete') { cabStamp = null; await loadCab();
+        setUfmMsg(`<span style="color:${CB.ok}">✓ Fetched from UFM ${esc(x.host)} in ${x.seconds} s · scan ${esc(fmtTime(x.scanned_at))} · ${x.miscabled} miscabled · ${num(x.trays)} trays${x.files && x.files['master.topo.gz'] ? ' · master ' + esc(x.files['master.topo.gz'].ufm_time.slice(0, 10)) : ''}</span>`); }
+      else setUfmMsg(`<span style="color:${CB.err}">✗ ${esc(x.error || 'UFM fetch failed')}</span>`);
+      document.querySelectorAll('#ufm-fetch').forEach(b => b.disabled = false); };
+    poll();
+  } catch (err) { ufmBusy = false; setUfmMsg(`<span style="color:${CB.err}">✗ ${esc(err.message)}</span>`); document.querySelectorAll('#ufm-fetch').forEach(b => b.disabled = false); } }
+document.addEventListener('click', e => { if (e.target.closest('#ufm-fetch')) fetchFromUfm(); });
 
 // ---- check tabs (Cabling vs UFM / Live link state) ----
 { const tabs = [...document.querySelectorAll('.tabs .tab')];

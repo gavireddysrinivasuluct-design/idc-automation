@@ -17,6 +17,8 @@ GET  /api/refresh/<run>   collection progress
 POST /api/sync            one-click sync: NetBox cables and device collection, run concurrently
 GET  /api/sync/<run>      sync progress with per-phase timings
 GET  /api/cabling         NetBox cabling vs. what UFM actually sees (from a local UFM fabric scan)
+POST /api/cabling/fetch   read UFM's scan, master topology and compare report directly (via the jump host)
+GET  /api/cabling/fetch/<run>  progress of that fetch
 GET  /api/cabling/findings.csv       every non-OK cabling observation
 GET  /api/cabling/netbox-import.csv  cables UFM sees but NetBox lacks, in NetBox import columns
 
@@ -182,6 +184,7 @@ class SyncState:
         self.ufm_master = Path(getattr(opts, "ufm_master", None) or DEFAULT_UFM_MASTER)
         self.ufm_report = Path(getattr(opts, "ufm_report", None) or DEFAULT_UFM_REPORT)
         self._cabling: tuple | None = None
+        self.ufm_fetches: dict[str, dict] = {}
         self.device_info: dict[str, dict] = {}
         self.device_info_at: str | None = None
         self.load_device_cache()
@@ -468,6 +471,7 @@ class SyncState:
             "devices_synced_at": self.device_info_at,
             "netbox": self.netbox_sync,
             "cabling": self.cabling_summary(),
+            "ufm_fetch": self.ufm_fetch_state(),
             "refresh_running": any(item.get("state") == "running" for item in self.refreshes.values()),
             "sync_running": any(item.get("state") == "running" for item in self.syncs.values()),
         }
@@ -545,6 +549,71 @@ class SyncState:
             self._cabling = (key, report, payload)
             self.bump()
         return report
+
+    def ufm_fetch_configured(self) -> bool:
+        if not self.device_profile or not self.device_profile.is_file():
+            return False
+        import configparser
+        parser = configparser.ConfigParser(interpolation=None)
+        try:
+            parser.read(self.device_profile, encoding="utf-8")
+        except configparser.Error:
+            return False
+        return parser.has_section("ufm")
+
+    def ufm_fetch_state(self) -> dict:
+        runs = sorted(self.ufm_fetches.values(), key=lambda r: r["started_at"])
+        last = {k: v for k, v in runs[-1].items() if k != "thread"} if runs else None
+        return {"configured": self.ufm_fetch_configured(), "running": any(r["state"] == "running" for r in runs), "last": last}
+
+    def start_ufm_fetch(self) -> dict:
+        """Read UFM's three fabric files directly (button "Fetch from UFM")."""
+        if not self.ufm_fetch_configured():
+            raise RuntimeError("UFM access is not set up yet. Run ./scripts/configure_ufm_access.sh, then restart the service.")
+        with self.lock:
+            if any(r["state"] == "running" for r in self.ufm_fetches.values()):
+                raise RuntimeError("A UFM fetch is already running.")
+            run_id = secrets.token_hex(6)
+            record = {"run_id": run_id, "state": "running", "step": "starting", "detail": "", "started_at": now_iso()}
+            self.ufm_fetches[run_id] = record
+            self.bump()
+        threading.Thread(target=self.run_ufm_fetch, args=(run_id,), daemon=True).start()
+        return {"run_id": run_id, "state": "running"}
+
+    def run_ufm_fetch(self, run_id: str) -> None:
+        record = self.ufm_fetches[run_id]
+        t0 = time.monotonic()
+        try:
+            _sys.path.insert(0, str(APP_DIR))
+            import ufm_fetch  # noqa: E402
+            result = ufm_fetch.fetch(self.device_profile, self.ufm_scan.parent, record)
+            record.update(step="analysing", detail="comparing with the design topology")
+            report = self.cabling()
+            summary = report["summary"] if report else {}
+            record.update(state="complete", step="done", host=result["host"], files=result["files"], skipped=result["skipped"],
+                          scanned_at=report["source"]["scanned_at"] if report else None,
+                          miscabled=summary.get("switch_miscabled"), trays=summary.get("trays"))
+        except Exception as error:  # surface every failure on the dashboard
+            record.update(state="failed", step="failed", error=str(error))
+        record["seconds"] = round(time.monotonic() - t0, 1)
+        record["finished_at"] = now_iso()
+        with self.lock:
+            self.bump()
+        print("[netbox-live-sync] UFM fetch %s %s in %.1fs %s" % (run_id, record["state"], record["seconds"], record.get("error", "")))
+
+    def ufm_fetch_status(self, run_id: str) -> dict:
+        item = self.ufm_fetches.get(run_id)
+        if not item:
+            raise RuntimeError("Unknown UFM fetch run.")
+        return dict(item)
+
+    def ufm_schedule(self, minutes: float) -> None:
+        while True:
+            time.sleep(minutes * 60)
+            try:
+                print("[netbox-live-sync] scheduled UFM fetch:", self.start_ufm_fetch())
+            except RuntimeError as error:
+                print("[netbox-live-sync] scheduled UFM fetch skipped:", error)
 
     def cabling_payload(self) -> tuple[str, bytes, bytes] | None:
         if self.cabling() is None:
@@ -1035,8 +1104,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.respond(HTTPStatus.OK, self.diagram.read_text(encoding="utf-8"), "text/html; charset=utf-8")
             elif path == "/api/cabling":
                 payload = self.state.cabling_payload()
-                if payload is None:
-                    self.respond(HTTPStatus.NOT_FOUND, {"error": "No UFM fabric scan found at %s. Run scripts/fetch_ufm_scan.sh." % self.state.ufm_scan})
+                if payload is None:  # not an error: nothing fetched yet
+                    self.respond(HTTPStatus.OK, {"available": False, "error": "No UFM data yet. Press Fetch from UFM (or run scripts/fetch_ufm_scan.sh)."})
                     return
                 self.respond_cached(*payload)
             elif path in ("/api/cabling/findings.csv", "/api/cabling/netbox-import.csv"):
@@ -1086,6 +1155,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.respond(HTTPStatus.OK, self.state.device(unquote(path.rsplit("/", 1)[-1]), live))
             elif path.startswith("/api/refresh/"):
                 self.respond(HTTPStatus.OK, self.state.refresh_status(unquote(path.rsplit("/", 1)[-1])))
+            elif path.startswith("/api/cabling/fetch/"):
+                self.respond(HTTPStatus.OK, self.state.ufm_fetch_status(unquote(path.rsplit("/", 1)[-1])))
             elif path.startswith("/api/sync/"):
                 self.respond(HTTPStatus.OK, self.state.sync_status(unquote(path.rsplit("/", 1)[-1])))
             else:
@@ -1098,7 +1169,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         path = urlparse(self.path).path
-        actions = {"/api/refresh": self.state.start_refresh, "/api/sync": self.state.start_sync}
+        actions = {"/api/refresh": self.state.start_refresh, "/api/sync": self.state.start_sync, "/api/cabling/fetch": self.state.start_ufm_fetch}
         if path not in actions:
             self.respond(HTTPStatus.NOT_FOUND, {"error": "Not found"})
             return
@@ -1135,6 +1206,8 @@ def main() -> int:
     tuning.add_argument("--netbox-concurrency", type=int, default=2, help="In-flight NetBox cable pages through the Teleport forward.")
     tuning.add_argument("--address-cache-hours", type=float, default=24.0, help="Reuse NetBox management IPs for this long (0 = always re-query).")
     tuning.add_argument("--full-netbox-every-hours", type=float, default=6.0, help="Between full cable syncs, sync only cables in the NetBox change log.")
+    tuning.add_argument("--ufm-fetch-every-minutes", type=float, default=0,
+                        help="Fetch UFM's fabric files in the background on this interval (0 = only with the Fetch from UFM button).")
     tuning.add_argument("--sync-every-minutes", type=float, default=0, help="Run the full sync in the background on this interval (0 = on demand only).")
     args = parser.parse_args()
     if not 1 <= args.device_parallel <= 25:
@@ -1142,6 +1215,8 @@ def main() -> int:
     if not args.diagram.is_file() or not args.connections.is_file():
         raise SystemExit("Diagram or backend connection CSV is missing.")
     Handler.state = SyncState(args.netbox_url, args.netbox_host_header, args.connections, args.device_profile, args.devices, args.known_hosts, args.commands, args)
+    if args.ufm_fetch_every_minutes > 0:
+        threading.Thread(target=Handler.state.ufm_schedule, args=(args.ufm_fetch_every_minutes,), daemon=True).start()
     if args.sync_every_minutes > 0:
         threading.Thread(target=Handler.state.schedule, args=(args.sync_every_minutes,), daemon=True).start()
     Handler.diagram = args.diagram
