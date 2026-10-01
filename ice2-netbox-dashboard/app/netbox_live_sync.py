@@ -160,16 +160,7 @@ class SyncState:
                 raise RuntimeError("NetBox has no primary management IP for %s." % name)
             return address
 
-        # NetBox supports an `__in` lookup. One bulk request normally resolves
-        # the complete inventory; retain exact-name lookups as a compatibility
-        # fallback if an older API proxy does not support the lookup.
         addresses: dict[str, str] = {}
-        payload = self.get_netbox("/api/dcim/devices/?limit=200&name__in=" + quote(",".join(names), safe=","))
-        for device in payload.get("results") or []:
-            name = device.get("name")
-            if name in names:
-                addresses[name] = address_from_device(device, name)
-
         def lookup(name: str) -> tuple[str, str]:
             payload = self.get_netbox("/api/dcim/devices/?limit=2&name=" + quote(name, safe=""))
             matches = payload.get("results") or []
@@ -177,9 +168,11 @@ class SyncState:
                 raise RuntimeError("NetBox returned %d devices for %s." % (len(matches), name))
             return name, address_from_device(matches[0], name)
 
-        unresolved = [name for name in names if name not in addresses]
-        with ThreadPoolExecutor(max_workers=4) as pool:
-            futures = {pool.submit(lookup, name): name for name in unresolved}
+        # The Teleport app proxy reliably handles exact device lookups, but
+        # can stall on a long `name__in` filter. Three in-flight requests keep
+        # it responsive while still cutting this phase substantially.
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            futures = {pool.submit(lookup, name): name for name in names}
             for future in as_completed(futures):
                 name, address = future.result()
                 addresses[name] = address
