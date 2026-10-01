@@ -353,8 +353,8 @@ GPU.forEach(r => { (gBy[r[0]] ||= []).push(r); (trBy[r[2]] ||= []).push(r); });
 for (const t in trBy) trBy[t].sort((a, b) => a[3].localeCompare(b[3]));
 const SU = {1:[], 2:[], 3:[], 4:[]}; Object.keys(trBy).map(Number).sort((a, b) => a - b).forEach(t => { const l = trBy[t][0][0]; SU[suOf(l)].push(t); });
 
-document.getElementById('rail').innerHTML = [['sp','36','spine switches · BES'],['r1','64','leaf switches · BEL'],['sp','4,608','spine–leaf cables · 2 per pair'],['r3','204','GPU trays cabled'],['r1','816','800G RDMA links · 4 rails'],['r3','3 / 4','scalable units populated'],['','2 · 12','UFM managers · links'],['r2','408 + 612','400G frontend (mapped) + 1G OOB tray cables']]
-  .map(([c, b, s]) => `<div class="${c}"><b>${b}</b><span>${s}</span></div>`).join('');
+document.getElementById('rail').innerHTML = [['sp','36','spine switches · BES'],['r1','64','leaf switches · BEL'],['sp','4,608','spine–leaf cables · 2 per pair'],['r3','204','GPU trays cabled (NetBox export)','rt-trays'],['r1','816','800G RDMA links · 4 rails (NetBox export)','rt-rdma'],['r3','3 / 4','scalable units populated (NetBox export)','rt-sus'],['','2 · 12','UFM managers · links'],['r2','408 + 612','400G frontend + 1G OOB tray cables (NetBox)']]
+  .map(([c, b, s, id]) => `<div class="${c}"${id ? ` id="${id}"` : ''}><b>${b}</b><span>${s}</span></div>`).join('');
 
 const defs = el('defs', {}, svg);
 defs.innerHTML = `<filter id="glow" x="-40%" y="-40%" width="180%" height="180%"><feGaussianBlur stdDeviation="4" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
@@ -641,7 +641,7 @@ const fmtTime = iso => { if (!iso) return '—'; const d = new Date(iso); if (is
 function renderPanels() {
   const ep = LIVE.endpoints || {}, cb = LIVE.cables || {}, nb = LIVE.netbox, bad = (cb.down || 0) + Object.keys(NBX).length, warn = (cb.init || 0) + (cb.unknown || 0) + (cb.unverified || 0);
   railLive.className = bad ? 'lbad' : warn ? 'lwarn' : 'lok';
-  railLive.innerHTML = `<b>${(ep.active || 0).toLocaleString()} / ${(ep.compared || 0).toLocaleString()}</b><span>live switch ports active · ${cb.down || 0} down · ${cb.init || 0} init</span>`;
+  railLive.innerHTML = `<b>${(ep.active || 0).toLocaleString()} / ${(ep.compared || 0).toLocaleString()}</b><span>switch ports on designed links Active · ${cb.down || 0} down · ${cb.init || 0} init${cb.unverified ? ` · ${cb.unverified.toLocaleString()} links not verified` : ''}</span>`;
   // status bar
   const dot = document.getElementById('ldot'), st = document.getElementById('sync-state'), dt = document.getElementById('sync-detail');
   dot.style.background = bad ? LS_COL.down : warn ? LS_COL.init : LS_COL.active;
@@ -965,8 +965,14 @@ function applyCab() {
   [...gz.children].forEach(n => { if (n.tagName === 'text' && /GPU SCALABLE/.test(n.textContent)) { n.style.display = 'none'; if (n.previousSibling) n.previousSibling.style.display = 'none'; } });
   gUFM.style.display = ''; drawGPU(); drawMis(); renderCab(); paintLeaves();
   const S = CAB.summary;
+  // The NetBox export only documents part of the fabric: with UFM data, the GPU tiles show what UFM sees.
+  const setTile = (id, b, txt) => { const e = document.getElementById(id); if (e) e.innerHTML = `<b>${b}</b><span>${txt}</span>`; };
+  const susUsed = CAB.sus.filter(su => su.trays.length).length, src = /REST/.test(CAB.source.tool || '') ? 'UFM live links' : 'UFM scan';
+  setTile('rt-trays', num(S.trays), `GPU trays seen by ${src} · ${num(S.trays_documented + S.trays_partial)} in NetBox`);
+  setTile('rt-rdma', num(S.gpu_links), `800G RDMA links seen by UFM (${num(S.trays * 4)} expected for these trays) · ${num(S.netbox_gpu_cables)} in NetBox`);
+  setTile('rt-sus', `${susUsed} / 16`, `scalable units with trays (UFM) · 4 pods × 4 SUs`);
   let rt = document.getElementById('rail-ufm'); if (!rt) { rt = document.createElement('div'); rt.id = 'rail-ufm'; document.getElementById('rail').appendChild(rt); }
-  rt.innerHTML = `<b>${num(S.trays)}</b><span>GPU trays seen by UFM · ${num(S.trays_missing)} not in NetBox · ${S.switch_miscabled} miscabled</span>`;
+  rt.innerHTML = `<b style="color:${S.switch_miscabled ? CB.mis : CB.ok}">${S.switch_miscabled}</b><span>leaf–spine cables miscabled (vs design) · ${num(S.trays_missing)} trays not in NetBox</span>`;
   document.getElementById('sus').innerHTML = CAB.sus.map(su => `<div class="su"><b>SU${su.su}</b><span>pod ${su.pod} · BEL${su.leaves.join(' / ')} · ${su.trays.length} trays seen by UFM · ${su.trays.filter(t => t.doc === 'documented').length} in NetBox${su.unnamed.length ? ` · ${su.unnamed.length} unnamed adapters` : ''}</span></div>`).join('');
   let li = document.getElementById('chk-ufm'); if (!li) { li = document.createElement('li'); li.id = 'chk-ufm'; document.querySelector('ul.chk').prepend(li); }
   li.className = S.switch_miscabled ? '' : 'ok'; li.style.setProperty('--lc', CB.mis);
