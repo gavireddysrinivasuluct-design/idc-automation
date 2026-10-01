@@ -311,7 +311,6 @@ Sync complete in 34.2 s   NetBox 1.0 s ‖ IPs 0.0 s ‖ devices 34.2 s
 - **Hover or click** a spine, leaf or tray to trace its cables. Use the search box to find a device by name (for example `bel12` or `gpu1300`).
 - **Inspector (right panel).**
   - A live summary for the selected device.
-  - The device's NetBox **vendor, model, management IP and status**, taken from the most recent sync. Clicking a device makes no NetBox call, so this works even when the NetBox proxy is down. A device not seen by any sync yet is looked up once, then remembered.
   - A **Live** column in every cable table.
   - Click any **cable ID** to check that one cable against NetBox right now.
 - **Live link state card.** Counts, the full problem list (down, initializing, NetBox changed or missing), and the UFM `fnm1` port states.
@@ -346,7 +345,7 @@ GPU-side RDMA ports are not collected; only the leaf side of each GPU link is ch
      - The first run, and every 6 hours after that, reads every backend cable, with pages trimmed to the needed fields.
      - Other runs ask the NetBox **change log** which cables changed since the last sync: edits, deletions and re-terminations. They re-read only those, usually in 1–3 API calls.
    - **Devices.**
-     - Switch management IPs, vendor, model and status come from 2 bulk NetBox queries, or from the 24-hour local cache. The dashboard's inspector shows these saved details.
+     - Switch management IPs come from 2 bulk NetBox queries, or from the 24-hour local cache.
      - Then `nv show interface --output json` is collected from all 100 switches.
 2. **Jump-host fan-out.** With `--fanout jump`, one `tsh ssh` session starts a small worker on `jmp0`.
    - The switch password is passed only on the worker's input. It never appears in a command line, an environment variable or a file.
@@ -443,7 +442,7 @@ Also revoke the NetBox API token in NetBox (**API Tokens → delete**).
 | `POST /api/sync` · `GET /api/sync/<run>` | Start a sync, or check its progress and per-phase timings |
 | `POST /api/refresh` · `GET /api/refresh/<run>` | Device collection only |
 | `GET /api/verify/<cable_id>` | One cable: current NetBox record vs. live state |
-| `GET /api/device/<hostname>` | NetBox details for one device, from the last sync (add `?live=1` to query NetBox now) |
+| `GET /api/device/<hostname>` | NetBox details for one device |
 | `GET /api/health` | NetBox reachability |
 
 ### Repository contents
@@ -471,4 +470,4 @@ Also revoke the NetBox API token in NetBox (**API Tokens → delete**).
 | `~/.config/idc-automation/device-access.ini` | step 4.5 | Usernames, jump host, Keychain references |
 | `local-inputs/known_hosts` | step 4.7 | Approved switch host keys |
 | `~/.local/state/netbox-mcp/` | `netbox_proxy.sh` | Proxy PIDs and logs |
-| `.netbox-live-sync/` | the service | Collected evidence, IP cache, cable cache, device details (`netbox-devices.json`) |
+| `.netbox-live-sync/` | the service | Collected evidence, IP cache, cable cache |
