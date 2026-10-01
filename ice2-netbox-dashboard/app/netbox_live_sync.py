@@ -210,7 +210,7 @@ class SyncState:
         self.full_every_hours = getattr(opts, "full_netbox_every_hours", 6.0)
         self.device_parallel = getattr(opts, "device_parallel", 10)
         self.fanout = getattr(opts, "fanout", "local")
-        self.netbox_every_hours = getattr(opts, "netbox_every_hours", 24.0)
+        self.netbox_every_hours = getattr(opts, "netbox_every_hours", 0.0)
         self.stale_after_minutes = getattr(opts, "stale_after_minutes", 60.0)
         # Evidence freshness: which switches the latest finished collection reached, when each
         # switch was last read, and the coverage of that collection.
@@ -1022,10 +1022,16 @@ class SyncState:
         return result
 
     def netbox_due(self) -> bool:
-        """NetBox is inventory and documentation now: refresh it about once a day."""
+        """Whether a fabric sync (a button press) should also refresh NetBox.
+
+        Always when NetBox was never read (there is no inventory to compare with yet);
+        otherwise only with --netbox-every-hours > 0 and the inventory older than that.
+        With the default 0, NetBox otherwise refreshes only with Refresh NetBox."""
+        if not self.nb_synced_at:
+            return True
         if self.netbox_every_hours <= 0:
             return False
-        return not self.nb_synced_at or age_hours(self.nb_synced_at) >= self.netbox_every_hours
+        return age_hours(self.nb_synced_at) >= self.netbox_every_hours
 
     def start_sync(self, kind: str = "fabric") -> dict:
         """kind="fabric": switch states + UFM (+ NetBox when due). kind="netbox": NetBox only."""
@@ -1042,7 +1048,7 @@ class SyncState:
                 "state": "running", "kind": kind, "started_at": now_iso(), "timings": {},
                 "devices": {"state": "pending"} if "devices" in phases else skipped("devices", "NetBox-only refresh"),
                 "ufm": {"state": "pending"} if "ufm" in phases else skipped("ufm", "UFM access not set up (scripts/configure_ufm_access.sh)" if kind != "netbox" else "NetBox-only refresh"),
-                "netbox": {"state": "running"} if "netbox" in phases else {"state": "skipped", "reason": "inventory refreshes every %g h" % self.netbox_every_hours,
+                "netbox": {"state": "running"} if "netbox" in phases else {"state": "skipped", "reason": ("inventory refreshes every %g h" % self.netbox_every_hours) if self.netbox_every_hours > 0 else "use Refresh NetBox to update the inventory",
                                                                             "synced_at": self.nb_synced_at},
             }
             self.bump()
@@ -1312,16 +1318,18 @@ class SyncState:
                 if "-swi-" in dev:
                     designed[dev].add(port)
         by_switch = record.get("ports_by_switch", {})
-        missing_ports = {}
+        missing_ports, missing_port_count = {}, 0
         for host in switches:
             seen = {port for _dev, port in by_switch.get(host, {})}
             gone = sorted(designed.get(host, set()) - seen)
             if gone:
+                missing_port_count += len(gone)  # counted before the display list is shortened
                 missing_ports[host] = gone[:20] + (["… %d more" % (len(gone) - 20)] if len(gone) > 20 else [])
         state = "verified" if not missing and not missing_ports and expected else "partial"
         return {"state": state, "collected_at": stamp, "expected": len(expected), "reached": len(reached & set(expected)) if expected else len(reached),
                 "missing": missing, "failed": failed, "unparsable": unparsable, "missing_ports": missing_ports,
-                "missing_port_count": sum(len(v) for v in missing_ports.values())}
+                "missing_port_count": missing_port_count,
+                "missing_port_counts": {h: len(designed.get(h, set()) - {port for _d, port in by_switch.get(h, {})}) for h in missing_ports}}
 
     @staticmethod
     def write_json_atomic(path: Path, payload: dict) -> None:
@@ -1544,8 +1552,9 @@ def main() -> int:
     tuning.add_argument("--sync-every-minutes", type=float, default=0, help="Run the fabric sync (switches + UFM) in the background on this interval (0 = on demand only).")
     tuning.add_argument("--stale-after-minutes", type=float, default=60.0,
                         help="Show switch evidence as STALE when the last collection is older than this.")
-    tuning.add_argument("--netbox-every-hours", type=float, default=24.0,
-                        help="Refresh NetBox inventory (IPs, models, cable records) in the background this often; 0 = only with Refresh NetBox.")
+    tuning.add_argument("--netbox-every-hours", type=float, default=0.0,
+                        help="Also refresh NetBox inventory (IPs, models, cable records) this often, in the background and on Sync fabric. "
+                             "Default 0: only with Refresh NetBox (and on the first Sync fabric, when there is no inventory yet).")
     args = parser.parse_args()
     if not 1 <= args.device_parallel <= 25:
         raise SystemExit("--device-parallel must be between 1 and 25")

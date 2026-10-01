@@ -264,14 +264,14 @@ svg.ufm .lvlayer circle.lbadge{display:none}
   <div>
     <div class="eb">ICE2 · Keflavik · backend RDMA fabric</div>
     <h1>ICE2 Backend GPU Fabric <span>/ spine · leaf · rail</span></h1>
-    <p class="sub">A two-tier rail-optimised fabric: 64 leaves fully meshed to 36 spines, and every GPU tray landing its four RDMA ports on four different leaves. Hover or click a spine, leaf or tray to trace it; every port pair comes from the NetBox cable export, and every link is coloured by its live switch-side state. Press <b>Sync fabric</b> to re-collect the 100 backend switches and fetch what UFM sees; NetBox (inventory and cable records) refreshes in the background about once a day.</p>
+    <p class="sub">A two-tier rail-optimised fabric: 64 leaves fully meshed to 36 spines, and every GPU tray landing its four RDMA ports on four different leaves. Hover or click a spine, leaf or tray to trace it; every port pair comes from the NetBox cable export, and every link is coloured by its live switch-side state. Press <b>Sync fabric</b> to re-collect the 100 backend switches and fetch what UFM sees; <b>Refresh NetBox</b> updates the NetBox inventory and cable records.</p>
   </div>
   <div class="meta" style="margin-left:auto">5,424 fabric cables<br>4,608 spine · 816 GPU</div>
 </header>
 
 <div class="sync" id="sync" role="status" aria-live="polite">
   <span id="ldot"></span><strong id="sync-state">Loading live state…</strong><span id="sync-detail"></span><span class="grow"></span>
-  <button class="btn" id="nb-btn" type="button" title="NetBox is inventory (IPs, models, cable records); it refreshes by itself about once a day">Refresh NetBox</button>
+  <button class="btn" id="nb-btn" type="button" title="NetBox is inventory (IPs, models, cable records): read it again now">Refresh NetBox</button>
   <button class="btn primary" id="sync-btn" type="button" title="Collect switch port states and fetch from UFM">&#x27F3; Sync fabric</button>
 </div>
 <div class="steps" id="sync-steps" hidden></div>
@@ -651,7 +651,7 @@ function renderPanels() {
   st.title = fr.note || (fr.state === 'verified' ? 'Every inventory switch was reached and reported every designed port' : '');
   const ufmAt = LIVE.cabling && LIVE.cabling.scanned_at;
   dot.style.background = LIVE.mode === 'service' && fr.state && fr.state !== 'verified' ? (fr.state === 'partial' ? LS_COL.init : LS_COL.unverified) : dot.style.background;
-  dt.innerHTML = `${fr.note && LIVE.mode === 'service' ? `<span style="color:${fr.state === 'partial' ? LS_COL.init : LS_COL.unverified}">${esc(fr.note)}</span> · ` : ''}Switches: <b>${esc(fmtTime(LIVE.collected_at))}</b> (${LIVE.switches_collected ?? '?'}) · UFM: <b>${ufmAt ? esc(fmtTime(ufmAt)) : 'not fetched'}</b> · <span title="Inventory and cable records; refreshed in the background about once a day">NetBox inventory: ${nb ? esc(fmtTime(nb.synced_at)) + ` · ${nb.mismatches.length} changed, ${nb.missing.length} missing` : 'baseline export 2026-10-01'}</span>`;
+  dt.innerHTML = `${fr.note && LIVE.mode === 'service' ? `<span style="color:${fr.state === 'partial' ? LS_COL.init : LS_COL.unverified}">${esc(fr.note)}</span> · ` : ''}Switches: <b>${esc(fmtTime(LIVE.collected_at))}</b> (${LIVE.switches_collected ?? '?'}) · UFM: <b>${ufmAt ? esc(fmtTime(ufmAt)) : 'not fetched'}</b> · <span title="Inventory and cable records, from the last Refresh NetBox">NetBox inventory: ${nb ? esc(fmtTime(nb.synced_at)) + ` · ${nb.mismatches.length} changed, ${nb.missing.length} missing` : 'baseline export 2026-10-01'}</span>`;
   // design check
   let li = document.getElementById('chk-live'); if (!li) { li = document.createElement('li'); li.id = 'chk-live'; document.querySelector('ul.chk').prepend(li); }
   li.className = bad ? '' : 'ok'; li.style.setProperty('--lc', bad ? LS_COL.down : LS_COL.init);

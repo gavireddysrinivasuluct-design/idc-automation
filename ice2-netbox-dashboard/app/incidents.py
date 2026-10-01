@@ -319,7 +319,7 @@ def switches(out: Incidents, live: dict) -> None:
         out.add("minor", "switch", n(cov.get("missing_port_count", 0), "designed port") + " not reported by their switch",
                 "The switch answered but did not list these ports (renamed, breakout changed, or not an IB port).",
                 "Compare the port names on the switch with the design topology.", scope=list(cov["missing_ports"]), tab="live",
-                evidence=["%s: %s" % (short(d), ", ".join(ports)) for d, ports in sorted(cov["missing_ports"].items())])
+                evidence=["%s (%d): %s" % (short(d), (cov.get("missing_port_counts") or {}).get(d, len(ports)), ", ".join(ports)) for d, ports in sorted(cov["missing_ports"].items())])
     ex = live.get("exceptions") or []
     if not ex or not live.get("collected_at"):
         return

@@ -6,7 +6,7 @@ A local, read-only dashboard for the ICE2 backend InfiniBand fabric: 36 spines, 
 - **UFM**, which says where every cable actually lands (live links or its fabric scan).
 - **NetBox**, as inventory (management IPs, models) and as a record to keep correct. It is shown for comparison, not used as the truth.
 
-One **⟳ Sync fabric** button collects the switches and fetches from UFM. NetBox refreshes in the background about once a day, or with **Refresh NetBox**.
+Everything is button-driven by default: **⟳ Sync fabric** collects the switches and fetches from UFM, and **Refresh NetBox** updates the NetBox inventory. Nothing runs on a timer unless you ask for it (`--sync-every-minutes`, `--netbox-every-hours`, `--ufm-fetch-every-minutes`).
 
 What you get:
 
@@ -235,7 +235,7 @@ Either option installs **`local-inputs/known_hosts`** (mode `600`, ignored by Gi
 python3 app/netbox_live_sync.py \
   --netbox-url 'http://127.0.0.1:8444' \
   --device-profile "$HOME/.config/idc-automation/device-access.ini" \
-  --fanout jump --device-parallel 15 --sync-every-minutes 15
+  --fanout jump --device-parallel 15
 ```
 
 The terminal prints `Open http://127.0.0.1:8765/`. In a **second** terminal you can check:
@@ -253,7 +253,7 @@ NetBox   complete · full · 5,424 cables · 0 differ · 0 missing · 25 API cal
 Sync complete in 34.2 s   devices … ‖ IPs … ‖ UFM … ‖ NetBox …
 ```
 
-Later syncs show **NetBox skipped · inventory refreshes every 24 h**. Press **Refresh NetBox** after someone fixes NetBox records; it should say **incremental** and need only about 2 API calls. If it always says **full**, your token cannot read the change log (see [section 2](#2-request-access)).
+Later syncs show **NetBox skipped · use Refresh NetBox to update the inventory**. Press **Refresh NetBox** after someone fixes NetBox records; it should say **incremental** and need only about 2 API calls. If it always says **full**, your token cannot read the change log (see [section 2](#2-request-access)).
 
 The switch and NetBox setup is done. Do 4.9 as well: without UFM access, the miscabling check and most incidents have no data.
 
@@ -298,10 +298,17 @@ tsh status || tsh login                    # renew Teleport if it has expired
 python3 app/netbox_live_sync.py \
   --netbox-url 'http://127.0.0.1:8444' \
   --device-profile "$HOME/.config/idc-automation/device-access.ini" \
-  --fanout jump --device-parallel 15 --sync-every-minutes 15
+  --fanout jump --device-parallel 15
 ```
 
-Then open **http://127.0.0.1:8765/** and press **⟳ Sync fabric**. With `--sync-every-minutes 15`, the service also syncs the switches and UFM by itself every 15 minutes (the first automatic sync runs 15 minutes after start). NetBox refreshes by itself once a day (`--netbox-every-hours`), starting a minute after the service starts if the last refresh is older than that.
+Then open **http://127.0.0.1:8765/** and press **⟳ Sync fabric**. Or start everything with one double-click: **`scripts/open_dashboard.command`** (see below).
+
+Nothing refreshes by itself unless you add one of these to the start command:
+
+- `--sync-every-minutes 15`: sync the switches and UFM every 15 minutes (the first automatic sync runs 15 minutes after start).
+- `--netbox-every-hours 24`: also refresh NetBox about once a day.
+
+**One-click start.** `scripts/open_dashboard.command` (double-click it in Finder, or run it in Terminal) checks Teleport, starts the NetBox proxy if needed, starts the service from **this** repository with your profile, and opens the browser. If port 8765 is already used by an **older** copy of the dashboard (for example the earlier standalone `ice2-live-data` folder and its `Open ICE2 Live Dashboard.command`), it shows that process and asks before stopping it, so you never look at an old version by mistake. Add options with `ICE2_DASHBOARD_ARGS="--sync-every-minutes 15" ./scripts/open_dashboard.command`.
 
 **If NetBox is down,** the fabric sync still works: switch IPs come from the last good copy (the step says `IPs: cached IPs from …`), and the NetBox step shows the error and keeps the previous inventory.
 
@@ -315,7 +322,7 @@ Always open the dashboard at this local address. Opened as a `file://` page, it 
 mkdir -p ~/Library/Logs
 nohup python3 app/netbox_live_sync.py --netbox-url 'http://127.0.0.1:8444' \
   --device-profile "$HOME/.config/idc-automation/device-access.ini" \
-  --fanout jump --device-parallel 15 --sync-every-minutes 15 \
+  --fanout jump --device-parallel 15 \
   > ~/Library/Logs/ice2-dashboard.log 2>&1 &
 tail -f ~/Library/Logs/ice2-dashboard.log           # watch it; Ctrl+C stops watching only
 pkill -f app/netbox_live_sync.py                     # stop it
@@ -331,7 +338,7 @@ pkill -f app/netbox_live_sync.py                     # stop it
 ```
 Switches complete · verified · 100/100 switches · 14,500 IB ports · 33.4 s · IPs: local cache
 UFM      complete · live links from 10.1.67.190 · 8 miscabled · 1,120 trays
-NetBox   skipped · inventory refreshes every 24 h · last Oct 02, 09:12
+NetBox   skipped · use Refresh NetBox to update the inventory · last Oct 02, 09:12
 Sync complete in 34.2 s   devices 34.2 s ‖ IPs 0.0 s ‖ UFM 6.9 s
 ```
 
@@ -507,7 +514,7 @@ What it cannot see: link errors, congestion and UFM alarms (not collected yet), 
 | `--device-parallel N` | `10` | Concurrent switch logins (1–25). Raise gradually, for example 15 → 20 → 25, and watch for failures. |
 | `--sync-every-minutes N` | `0` (off) | Background fabric sync (switches and UFM), so the dashboard is already fresh when you open it |
 | `--stale-after-minutes N` | `60` | Show the switch evidence as **STALE** when the last collection is older than this |
-| `--netbox-every-hours H` | `24` | Refresh NetBox inventory in the background this often. `0` = only with **Refresh NetBox**. |
+| `--netbox-every-hours H` | `0` (off) | Also refresh NetBox inventory this often, in the background and on **Sync fabric**. With `0`, NetBox is read only with **Refresh NetBox**, and on the first **Sync fabric** when there is no inventory yet. |
 | `--full-netbox-every-hours H` | `6` | Do a full cable pull this often; between pulls the sync is incremental. `0` forces a full pull every time. |
 | `--address-cache-hours H` | `24` | Reuse switch management IPs from NetBox for this long. `0` always re-queries. |
 | `--netbox-page-size N` | `250` | Cables per NetBox page during a full pull |
@@ -530,7 +537,7 @@ What it cannot see: link errors, congestion and UFM alarms (not collected yet), 
      - Switch management IPs, vendor, model and status come from 2 bulk NetBox queries, or from the 24-hour local cache. If NetBox cannot be reached, the last known IPs are used.
      - Then `nv show interface --output json` is collected from all 100 switches.
    - **UFM**, when [4.9](#49-optional-let-the-dashboard-fetch-from-ufm) is set up: the same as **Fetch from UFM**.
-   - **NetBox**, only when the inventory is older than `--netbox-every-hours` (24 by default). **Refresh NetBox** runs this phase alone.
+   - **NetBox**, only on the first sync (no inventory yet), or when `--netbox-every-hours` is set and the inventory is older than that. **Refresh NetBox** runs this phase alone.
      - A full pull reads every backend cable, with pages trimmed to the needed fields; it runs the first time and every `--full-netbox-every-hours` (6).
      - Other runs ask the NetBox **change log** which cables changed since the last refresh, and re-read only those, usually in 1–3 API calls.
      - A NetBox failure never fails a fabric sync; the previous copy stays in use.
@@ -687,6 +694,7 @@ Also revoke the NetBox API token in NetBox (**API Tokens → delete**).
 | `scripts/configure_device_access.sh` | Saves the switch password to Keychain and writes your private profile |
 | `scripts/configure_known_hosts.sh`, `scripts/collect_known_hosts.py` | Installs approved switch host keys |
 | `scripts/netbox_proxy.sh`, `scripts/netbox_host_proxy.py` | Local NetBox proxy through Teleport |
+| `scripts/open_dashboard.command` | One-click start of this repository's dashboard (checks Teleport and the proxy; refuses to reuse an older copy) |
 | `scripts/fetch_ufm_scan.sh` | Copies UFM's latest fabric scan to `local-inputs/ufm/` (read-only) |
 | `scripts/configure_ufm_access.sh` | Saves the UFM web and/or host password to Keychain for the Fetch from UFM button |
 | `config/device-access.example.ini` | Example profile (no secrets) |
