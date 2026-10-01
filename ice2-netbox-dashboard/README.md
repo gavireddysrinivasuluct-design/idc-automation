@@ -1,6 +1,6 @@
 # NetBox dashboard launcher
 
-This repository contains safe, reusable code and credential-setup scripts for a read-only NetBox/device dashboard. Internal topology, device inventories, management addresses, dashboard HTML, host keys, tokens, and collected evidence are intentionally **not** stored here.
+This repository contains safe, reusable code and credential-setup scripts for a read-only NetBox/device dashboard. Internal topology, device inventories, dashboard HTML, host keys, tokens, and collected evidence are intentionally **not** stored here.
 
 Every user obtains the operational inputs through the approved internal process and keeps them only on their own machine. Never add those files or any credentials to Git.
 
@@ -29,11 +29,12 @@ Create a local directory that is outside Git, then obtain these approved files f
 - dashboard HTML
 - backend cable topology CSV
 - device inventory CSV
-- management-address CSV
 - approved SSH host-key file
 - read-only device-command file
 
 The `.gitignore` protects the conventional `local-inputs/` directory. The files are not interchangeable: request the current approved package if any are missing or stale.
+
+Management IPs are different: they are fetched read-only from NetBox during each device refresh. The generated address map is written only to the ignored runtime directory and is never committed.
 
 ## Run
 
@@ -46,12 +47,11 @@ python3 app/netbox_live_sync.py \
   --connections local-inputs/connections.csv \
   --device-profile "$HOME/.config/idc-automation/device-access.ini" \
   --devices local-inputs/devices.csv \
-  --addresses local-inputs/management_addresses.csv \
   --known-hosts local-inputs/known_hosts \
   --commands local-inputs/read_only_commands.txt
 ```
 
-Open `http://127.0.0.1:8765/`. The browser only talks to the local service; the NetBox token and switch password never reach the browser. The service uses read-only NetBox GET requests and executes only the command supplied in the approved local command file.
+Open `http://127.0.0.1:8765/`. The browser only talks to the local service; the NetBox token and switch password never reach the browser. The service uses read-only NetBox GET requests, fetches each listed device's current primary management IP from NetBox during refresh, and executes only the command supplied in the approved local command file.
 
 If an approved local proxy requires an HTTP Host header, add `--netbox-host-header '<approved-hostname>'` to the command. Do not guess this value; obtain it from the platform owner.
 

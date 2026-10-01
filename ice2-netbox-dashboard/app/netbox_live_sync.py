@@ -69,12 +69,12 @@ def link_status(states: list[str]) -> str:
 
 
 class SyncState:
-    def __init__(self, netbox_url: str, netbox_host_header: str | None, connections: Path, device_profile: Path | None, devices: Path | None, addresses: Path | None, known_hosts: Path | None, commands: Path | None) -> None:
+    def __init__(self, netbox_url: str, netbox_host_header: str | None, connections: Path, device_profile: Path | None, devices: Path | None, known_hosts: Path | None, commands: Path | None) -> None:
         self.netbox_url = netbox_url.rstrip("/")
         self.netbox_host_header = netbox_host_header
         self.connections = connections
         self.device_profile = device_profile
-        self.devices, self.addresses = devices, addresses
+        self.devices = devices
         self.known_hosts, self.commands = known_hosts, commands
         self.token: str | None = None
         self.baseline: dict[str, dict] = {}
@@ -136,6 +136,32 @@ class SyncState:
             raise RuntimeError("NetBox returned HTTP %s: %s" % (error.code, body[:240])) from error
         except URLError as error:
             raise RuntimeError("Cannot reach the local NetBox proxy at %s: %s" % (self.netbox_url, error.reason)) from error
+
+    def fetch_management_addresses(self, output: Path) -> int:
+        """Build an ephemeral device-IP map from NetBox; never persist it in Git."""
+        if not self.devices:
+            raise RuntimeError("A local device inventory is required to fetch management addresses.")
+        with self.devices.open(newline="", encoding="utf-8-sig") as handle:
+            names = [(row.get("hostname") or "").strip() for row in csv.DictReader(handle)]
+        names = [name for name in names if name]
+        if not names or len(names) != len(set(names)):
+            raise RuntimeError("The device inventory must contain unique non-empty hostname values.")
+        addresses: list[tuple[str, str]] = []
+        for name in names:
+            payload = self.get_netbox("/api/dcim/devices/?limit=2&name=" + quote(name, safe=""))
+            matches = payload.get("results") or []
+            if len(matches) != 1:
+                raise RuntimeError("NetBox returned %d devices for %s." % (len(matches), name))
+            primary = matches[0].get("primary_ip4") or matches[0].get("primary_ip") or {}
+            address = (primary.get("address") or "").split("/", 1)[0]
+            if not address:
+                raise RuntimeError("NetBox has no primary management IP for %s." % name)
+            addresses.append((name, address))
+        with output.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.writer(handle)
+            writer.writerow(["hostname", "management_address"])
+            writer.writerows(addresses)
+        return len(addresses)
 
     # ---------- live view ----------
     def live_view(self) -> dict:
@@ -328,7 +354,7 @@ class SyncState:
 
     # ---------- collection ----------
     def start_refresh(self) -> dict:
-        required = {"bundled collector": COLLECTOR, "device profile": self.device_profile, "device inventory": self.devices, "management-address map": self.addresses, "approved host-key file": self.known_hosts, "read-only command file": self.commands}
+        required = {"bundled collector": COLLECTOR, "device profile": self.device_profile, "device inventory": self.devices, "approved host-key file": self.known_hosts, "read-only command file": self.commands}
         missing = [label for label, path in required.items() if not path or not path.is_file()]
         if missing:
             raise RuntimeError("Local device-access inputs are missing: %s. See the README setup section." % ", ".join(missing))
@@ -338,16 +364,19 @@ class SyncState:
             run_id = secrets.token_hex(6)
             output_dir = STATE_DIR / run_id
             STATE_DIR.mkdir(exist_ok=True)
+            generated_addresses = output_dir / "management_addresses.csv"
+            output_dir.mkdir()
+            address_count = self.fetch_management_addresses(generated_addresses)
             command = [
                 sys.executable, str(COLLECTOR), "--profile", str(self.device_profile),
-                "--devices", str(self.devices), "--addresses", str(self.addresses),
+                "--devices", str(self.devices), "--addresses", str(generated_addresses),
                 "--known-hosts", str(self.known_hosts), "--commands-file", str(self.commands),
                 "--report-format", "none", "--parallel", "10", "--output-dir", str(output_dir),
             ]
             log_file = STATE_DIR / (run_id + ".log")
             log_handle = log_file.open("w", encoding="utf-8")
             process = subprocess.Popen(command, stdout=log_handle, stderr=subprocess.STDOUT, text=True)
-            self.refreshes[run_id] = {"state": "running", "process": process, "output_dir": output_dir, "log": str(log_file), "started_at": now_iso()}
+            self.refreshes[run_id] = {"state": "running", "process": process, "output_dir": output_dir, "log": str(log_file), "management_addresses_from_netbox": address_count, "started_at": now_iso()}
         threading.Thread(target=self.finish_refresh, args=(run_id, log_handle), daemon=True).start()
         return {"run_id": run_id, "state": "running"}
 
@@ -463,13 +492,12 @@ def main() -> int:
     parser.add_argument("--connections", type=Path, required=True, help="Locally obtained topology CSV.")
     parser.add_argument("--device-profile", type=Path, help="Private per-user device profile created by scripts/configure_device_access.sh.")
     parser.add_argument("--devices", type=Path, help="Locally obtained device inventory CSV.")
-    parser.add_argument("--addresses", type=Path, help="Locally obtained management-address CSV.")
     parser.add_argument("--known-hosts", type=Path, help="Locally obtained approved SSH host-key file.")
     parser.add_argument("--commands", type=Path, help="Locally obtained read-only command file.")
     args = parser.parse_args()
     if not args.diagram.is_file() or not args.connections.is_file():
         raise SystemExit("Diagram or backend connection CSV is missing.")
-    Handler.state = SyncState(args.netbox_url, args.netbox_host_header, args.connections, args.device_profile, args.devices, args.addresses, args.known_hosts, args.commands)
+    Handler.state = SyncState(args.netbox_url, args.netbox_host_header, args.connections, args.device_profile, args.devices, args.known_hosts, args.commands)
     Handler.diagram = args.diagram
     server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     print("Live evidence: %s" % Handler.state.source)
