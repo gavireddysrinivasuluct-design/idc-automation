@@ -54,7 +54,7 @@ This guide is written for a **new user setting up from nothing**. Follow section
 Tick these off in order. Each item links to the step that explains it.
 
 - [ ] Teleport account works: `tsh login` ([2](#2-request-access), [4.2](#42-log-in-to-teleport-and-check-your-access))
-- [ ] NetBox Teleport app is visible: `tsh apps ls` shows `netbox` (https://netbox.nscale.teleport.sh)
+- [ ] NetBox Teleport app is visible: `tsh apps ls` shows `netbox-prod-europe-west2-netbox`
 - [ ] Jump host is reachable: `tsh ssh <login>@jmp0 hostname`
 - [ ] Switch login works from `jmp0` ([4.2](#42-log-in-to-teleport-and-check-your-access))
 - [ ] Mac tools installed: `python3` 3.8+, `tsh`, `git` ([3](#3-install-the-tools-on-your-mac))
@@ -75,7 +75,7 @@ Ask the platform/network owner, or raise your team's usual access request, for t
 | Access | Used for |
 | --- | --- |
 | A **Teleport** account on `nscale.teleport.sh` | Everything goes through Teleport |
-| Teleport **app** access to `netbox` (https://netbox.nscale.teleport.sh) | Reading NetBox through a local proxy |
+| Teleport **app** access to `netbox-prod-europe-west2-netbox` (the ICE2 NetBox) | Reading NetBox through a local proxy |
 | A Teleport **login on the jump host `jmp0`** | Reaching the switch management network |
 | A **switch SSH account** for the ICE2 backend switches; read-only is enough | Running `nv show interface` |
 | NetBox **read** permission for devices, interfaces and cables | Cable and IP lookups |
@@ -130,7 +130,7 @@ chmod +x scripts/*.sh                      # only needed if the scripts are not 
 ```bash
 tsh login --proxy=nscale.teleport.sh       # first time; later just `tsh login`
 tsh status                                 # shows your logins and "Valid until"
-tsh apps ls | grep -i netbox               # must list netbox (https://netbox.nscale.teleport.sh)
+tsh apps ls | grep -i netbox               # must list netbox-prod-europe-west2-netbox
 tsh ls | grep -i jmp0                      # must list the jump host
 ```
 
@@ -157,7 +157,7 @@ A Teleport login lasts about **8 hours**. Renew it with `tsh login` when it expi
 
 ### 4.3 Create a read-only NetBox API token
 
-1. Open NetBox through Teleport. Either open https://netbox.nscale.teleport.sh (Teleport web UI, **Applications → netbox**) or run `tsh apps login netbox` and open the URL it prints.
+1. Open NetBox through Teleport. Either use the Teleport web UI (**Applications → netbox-prod-europe-west2-netbox**) or run `tsh apps login netbox-prod-europe-west2-netbox` and open the URL it prints.
 2. In NetBox, click your user name (top right), then **API Tokens** (on some versions it's **Profile → API Tokens**), then **Add a token**.
 3. Leave **Write enabled** *unticked*. That makes the token read-only.
 4. Set an **expiry date** that follows your team's policy, and a description such as `ICE2 dashboard – <your name>`.
@@ -195,7 +195,7 @@ It stores the password in Keychain item **`idc-automation-ice2-switch`**. It als
 ./scripts/netbox_proxy.sh status          # both lines must say "running"
 ```
 
-The proxy listens on **`http://127.0.0.1:8444`**. It forwards to the Teleport app **`netbox`** (`https://netbox.nscale.teleport.sh`). To use a different NetBox app, put `NETBOX_TELEPORT_APP=<app>` in `~/.config/idc-automation/netbox.env`, then run `./scripts/netbox_proxy.sh stop` and `start`. Test it:
+The proxy listens on **`http://127.0.0.1:8444`**. It forwards to the Teleport app **`netbox-prod-europe-west2-netbox`**, using the address Teleport reports for it (`./scripts/netbox_proxy.sh status` shows both). To use a different NetBox app, put `NETBOX_TELEPORT_APP=<app name from tsh apps ls>` in `~/.config/idc-automation/netbox.env`, then run `./scripts/netbox_proxy.sh stop` and `start`. If the app does not exist, `start` says so and lists the NetBox apps you can use. Check that another NetBox actually holds ICE2 before switching (for example `/api/dcim/devices/?name=sys1-ice2-p-swi-bel1` returns `"count": 1`). Test it:
 
 ```bash
 curl -s -H "Authorization: Token $(security find-generic-password -s netbox-mcp-token -a "$(id -un)" -w)" \
