@@ -701,7 +701,7 @@ const stepHtml = (name, s) => { const st = (s && s.state) || 'pending', c = st =
   let det = '';
   if (s && st === 'skipped') det = esc(s.reason || '') + (s.synced_at ? ' · last ' + esc(fmtTime(s.synced_at)) : '');
   else if (s && st === 'failed') det = esc(s.error || ('exit ' + s.exit_code)) + (name === 'NetBox' && s.synced_at ? ' · using the copy from ' + esc(fmtTime(s.synced_at)) : '');
-  else if (s && name === 'UFM') det = st === 'running' ? `${esc((typeof UFM_STEP !== 'undefined' && UFM_STEP[s.step]) || s.step || '')} ${esc(s.detail || '')}` : st === 'complete' ? `${s.source === 'rest' ? 'live links' : 'scan file'} from ${esc(s.host || '')} · ${s.miscabled ?? '?'} miscabled · ${(s.trays || 0).toLocaleString()} trays` : '';
+  else if (s && name === 'UFM') det = st === 'running' ? `${esc((typeof UFM_STEP !== 'undefined' && UFM_STEP[s.step]) || s.step || '')} ${esc(s.detail || '')}` : st === 'complete' ? `${s.source === 'rest' ? 'live links' : 'scan file'} from ${esc(s.host || '')} · ${s.swaps && s.miscabled === s.swaps * 2 ? `${s.swaps} crossed pair${s.swaps === 1 ? '' : 's'}` : `${s.miscabled ?? '?'} miscabled`} · ${(s.trays || 0).toLocaleString()} trays` : '';
   else if (s && name === 'NetBox') det = st === 'complete' ? `${s.mode === 'incremental' ? `incremental · ${s.changed} changed in log` : 'full'} · ${s.checked.toLocaleString()} cables · ${s.mismatches} differ · ${s.missing} missing · ${s.requests} API calls` : st === 'running' ? (s.mode === 'incremental' ? `change log · ${s.changed ?? '…'} cables to re-read` : s.pages_total ? `${s.pages_completed}/${s.pages_total} cable pages` : 'reading change log / cable pages…') : '';
   else if (s && (name === 'Devices' || name === 'Switches')) det = st === 'running' ? (s.total ? `${s.done || 0}/${s.total} switches${s.failed ? ` · ${s.failed} failed` : ''}${s.fanout ? ' · ' + s.fanout + ' fan-out' : ''}` : `resolving management IPs${s.address_source ? ' · ' + s.address_source : ''}…`)
     : (st === 'complete' || st === 'partial') ? `${s.coverage ? `${s.coverage.state === 'verified' ? 'verified · ' : ''}${s.coverage.reached}/${s.coverage.expected} switches${s.coverage.missing.length ? ` (not reached: ${s.coverage.missing.slice(0, 6).map(devId).join(', ')}${s.coverage.missing.length > 6 ? '…' : ''})` : ''}${Object.keys(s.coverage.missing_ports || {}).length ? ` · designed ports not reported on ${Object.keys(s.coverage.missing_ports).map(devId).join(', ')}` : ''}` : (s.switches || '?') + ' switches'} · ${(s.updated_interfaces || 0).toLocaleString()} IB ports${s.failed ? ` · ${s.failed} failed` : ''} · ${fmtS(s.seconds)}${s.address_source ? ' · IPs: ' + s.address_source : ''}${s.fanout_fallback ? ' · fell back to local fan-out: ' + esc(s.fanout_fallback) : ''}` : '';
@@ -753,6 +753,12 @@ const trayNo = code => (code.match(/-T(\d+)$/) || [, '?'])[1];
 const rackOf = code => code.replace(/-T\d+$/, '');
 const sh = n => String(n || '').replace(/^sys1-ice2-p-(swi|phy)-/, '');
 const num = n => (n || 0).toLocaleString();
+const cablingFindingLabel = s => {
+  const cables = s.switch_miscabled || 0, pairs = s.swaps || 0;
+  if (pairs && cables === pairs * 2) return `${num(pairs)} crossed pair${pairs === 1 ? '' : 's'}`;
+  if (pairs) return `${num(pairs)} crossed pair${pairs === 1 ? '' : 's'} + ${num(cables - pairs * 2)} other miscabled cable${cables - pairs * 2 === 1 ? '' : 's'}`;
+  return `${num(cables)} miscabled cable${cables === 1 ? '' : 's'}`;
+};
 const tileStyle = t => !t ? 'empty' : t.status === 'error' ? 'err' : t.status === 'incomplete' ? 'warn' : t.doc === 'documented' ? 'ok' : 'ufm';
 const TILE_TXT = {ok:'Matches NetBox', ufm:'Seen by UFM · not in NetBox', warn:'Needs attention · a rail link is missing or not Active', err:'Wiring error · rail, slot or host mismatch', unn:'Adapter without a name · tray unknown', empty:'Empty slot · nothing connected'};
 
@@ -904,7 +910,7 @@ function renderCab(err) {
   const att = CAB.sus.reduce((n, su) => n + su.trays.filter(t => t.status !== 'ok').length, 0);
   let h = `<div class="cabtiles">
     ${tile(CB.ok, `${num(S.switch_ok + S.switch_init)}<em>/${num(S.switch_cables)}</em>`, 'leaf–spine cables as designed', S.switch_init ? `${S.switch_init} of them initializing` : '')}
-    ${tile(S.switch_miscabled ? CB.mis : CB.ok, num(S.switch_miscabled), 'leaf–spine cables miscabled (vs. design)', S.swaps ? `${new Set(CAB.switch_findings.filter(f => f.status === 'miscabled').map(f => f.leaf[0])).size} leaves · cables crossed` : 'none')}
+    ${tile(S.switch_miscabled ? CB.mis : CB.ok, S.swaps && S.switch_miscabled === S.swaps * 2 ? num(S.swaps) : num(S.switch_miscabled), S.swaps && S.switch_miscabled === S.swaps * 2 ? 'crossed cable pairs (vs. design)' : 'leaf–spine cables miscabled (vs. design)', S.swaps ? `${new Set(CAB.switch_findings.filter(f => f.status === 'miscabled').map(f => f.leaf[0])).size} leaves · port mapping differs` : 'none')}
     ${tile(CB.ok, `${num(S.trays)}<em>/${num(S.tray_slots)}</em>`, 'GPU trays seen by UFM', (n => `${n} slot${n === 1 ? '' : 's'} empty`)(S.tray_slots - S.trays - Math.round(S.unnamed_adapters/4)))}
     ${tile(CB.ufm, num(S.trays_missing), 'trays missing from NetBox', `${num(S.gpu_links_undocumented)} links`)}
     ${tile(att ? CB.warn : CB.ok, num(att), 'trays needing attention', 'rail missing / not Active')}
@@ -976,11 +982,11 @@ function applyCab() {
   setTile('rt-rdma', num(S.gpu_links), `800G RDMA links seen by UFM (${num(S.trays * 4)} expected for these trays) · ${num(S.netbox_gpu_cables)} in NetBox`);
   setTile('rt-sus', `${susUsed} / 16`, `scalable units with trays (UFM) · 4 pods × 4 SUs`);
   let rt = document.getElementById('rail-ufm'); if (!rt) { rt = document.createElement('div'); rt.id = 'rail-ufm'; document.getElementById('rail').appendChild(rt); }
-  rt.innerHTML = `<b style="color:${S.switch_miscabled ? CB.mis : CB.ok}">${S.switch_miscabled}</b><span>leaf–spine cables miscabled (vs design) · ${num(S.trays_missing)} trays not in NetBox</span>`;
+  rt.innerHTML = `<b style="color:${S.switch_miscabled ? CB.mis : CB.ok}">${S.swaps && S.switch_miscabled === S.swaps * 2 ? S.swaps : S.switch_miscabled}</b><span>${S.swaps && S.switch_miscabled === S.swaps * 2 ? 'crossed cable pairs' : 'leaf–spine cables miscabled'} (vs design) · ${num(S.trays_missing)} trays not in NetBox</span>`;
   document.getElementById('sus').innerHTML = CAB.sus.map(su => `<div class="su"><b>SU${su.su}</b><span>pod ${su.pod} · BEL${su.leaves.join(' / ')} · ${su.trays.length} trays seen by UFM · ${su.trays.filter(t => t.doc === 'documented').length} in NetBox${su.unnamed.length ? ` · ${su.unnamed.length} unnamed adapters` : ''}</span></div>`).join('');
   let li = document.getElementById('chk-ufm'); if (!li) { li = document.createElement('li'); li.id = 'chk-ufm'; document.querySelector('ul.chk').prepend(li); }
   li.className = S.switch_miscabled ? '' : 'ok'; li.style.setProperty('--lc', CB.mis);
-  li.innerHTML = `<span><b>Cabling vs UFM</b> (scan ${esc(fmtTime(CAB.source.scanned_at))}): ${num(S.switch_ok + S.switch_init)} of ${num(S.switch_cables)} leaf–spine cables land where NetBox says; <b style="color:${CB.mis}">${S.switch_miscabled} miscabled</b>${S.swaps ? ` (${S.swaps} crossed pairs)` : ''}. UFM sees ${num(S.trays)} GPU trays on all 16 SUs; NetBox documents ${num(S.trays_documented)} — ${num(S.trays_missing)} trays (${num(S.gpu_links_undocumented)} links) are missing from NetBox.</span>`;
+  li.innerHTML = `<span><b>Cabling vs UFM</b> (scan ${esc(fmtTime(CAB.source.scanned_at))}): ${num(S.switch_ok + S.switch_init)} of ${num(S.switch_cables)} leaf–spine cables land where NetBox says; <b style="color:${CB.mis}">${cablingFindingLabel(S)}</b>. UFM sees ${num(S.trays)} GPU trays on all 16 SUs; NetBox documents ${num(S.trays_documented)} — ${num(S.trays_missing)} trays (${num(S.gpu_links_undocumented)} links) are missing from NetBox.</span>`;
   if (cur) inspect(cur);
 }
 async function loadCab() { if (!SERVICE) { renderCab(); return; }
@@ -1020,7 +1026,7 @@ async function fetchFromUfm() {
         const what = x.source === 'rest' ? `live links (${num(x.links)}) from UFM ${esc(x.host)}` : `UFM ${esc(x.host)} scan file`;
         const when = x.source === 'rest' ? 'compared just now' : `scan ${esc(fmtTime(x.scanned_at))}`;
         const note = (x.skipped || []).filter(m => /live links|master\/report/.test(m)).map(m => `<span style="color:${CB.warn}" title="${esc(m)}"> · ⚠ ${esc(m.split(':')[0])} not used</span>`).join('');
-        setUfmMsg(`<span style="color:${CB.ok}">✓ Fetched ${what} in ${x.seconds} s · ${when} · ${x.miscabled} miscabled · ${num(x.trays)} trays${x.files && x.files['master.topo.gz'] ? ' · master ' + esc(x.files['master.topo.gz'].ufm_time.slice(0, 10)) : ''}</span>${note}`); }
+        setUfmMsg(`<span style="color:${CB.ok}">✓ Fetched ${what} in ${x.seconds} s · ${when} · ${x.swaps && x.miscabled === x.swaps * 2 ? `${x.swaps} crossed pair${x.swaps === 1 ? '' : 's'}` : `${x.miscabled} miscabled`} · ${num(x.trays)} trays${x.files && x.files['master.topo.gz'] ? ' · master ' + esc(x.files['master.topo.gz'].ufm_time.slice(0, 10)) : ''}</span>${note}`); }
       else setUfmMsg(`<span style="color:${CB.err}">✗ ${esc(x.error || 'UFM fetch failed')}</span>`);
       document.querySelectorAll('#ufm-fetch').forEach(b => b.disabled = false); };
     poll();

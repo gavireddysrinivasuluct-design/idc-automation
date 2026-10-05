@@ -811,7 +811,8 @@ class SyncState:
             record.update(state="complete", step="done", host=result["host"], files=result["files"], skipped=result["skipped"],
                           source=result.get("source", "files"), links=result.get("links"),
                           scanned_at=report["source"]["scanned_at"] if report else None,
-                          miscabled=summary.get("switch_miscabled"), trays=summary.get("trays"))
+                          miscabled=summary.get("switch_miscabled"), swaps=summary.get("swaps"),
+                          trays=summary.get("trays"))
         except Exception as error:  # surface every failure on the dashboard
             record.update(state="failed", step="failed", error=str(error))
         record["seconds"] = round(time.monotonic() - t0, 1)
