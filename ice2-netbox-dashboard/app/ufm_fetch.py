@@ -11,14 +11,15 @@ Two read-only sources, both through one `tsh ssh` session to the jump host:
    The UFM TLS certificate is pinned on first use (local-inputs/ufm/tls-pins.json).
 
 2. UFM's files (needs the UFM host SSH login): ssh to the active UFM host, and
-`docker exec ufm` reads three files UFM already writes, as one tar bundle:
+`docker exec ufm` reads the UFM files while the host supplies the approved design:
 
   * opt/ufm/tmp/fabric_analysis/ibdiagnet.out/ibdiagnet2.lst      current fabric scan
   * opt/ufm/shared_config_files/periodicTopo/master.topo          UFM master topology
   * opt/ufm/shared_config_files/reports/TopologyCompare/TopologyCompare.json  (link followed)
+  * /root/nscale_Compute.topo                                                   (host file)
 
-With live links, the files are refreshed only for the master topology and the
-report, at most every FILES_EVERY_HOURS (the live links replace the scan).
+Every fetch also refreshes `/root/nscale_Compute.topo` before the cabling check.
+It never silently compares a new UFM snapshot against an older design copy.
 
 Read-only: nothing is sent to the fabric and nothing on UFM changes (REST is GET
 only). Passwords come from macOS Keychain (scripts/configure_ufm_access.sh) and
@@ -46,9 +47,10 @@ from pathlib import Path
 SCAN = "opt/ufm/tmp/fabric_analysis/ibdiagnet.out/ibdiagnet2.lst"
 MASTER = "opt/ufm/shared_config_files/periodicTopo/master.topo"
 REPORT = "opt/ufm/shared_config_files/reports/TopologyCompare/TopologyCompare.json"
-FILES_EVERY_HOURS = 6
+DESIGN = "/root/nscale_Compute.topo"
 LINKS_PATH = "/ufmRest/resources/links"
 BEGIN, END = "__ICE2_UFM_BUNDLE_BEGIN__", "__ICE2_UFM_BUNDLE_END__"
+DESIGN_BEGIN, DESIGN_END = "__ICE2_UFM_DESIGN_BEGIN__", "__ICE2_UFM_DESIGN_END__"
 
 # Runs on the jump host. Logs in to each UFM host in turn under a PTY (OpenSSH reads
 # the password from the controlling terminal), and prints one JSON line per host.
@@ -94,12 +96,17 @@ for host in cfg["hosts"]:
     text = b"".join(out).decode("utf-8", "replace")
     b, e = text.find(cfg["begin"]), text.find(cfg["end"])
     raw = text[b + len(cfg["begin"]):e] if b >= 0 and e > b else ""
+    db, de = raw.find(cfg["design_begin"]), raw.find(cfg["design_end"])
+    design = ""
+    if db >= 0 and de > db:
+        design = "".join(raw[db + len(cfg["design_begin"]):de].split())
+        raw = raw[:db]
     # Errors (e.g. "No such container" on a standby UFM) share the terminal stream:
     # accept only a base64 gzip bundle, which always starts with "H4sI".
     tokens = [t for t in raw.split() if t.startswith("H4sI")]
     data = max(tokens, key=len) if tokens else ""
-    if data:
-        emit({"event": "bundle", "host": host, "data": data}); break
+    if data and design:
+        emit({"event": "bundle", "host": host, "data": data, "design": design}); break
     lines = [l.strip() for l in text.replace("\r", "").splitlines()
              if l.strip() and cfg["begin"] not in l and cfg["end"] not in l and "password:" not in l.lower()]
     emit({"event": "failed", "host": host, "detail": (lines[-1] if lines else "no response")[:200]})
@@ -199,13 +206,29 @@ def save_bundle(blob: bytes, target_dir: Path, skip: tuple = ()) -> dict:
     return saved
 
 
+def save_design(data: bytes, target_dir: Path) -> dict:
+    """Atomically replace the approved design copied from the UFM host."""
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target = target_dir / "nscale_Compute.topo"
+    if target.is_file():
+        shutil.copy2(target, target.with_name("nscale_Compute.previous.topo"))
+    partial = target.with_name(target.name + ".part")
+    partial.write_bytes(data)
+    os.chmod(partial, 0o600)
+    partial.replace(target)
+    return {"bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+
+
 def fetch_files(prof: dict, target_dir: Path, progress: dict, timeout: int = 180, skip: tuple = ()) -> dict:
-    """UFM's three files over SSH to the UFM host (scan, master, report)."""
+    """UFM files plus the approved host design over one SSH session."""
     password = keychain_password(prof["service"], prof["account"])
-    remote = ("echo %s; docker exec ufm test -s /%s && docker exec ufm sh -c %s | base64 -w0; echo; echo %s"
-              % (BEGIN, SCAN, shlex.quote("cd / && tar czhf - --ignore-failed-read %s %s %s 2>/dev/null" % (SCAN, MASTER, REPORT)), END))
+    archive = shlex.quote("cd / && tar czhf - --ignore-failed-read %s %s %s 2>/dev/null" % (SCAN, MASTER, REPORT))
+    remote = ("docker exec ufm test -s /%s && test -s %s && { echo %s; docker exec ufm sh -c %s | base64 -w0; echo; "
+              "echo %s; base64 -w0 %s; echo; echo %s; echo %s; }"
+              % (SCAN, shlex.quote(DESIGN), BEGIN, archive, DESIGN_BEGIN, shlex.quote(DESIGN), DESIGN_END, END))
     payload = {"password": password, "user": prof["ufm_user"], "hosts": prof["ufm_hosts"], "command": remote,
-               "begin": BEGIN, "end": END, "timeout": timeout - 20}
+               "begin": BEGIN, "end": END, "design_begin": DESIGN_BEGIN, "design_end": DESIGN_END,
+               "timeout": timeout - 20}
     del password
     encoded = base64.b64encode(WORKER.encode("utf-8")).decode("ascii")
     bootstrap = "import base64,sys;exec(base64.b64decode(sys.argv[1]))"
@@ -215,7 +238,7 @@ def fetch_files(prof: dict, target_dir: Path, progress: dict, timeout: int = 180
     watchdog = threading.Timer(timeout, child.kill)
     watchdog.daemon = True
     watchdog.start()
-    errors, bundle, host = [], None, None
+    errors, bundle, design_blob, host = [], None, None, None
     try:
         child.stdin.write(json.dumps(payload) + "\n")
         child.stdin.close()
@@ -233,21 +256,23 @@ def fetch_files(prof: dict, target_dir: Path, progress: dict, timeout: int = 180
             elif kind == "failed":
                 errors.append("%s: %s" % (event["host"], (event.get("detail") or "no data").splitlines()[-1][:160]))
             elif kind == "bundle":
-                bundle, host = event["data"], event["host"]
+                bundle, design_blob, host = event["data"], event.get("design"), event["host"]
         child.wait()
         stderr = child.stderr.read()
     finally:
         watchdog.cancel()
-    if not bundle:
+    if not bundle or not design_blob:
         if child.returncode and not errors:
             raise RuntimeError("Jump-host worker failed (exit %s): %s" % (child.returncode, stderr.strip()[-200:]))
         raise RuntimeError("No UFM host returned its files. " + " | ".join(errors[-2:]))
-    progress.update(step="saving", detail="saving files from UFM %s" % host)
+    progress.update(step="saving", detail="saving UFM files and approved design from %s" % host)
     try:
         blob = base64.b64decode(bundle, validate=True)
-    except ValueError as error:
+        design = base64.b64decode(design_blob, validate=True)
+    except (ValueError, TypeError) as error:
         raise RuntimeError("UFM returned an unreadable bundle (%s); try again." % error)
     saved = save_bundle(blob, target_dir, skip)
+    saved["nscale_Compute.topo"] = save_design(design, target_dir)
     (target_dir / ".files-fetched-at").write_text(str(time.time()))
     return {"host": host, "files": saved, "skipped": errors}
 
@@ -439,25 +464,18 @@ def fetch(profile_path: Path, target_dir: Path, progress: dict, timeout: int = 1
         raise RuntimeError("Teleport CLI (tsh) is required.")
     if subprocess.run(["tsh", "status"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode:
         raise RuntimeError("Teleport login expired. Run: tsh login")
+    if not prof["has_ssh"]:
+        raise RuntimeError("A UFM host SSH login is required: every fetch refreshes /root/nscale_Compute.topo before comparison.")
     if not prof["has_rest"]:
         return dict(fetch_files(prof, target_dir, progress, timeout), source="files")
     try:
         result = dict(fetch_rest(prof, target_dir, progress), source="rest")
     except RuntimeError as error:
-        if not prof["has_ssh"]:
-            raise
         result = dict(fetch_files(prof, target_dir, progress, timeout), source="files")
         result["skipped"] = ["live links: %s" % error] + result["skipped"]
         return result
-    marker = target_dir / ".files-fetched-at"
-    try:
-        age_hours = (time.time() - float(marker.read_text())) / 3600
-    except (OSError, ValueError):
-        age_hours = None
-    if prof["has_ssh"] and (age_hours is None or age_hours >= FILES_EVERY_HOURS or not (target_dir / "master.topo.gz").is_file()):
-        try:
-            extra = fetch_files(prof, target_dir, progress, timeout, skip=(SCAN,))
-            result["files"].update(extra["files"])
-        except RuntimeError as error:
-            result["skipped"].append("master/report refresh: %s" % error)
+    # Design freshness is mandatory: do not use live REST links with an older design file.
+    extra = fetch_files(prof, target_dir, progress, timeout, skip=(SCAN,))
+    result["files"].update(extra["files"])
+    result["skipped"].extend(extra["skipped"])
     return result

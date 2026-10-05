@@ -248,7 +248,7 @@ Open **http://127.0.0.1:8765/** in a browser and press **⟳ Sync fabric**. The 
 
 ```
 Switches complete · verified · 100/100 switches · 14,500 IB ports · 33.4 s · IPs: netbox bulk
-UFM      complete · live links from 10.1.67.190 · 8 miscabled · 1,120 trays     (or "skipped" until 4.9 is done)
+UFM      complete · live links from 10.1.67.190 · 4 crossed pairs · 1,120 trays     (or "skipped" until 4.9 is done)
 NetBox   complete · full · 5,424 cables · 0 differ · 0 missing · 25 API calls
 Sync complete in 34.2 s   devices … ‖ IPs … ‖ UFM … ‖ NetBox …
 ```
@@ -271,9 +271,9 @@ The miscabling check ([6.1](#61-cabling-vs-ufm-miscabling-check)) needs UFM's vi
 | Login | What the button gets with it | How fresh |
 | --- | --- | --- |
 | **1. UFM web (REST) user** (recommended) | UFM's live link list, `GET /ufmRest/resources/links` | Live: what UFM sees right now |
-| **2. UFM host SSH login** | UFM's master topology and Topology Compare report, plus UFM's periodic scan file | The scan is as old as UFM's last scan (often hours) |
+| **2. UFM host SSH login** | UFM's master topology, Topology Compare report, periodic scan file, and approved `/root/nscale_Compute.topo` | The scan is as old as UFM's last scan (often hours); the design is copied on every fetch |
 
-With both logins, the button uses live links for the comparison and refreshes the master topology and report over SSH at most every 6 hours. With only the web user, it keeps the master topology from your last SSH or terminal fetch.
+With both logins, the button uses live links for the comparison and refreshes the approved design topology, master topology and report over SSH on every fetch. The SSH login is required: the dashboard will not compare new UFM data with an older local design file.
 
 - Passwords (from your 1Password vault) go into the Keychain items `idc-automation-ice2-ufm-rest` (web) and `idc-automation-ice2-ufm` (SSH). They are never written to a file, a command line or Git.
 - The script adds a `[ufm]` section (users and addresses only) to your private profile `~/.config/idc-automation/device-access.ini`. Run it again to change a login; Enter keeps what is stored.
@@ -337,7 +337,7 @@ pkill -f app/netbox_live_sync.py                     # stop it
 
 ```
 Switches complete · verified · 100/100 switches · 14,500 IB ports · 33.4 s · IPs: local cache
-UFM      complete · live links from 10.1.67.190 · 8 miscabled · 1,120 trays
+UFM      complete · live links from 10.1.67.190 · 4 crossed pairs · 1,120 trays
 NetBox   skipped · use Refresh NetBox to update the inventory · last Oct 02, 09:12
 Sync complete in 34.2 s   devices 34.2 s ‖ IPs 0.0 s ‖ UFM 6.9 s
 ```
@@ -403,7 +403,7 @@ The live sync tells you whether each port is *up*. This check tells you whether 
    shasum -a 256 local-inputs/ufm/nscale_Compute.topo   # compare with sha256sum on the UFM host
    ```
 
-   The dashboard picks it up automatically (use `--design-topo PATH` for another location). Its file name and checksum are shown on the tab, and each tray's **Design host** is shown in the inspector. Entries that cannot be physically right are not trusted: for example the current file lists `gpu1345 mlx5_0` (and three similar hosts) on four leaves at once. Those ports use the inferred rule instead, and the Incidents tab lists them so the design owner can correct the file.
+   Every dashboard UFM fetch now refreshes this file automatically from `/root/nscale_Compute.topo` before comparison; the manual copy is only useful for an initial offline setup. Its file name and checksum are shown on the tab, and each tray's **Design host** is shown in the inspector. Entries that cannot be physically right are not trusted: for example the current file lists `gpu1345 mlx5_0` (and three similar hosts) on four leaves at once. Those ports use the inferred rule instead, and the Incidents tab lists them so the design owner can correct the file.
 2. **The inferred rules: `assets/expected_topology.csv`**, used for ports the design file doesn't cover and when the file is missing. The tab then says *inferred design*. The CSV has one row per expected link (4,608 leaf–spine, 4,608 leaf–GPU) and is generated from these rules by `scripts/build_expected_topology.py`. Checked against the approved design, the rules agree on all 4,608 leaf–spine cables and on every GPU port apart from the 16 ports of those 4 suspect hosts.
 
 | Rule | Expected connection |
@@ -439,13 +439,13 @@ UFM's report compares only against its master, so it mostly lists trays added af
 
 - It needs the one-time setup in [4.9](#49-optional-let-the-dashboard-fetch-from-ufm). Until then, the button shows the command to run.
 - Progress shows next to the button: connecting to `jmp0`, reading from UFM, saving, comparing. A fetch usually takes a few seconds.
-- When it is done, the button line says what was read (*live links* or *scan file*), the UFM host, the time taken, the number of miscabled cables, the trays seen and the master date. The tab, GPU area and inspector update without a page reload.
-- Live links: one HTTPS GET from `jmp0` to the UFM REST API. Scan file: the same three files as the script below. Either way it is one Teleport session, and passwords go from Keychain to the jump host on standard input only.
+- When it is done, the button line says what was read (*live links* or *scan file*), the UFM host, the time taken, the number of crossed pairs or miscabled cables, the trays seen and the master date. The tab, GPU area and inspector update without a page reload.
+- Live links: one HTTPS GET from `jmp0` to the UFM REST API, followed by a host SSH read of the approved design, master topology and report. Scan file: the same four files as the script below. Either way it is one Teleport session per source, and passwords go from Keychain to the jump host on standard input only.
 - If live links fail (for example a wrong web password) and an SSH login is stored, it falls back to the scan file and shows a ⚠ note.
 - Live links list one record per cable when all four planes are up, and one record per plane otherwise; both become the same four-plane lanes as the scan file. GPU adapter names (`nvl72dXXX-TNN mlx5_N`) are matched by GUID from the last scan file, because the REST API shows host:interface names. If a live result names far fewer leaf–spine links than the last scan, it is refused and the previous data stays.
 - Live links show which ports are connected, not link training states. A cable stuck in *Init* still appears in the **Live link state** tab, which reads the switches.
 - If the first UFM address does not answer (for example it is the standby), it tries the next one.
-- If the fetch fails, the reason is shown and the previous files stay in use.
+- If the design refresh fails, the fetch fails and the previous dashboard result stays in use; it never compares a new UFM snapshot with an old design file.
 - With `--ufm-fetch-every-minutes N`, the service also fetches by itself every N minutes.
 
 **Or load it from a terminal.** This needs no stored UFM password. Run it in the project folder:
@@ -458,8 +458,9 @@ The script:
 
 - connects through `jmp0` to the active UFM, trying `10.1.67.190` and then `10.1.67.191`
 - asks once for the UFM host password, which is typed into `ssh` on the jump host and never stored
-- copies three files UFM already writes, in one session, into `local-inputs/ufm/` (ignored by Git):
+- copies the approved design plus three files UFM already writes, in one session, into `local-inputs/ufm/` (ignored by Git):
   - the current fabric scan, saved as `ibdiagnet2.lst.gz`
+  - the approved design, saved as `nscale_Compute.topo`
   - UFM's master topology, saved as `master.topo.gz` with its original save date
   - UFM's latest Topology Compare report, saved as `topology-compare.json.gz`
 
