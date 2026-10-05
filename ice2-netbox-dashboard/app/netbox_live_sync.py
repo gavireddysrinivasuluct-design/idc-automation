@@ -381,17 +381,25 @@ class SyncState:
         return self.token
 
     def get_netbox(self, path: str) -> dict:
-        headers = {"Authorization": "Token " + self.netbox_token(), "Accept": "application/json"}
-        if self.netbox_host_header:
-            headers["Host"] = self.netbox_host_header
-        request = Request(self.netbox_url + path, headers=headers, method="GET")
+        reread = False
         self.netbox_requests = getattr(self, "netbox_requests", 0) + 1
         for attempt in range(3):
+            headers = {"Authorization": "Token " + self.netbox_token(), "Accept": "application/json"}
+            if self.netbox_host_header:
+                headers["Host"] = self.netbox_host_header
+            request = Request(self.netbox_url + path, headers=headers, method="GET")
             try:
                 with urlopen(request, timeout=20) as response:
                     return json.loads(response.read().decode("utf-8"))
             except HTTPError as error:
                 body = error.read().decode("utf-8", errors="replace")
+                if error.code in (401, 403) and not reread:
+                    # The token may have been replaced in Keychain since start: read it again once.
+                    reread, self.token = True, None
+                    continue
+                if error.code in (401, 403):
+                    raise RuntimeError("NetBox rejected the token (HTTP %s: %s). Store a valid read-only token for this NetBox with "
+                                       "./scripts/configure_netbox_token.sh." % (error.code, body[:120])) from error
                 raise RuntimeError("NetBox returned HTTP %s: %s" % (error.code, body[:240])) from error
             except (URLError, TimeoutError, socket.timeout) as error:
                 if attempt == 2:
