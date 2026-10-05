@@ -391,7 +391,20 @@ The live sync tells you whether each port is *up*. This check tells you whether 
 
 **The reference is the design, not NetBox.** NetBox can be wrong too, so it is reported next to each link (*agrees with the design*, *records the current cabling*, *differs*, or *missing*) but is never used as the truth.
 
-The design topology is the file `assets/expected_topology.csv`. It has one row per expected link: 4,608 leaf–spine and 4,608 leaf–GPU rows. It is generated from the design rules in `scripts/build_expected_topology.py`:
+**Where the expected connections come from**, in order:
+
+1. **The approved design: `local-inputs/ufm/nscale_Compute.topo`.** This is the signed-off compute-fabric topology kept on the UFM host as `/root/nscale_Compute.topo` (IBDM `.topo` format, physical ports `P1`–`P144`, where `swNpM` = 2·(N−1)+M). It lists every leaf–spine cable and the designed host and adapter on every GPU port (1,152 hosts, gpu1256–gpu2407). Copy it once, keeping its date:
+
+   ```bash
+   # on jmp0
+   scp -p root@10.1.67.190:/root/nscale_Compute.topo ~/
+   # on your Mac, in ice2-netbox-dashboard
+   tsh scp <login>@jmp0:nscale_Compute.topo local-inputs/ufm/nscale_Compute.topo
+   shasum -a 256 local-inputs/ufm/nscale_Compute.topo   # compare with sha256sum on the UFM host
+   ```
+
+   The dashboard picks it up automatically (use `--design-topo PATH` for another location). Its file name and checksum are shown on the tab, and each tray's **Design host** is shown in the inspector. Entries that cannot be physically right are not trusted: for example the current file lists `gpu1345 mlx5_0` (and three similar hosts) on four leaves at once. Those ports use the inferred rule instead, and the Incidents tab lists them so the design owner can correct the file.
+2. **The inferred rules: `assets/expected_topology.csv`**, used for ports the design file doesn't cover and when the file is missing. The tab then says *inferred design*. The CSV has one row per expected link (4,608 leaf–spine, 4,608 leaf–GPU) and is generated from these rules by `scripts/build_expected_topology.py`. Checked against the approved design, the rules agree on all 4,608 leaf–spine cables and on every GPU port apart from the 16 ports of those 4 suspect hosts.
 
 | Rule | Expected connection |
 | --- | --- |
@@ -400,7 +413,9 @@ The design topology is the file `assets/expected_topology.csv`. It has one row p
 | G2 | Leaf port `swNpM` (N ≤ 36) is tray slot 2·(N−1)+M of that SU. A tray uses the same slot on all four of its leaves. |
 | G3 | Rail *r* reaches the tray's adapter `mlx5_(r−1)` (RDMA *r*) |
 
-If the design changes, edit the rules and run `python3 scripts/build_expected_topology.py`, or edit the CSV directly for a one-off exception. The dashboard picks up the change automatically.
+If the design changes, replace `nscale_Compute.topo` with the new approved file. For the rules, edit them and run `python3 scripts/build_expected_topology.py`. The dashboard picks up either change automatically.
+
+**Not a reference:** `topo.topo`, `ibnetdiscover` or `iblinkinfo` output, and UFM's master all record what *was* connected when they were written, so they would accept an existing miscabling as correct.
 
 **UFM's master topology as a second reference.** UFM keeps its own reference, the *master topology* (`/opt/ufm/shared_config_files/periodicTopo/master.topo`). It copies the master to `/opt/ufm/data/fabric.topo` every night and runs its own Topology Compare against it. The master records how the fabric looked *on the day someone saved it*, which isn't necessarily how it was designed. So the check shows the master next to each cable, and that tells you *since when* a difference exists:
 
@@ -520,7 +535,8 @@ What it cannot see: link errors, congestion and UFM alarms (not collected yet), 
 | `--netbox-page-size N` | `250` | Cables per NetBox page during a full pull |
 | `--netbox-concurrency N` | `2` | NetBox pages fetched in parallel through the Teleport app proxy |
 | `--netbox-host-header` | — | Only if the platform owner tells you a proxy needs it |
-| `--expected-topology PATH` | `assets/expected_topology.csv` | Designed topology the cabling check compares against ([6.1](#61-cabling-vs-ufm-miscabling-check)) |
+| `--design-topo PATH` | `local-inputs/ufm/nscale_Compute.topo` | Approved design topology (`.topo`), the reference for the cabling check ([6.1](#61-cabling-vs-ufm-miscabling-check)) |
+| `--expected-topology PATH` | `assets/expected_topology.csv` | Inferred rules, used where the approved design has no (or a suspect) entry ([6.1](#61-cabling-vs-ufm-miscabling-check)) |
 | `--ufm-master PATH` | `local-inputs/ufm/master.topo.gz` | UFM's master topology, the second reference ([6.1](#61-cabling-vs-ufm-miscabling-check)) |
 | `--ufm-report PATH` | `local-inputs/ufm/topology-compare.json.gz` | UFM's latest Topology Compare report, summarized in the tab |
 | `--ufm-fetch-every-minutes N` | `0` (off) | Fetch from UFM by itself every N minutes, in addition to the fabric sync. Only needed if you want UFM more often than `--sync-every-minutes`. Needs [4.9](#49-optional-let-the-dashboard-fetch-from-ufm). |
@@ -713,4 +729,5 @@ Also revoke the NetBox API token in NetBox (**API Tokens → delete**).
 | `local-inputs/ufm/ibdiagnet2.lst.gz` | Fetch from UFM or `fetch_ufm_scan.sh` | UFM fabric scan for the cabling check. The previous copy is kept as `ibdiagnet2.lst.previous.gz`. |
 | `local-inputs/ufm/master.topo.gz`, `topology-compare.json.gz` | Fetch from UFM or `fetch_ufm_scan.sh` | UFM's master topology and its latest Topology Compare report |
 | `.netbox-live-sync/tray-history.json` | The service | When each GPU tray was last seen, to report trays that go offline |
+| `local-inputs/ufm/nscale_Compute.topo` | You (copied from the UFM host) | The approved design topology, the reference for the cabling check |
 | `local-inputs/ufm/links.json.gz`, `tls-pins.json` | Fetch from UFM (live links) | UFM's raw live link list, and the pinned UFM certificate fingerprints |

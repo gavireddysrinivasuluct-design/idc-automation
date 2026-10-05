@@ -208,8 +208,83 @@ def load_expected(path: Path) -> list[dict]:
         return list(csv.DictReader(line for line in handle if not line.startswith("#")))
 
 
+TOPO_DESIGN_HEAD = re.compile(r"^(\S+)\s+(\S+)")
+TOPO_DESIGN_LINK = re.compile(r"^\s+P(\d+)\s+-\S+->\s+(\S+)\s+(\S+)\s+(\S+)")
+
+
+def load_design_topo(path: Path, fallback: list[dict] | None = None) -> tuple[list[dict], dict]:
+    """An approved design in IBDM .topo form (e.g. UFM host /root/nscale_Compute.topo), as
+    expected_topology rows. Switch ports are physical numbers P1..P144 (swNpM = 2(N-1)+M).
+
+    Entries that cannot be right are not trusted: a switch link whose two ends disagree, or
+    one host adapter listed on several leaves. Those ports, and ports the file does not
+    cover, take the rule-based row from `fallback` (expected_topology.csv), marked as such."""
+    import hashlib
+    sw, gpu, node = {}, {}, None
+    with open_scan(path) as handle:
+        for line in handle:
+            if not line.strip() or line.startswith("#"):
+                continue
+            if not line[0].isspace():
+                m = TOPO_DESIGN_HEAD.match(line)
+                node = m.group(2) if m else None
+                continue
+            m = TOPO_DESIGN_LINK.match(line)
+            if not m or not node:
+                continue
+            port, kind, far, far_port = m.groups()
+            here = (node, port_label(int(port)))
+            if kind.startswith("Q"):
+                fp = re.match(r"P?(\d+)$", far_port.split("/")[-1])
+                if fp:
+                    sw[here] = (far, port_label(int(fp.group(1))))
+            else:
+                gpu[here] = (far, far_port.split("/")[0])
+    suspect = []
+    pairs = {}
+    for a, b in sw.items():
+        if sw.get(b) != a:
+            suspect.append({"port": list(a), "why": "the far end lists %s %s instead" % (b[0], sw.get(b, ("?", "?"))[1]) if b in sw else "the far end does not list this link"})
+            continue
+        if leaf_no(a[0]) is not None and SPINE.search(b[0]):
+            pairs[a] = b
+    by_host = collections.defaultdict(list)
+    for port, (host, adapter) in gpu.items():
+        by_host[(host, adapter)].append(port)
+    bad_gpu = set()
+    for (host, adapter), ports in by_host.items():
+        if len(ports) > 1:
+            for port in ports:
+                bad_gpu.add(port)
+            suspect.append({"port": [ports[0][0], ports[0][1]], "why": "%s %s is listed on %d leaves (%s); one adapter port can only reach one leaf"
+                            % (host, adapter, len(ports), ", ".join(short(l) for l, _ in sorted(ports)))})
+    rows, from_design, filled = [], 0, 0
+    fb = {(r["a_device"], r["a_port"]): r for r in fallback or []}
+    covered = set()
+    for a, b in sorted(pairs.items()):
+        rows.append({"link_type": "leaf-spine", "a_device": a[0], "a_port": a[1], "b_device": b[0], "b_port": b[1], "rule": "approved design"})
+        covered.add(a)
+        from_design += 1
+    for port, (host, adapter) in sorted(gpu.items()):
+        if port in bad_gpu:
+            continue
+        rows.append({"link_type": "leaf-gpu", "a_device": port[0], "a_port": port[1], "b_device": host, "b_port": adapter, "rule": "approved design"})
+        covered.add(port)
+        from_design += 1
+    for key, row in fb.items():
+        if key not in covered:
+            rows.append(dict(row, rule="inferred rule (%s)" % ("design entry suspect" if key in bad_gpu or any(s_["port"] == list(key) for s_ in suspect) else "not in design file")))
+            filled += 1
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    info = {"kind": "approved design", "file": path.name, "path": str(path), "sha256": digest,
+            "saved_at": datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).isoformat(timespec="seconds"),
+            "links_from_design": from_design, "filled_by_rules": filled, "suspect": suspect[:50], "suspect_count": len(suspect),
+            "leaf_spine": len(pairs), "gpu_ports": len(gpu) - len(bad_gpu), "gpu_hosts": len({h for h, _ in gpu.values()})}
+    return rows, info
+
+
 def analyse(scan: Path, baseline: list[dict], expected: list[dict] | None = None, master: dict | None = None,
-            ufm_compare: dict | None = None) -> dict:
+            ufm_compare: dict | None = None, reference_info: dict | None = None) -> dict:
     """Compare UFM's current cabling with the designed topology (or NetBox if no design is given).
 
     NetBox is reported next to each link (agrees with the design / records the current
@@ -263,7 +338,7 @@ def analyse(scan: Path, baseline: list[dict], expected: list[dict] | None = None
             exp_switch.append((ea, eb))
         elif row["link_type"] == "leaf-gpu":
             exp_gpu[ea] = eb
-    reference = "design topology" if exp_switch else "NetBox"
+    reference = ((reference_info or {}).get("kind") or "inferred design") if exp_switch else "NetBox"
     if not exp_switch:
         exp_switch = [(leaf, spine) for cid, leaf, spine in switch_cables]
     exp_ends = {end for pair in exp_switch for end in pair}
@@ -475,6 +550,8 @@ def analyse(scan: Path, baseline: list[dict], expected: list[dict] | None = None
         sus[su]["trays"].append({
             "slot": slot, "code": code, "host": host, "doc": doc, "status": status, "issues": issues,
             "master_host": master_host if "-phy-" in master_host else "", "in_master": bool(m_hosts),
+            "design_host": next((exp_gpu[k][0] for k in (("sys1-ice2-p-swi-bel%d" % ad["leaf"], ad["port"]) for ad in ads)
+                                 if k in exp_gpu and not exp_gpu[k][0].startswith("SU")), ""),
             "adapters": sorted(([su_of_leaf(ad["leaf"])[2], ad["leaf"], ad["port"], ad["hca"], ad["planes"], ad["state"],
                                  ad["nb"][2] if ad["nb"] else "", hca_rdma.get(ad["hca"], "")] for ad in ads)),
         })
@@ -523,6 +600,7 @@ def analyse(scan: Path, baseline: list[dict], expected: list[dict] | None = None
         }
     return {
         "master": master_summary, "ufm_compare": ufm_compare,
+        "reference": reference_info or ({"kind": "inferred design", "file": "expected_topology.csv"} if expected else {"kind": "NetBox"}),
         "source": {"file": str(scan), "scanned_at": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(timespec="seconds"),
                    "bytes": stat.st_size, "lanes": len(lanes), "tool": meta["tool"], "unparsed": meta["unparsed"]},
         "summary": summary,

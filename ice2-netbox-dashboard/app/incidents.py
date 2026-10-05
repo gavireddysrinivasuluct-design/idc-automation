@@ -206,6 +206,16 @@ def fabric(out: Incidents, r: dict) -> None:
         out.add("major", "ufm", "UFM host links not fully active", "UFM (the subnet manager) has reduced connectivity to the fabric.",
                 "Check the UFM host HCAs and their leaf ports.", evidence=["%s %s %s (%s)" % (short(u["leaf"]), u["port"], u["adapter"], u["state"]) for u in bad_ufm])
 
+    ref = r.get("reference") or {}
+    if ref.get("kind") == "inferred design":
+        out.add("info", "data", "Cabling is checked against inferred rules, not an approved design",
+                "expected_topology.csv is derived from the pattern the fabric follows; it is not a signed-off cabling plan.",
+                "Copy the approved design (UFM host /root/nscale_Compute.topo) to local-inputs/ufm/ (README 6.1).")
+    if ref.get("suspect_count"):
+        out.add("info", "documentation", "%d entries in the approved design file look wrong" % ref["suspect_count"],
+                "These entries cannot be physically right (for example one adapter port on four leaves), so the inferred rule is used for those ports.",
+                "Have the design owner correct %s." % ref.get("file", "the design file"),
+                evidence=["%s %s: %s" % (short(x["port"][0]), x["port"][1], x["why"]) for x in ref.get("suspect", [])])
     # documentation
     if s.get("switch_netbox_differs"):
         out.add("info", "documentation", "%d leaf–spine cables differ in NetBox from the design" % s["switch_netbox_differs"],

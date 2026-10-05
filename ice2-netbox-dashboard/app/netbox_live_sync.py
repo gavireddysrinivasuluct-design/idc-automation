@@ -80,6 +80,7 @@ TRAY_HISTORY = STATE_DIR / "tray-history.json"
 DEFAULT_UFM_SCAN = PROJECT_ROOT / "local-inputs" / "ufm" / "ibdiagnet2.lst.gz"
 DEFAULT_EXPECTED = ASSETS_DIR / "expected_topology.csv"
 DEFAULT_UFM_MASTER = PROJECT_ROOT / "local-inputs" / "ufm" / "master.topo.gz"
+DEFAULT_DESIGN_TOPO = PROJECT_ROOT / "local-inputs" / "ufm" / "nscale_Compute.topo"
 DEFAULT_UFM_REPORT = PROJECT_ROOT / "local-inputs" / "ufm" / "topology-compare.json.gz"
 DEVICE_FIELDS = "name,primary_ip4,primary_ip,device_type,status"
 CABLE_FIELDS = "id,a_terminations,b_terminations"
@@ -229,6 +230,7 @@ class SyncState:
         self.load_cable_cache()
         self.ufm_scan = Path(getattr(opts, "ufm_scan", None) or DEFAULT_UFM_SCAN)
         self.expected_topology = Path(getattr(opts, "expected_topology", None) or DEFAULT_EXPECTED)
+        self.design_topo = Path(getattr(opts, "design_topo", None) or DEFAULT_DESIGN_TOPO)
         self.load_latest()
         self.ufm_master = Path(getattr(opts, "ufm_master", None) or DEFAULT_UFM_MASTER)
         self.ufm_report = Path(getattr(opts, "ufm_report", None) or DEFAULT_UFM_REPORT)
@@ -251,7 +253,29 @@ class SyncState:
                 self.live[(row["endpoint_b_device"], row["endpoint_b_port"])] = row["endpoint_b_live_state"]
 
     def evidence_fingerprint(self) -> str:
-        return file_fingerprint(self.connections, self.expected_topology, self.devices)
+        return file_fingerprint(self.connections, self.expected_topology, self.devices,
+                                self.design_topo if self.design_topo.is_file() else None)
+
+    def expected_rows(self) -> tuple[list[dict] | None, dict | None]:
+        """The reference: the approved design .topo when present (rules fill its gaps),
+        otherwise the inferred rules in expected_topology.csv."""
+        csv_file = self.expected_topology if self.expected_topology.is_file() else None
+        topo = self.design_topo if self.design_topo.is_file() else None
+        key = (csv_file.stat().st_mtime_ns if csv_file else 0, topo.stat().st_mtime_ns if topo else 0, topo.stat().st_size if topo else 0)
+        cached = getattr(self, "_expected", None)
+        if cached and cached[0] == key:
+            return cached[1]
+        _sys.path.insert(0, str(APP_DIR))
+        import ufm_cabling  # noqa: E402
+        rules = ufm_cabling.load_expected(csv_file) if csv_file else None
+        result = (rules, {"kind": "inferred design", "file": csv_file.name} if csv_file else None)
+        if topo:
+            try:
+                result = ufm_cabling.load_design_topo(topo, rules)
+            except (OSError, ValueError) as error:
+                print("[netbox-live-sync] approved design %s unreadable, using the inferred rules: %s" % (topo, error))
+        self._expected = (key, result)
+        return result
 
     def load_latest(self) -> None:
         """Re-apply the most recent collection so a restart keeps the newest evidence.
@@ -507,12 +531,12 @@ class SyncState:
         (seen by UFM now or before, or documented in NetBox), so empty slots are not
         reported as down. Falls back to the NetBox cable list without a design file.
         Rows: (cable_id, type, a_dev, a_port, b_dev, b_port, source)."""
-        design = self.expected_topology if self.expected_topology.is_file() else None
+        rows, _info = self.expected_rows()
         try:
             report = self.cabling()
         except Exception:
             report = None
-        key = (design.stat().st_mtime_ns if design else 0, self._cabling[0] if self._cabling else None, len(self.baseline),
+        key = (id(rows), self._cabling[0] if self._cabling else None, len(self.baseline),
                TRAY_HISTORY.stat().st_mtime_ns if TRAY_HISTORY.is_file() else 0)
         cached = getattr(self, "_live_links", None)
         if cached and cached[0] == key:
@@ -522,7 +546,7 @@ class SyncState:
             for dev, port in ((row["endpoint_a_device"], row["endpoint_a_port"]), (row["endpoint_b_device"], row["endpoint_b_port"])):
                 if "-swi-" in dev:
                     by_port.setdefault((dev, port), (cid, row))
-        if not design:
+        if not rows:
             links = [(cid, r["connection_type"], r["endpoint_a_device"], r["endpoint_a_port"], r["endpoint_b_device"], r["endpoint_b_port"], "netbox")
                      for cid, r in self.baseline.items()]
             self._live_links = (key, links)
@@ -537,18 +561,17 @@ class SyncState:
         except (OSError, ValueError):
             pass
         links = []
-        with design.open(newline="", encoding="utf-8") as handle:
-            for row in csv.DictReader(line for line in handle if not line.startswith("#")):
-                a = (row["a_device"], row["a_port"])
-                nb = by_port.get(a)
-                cid = nb[0] if nb else ""
-                if row["link_type"] == "leaf-spine":
-                    links.append((cid, "leaf-spine", a[0], a[1], row["b_device"], row["b_port"], "design"))
-                elif row["link_type"] == "leaf-gpu":
-                    if a not in in_use and not (nb and nb[1]["connection_type"] == "leaf-gpu-rdma"):
-                        continue
-                    far = in_use.get(a) or (nb[1]["endpoint_b_device"] if nb and nb[1]["endpoint_a_device"] == a[0] else nb[1]["endpoint_a_device"] if nb else "")
-                    links.append((cid, "leaf-gpu-rdma", a[0], a[1], far or row["b_device"], row["b_port"], "design"))
+        for row in rows:
+            a = (row["a_device"], row["a_port"])
+            nb = by_port.get(a)
+            cid = nb[0] if nb else ""
+            if row["link_type"] == "leaf-spine":
+                links.append((cid, "leaf-spine", a[0], a[1], row["b_device"], row["b_port"], "design"))
+            elif row["link_type"] == "leaf-gpu":
+                if a not in in_use and not (nb and nb[1]["connection_type"] == "leaf-gpu-rdma"):
+                    continue
+                far = in_use.get(a) or (nb[1]["endpoint_b_device"] if nb and nb[1]["endpoint_a_device"] == a[0] else nb[1]["endpoint_a_device"] if nb else "")
+                links.append((cid, "leaf-gpu-rdma", a[0], a[1], far or row["b_device"], row["b_port"], "design"))
         self._live_links = (key, links)
         return links
 
@@ -675,14 +698,14 @@ class SyncState:
                     self._cabling = None
                     self.bump()
             return None
-        design = self.expected_topology if self.expected_topology.is_file() else None
+        rows, reference = self.expected_rows()
         def pick(p: Path) -> Path | None:
             for c in (p, p.with_suffix("") if p.suffix == ".gz" else p.with_name(p.name + ".gz")):
                 if c.is_file():
                     return c
             return None
         master_file, report_file = pick(self.ufm_master), pick(self.ufm_report)
-        key = (str(path), path.stat().st_mtime_ns, path.stat().st_size, design.stat().st_mtime_ns if design else 0,
+        key = (str(path), path.stat().st_mtime_ns, path.stat().st_size, id(rows),
                master_file.stat().st_mtime_ns if master_file else 0, report_file.stat().st_mtime_ns if report_file else 0)
         with self.lock:
             cached = self._cabling
@@ -699,8 +722,7 @@ class SyncState:
             ufm_report = ufm_cabling.read_ufm_compare(report_file) if report_file else None
         except (OSError, ValueError) as error:
             print("[netbox-live-sync] ignoring unreadable UFM compare report %s: %s" % (report_file, error))
-        report = ufm_cabling.analyse(path, ufm_cabling.load_baseline(self.connections),
-                                     ufm_cabling.load_expected(design) if design else None, master, ufm_report)
+        report = ufm_cabling.analyse(path, ufm_cabling.load_baseline(self.connections), rows, master, ufm_report, reference)
         body = json.dumps(report, separators=(",", ":")).encode("utf-8")
         payload = ('"c%d-%s"' % (key[1] % 10**9, hashlib.sha1(body).hexdigest()[:10]), body, gzip.compress(body, compresslevel=5))
         try:
@@ -1550,6 +1572,9 @@ def main() -> int:
     tuning.add_argument("--ufm-fetch-every-minutes", type=float, default=0,
                         help="Fetch UFM's fabric files in the background on this interval (0 = only with the Fetch from UFM button).")
     tuning.add_argument("--sync-every-minutes", type=float, default=0, help="Run the fabric sync (switches + UFM) in the background on this interval (0 = on demand only).")
+    tuning.add_argument("--design-topo", type=Path, default=None,
+                        help="Approved design topology (.topo), the reference for the cabling check; default local-inputs/ufm/nscale_Compute.topo. "
+                             "Without it, the inferred rules in --expected-topology are used.")
     tuning.add_argument("--stale-after-minutes", type=float, default=60.0,
                         help="Show switch evidence as STALE when the last collection is older than this.")
     tuning.add_argument("--netbox-every-hours", type=float, default=0.0,
