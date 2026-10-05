@@ -283,12 +283,45 @@ def load_design_topo(path: Path, fallback: list[dict] | None = None) -> tuple[li
     return rows, info
 
 
-def analyse(scan: Path, baseline: list[dict], expected: list[dict] | None = None, master: dict | None = None,
-            ufm_compare: dict | None = None, reference_info: dict | None = None) -> dict:
-    """Compare UFM's current cabling with the designed topology (or NetBox if no design is given).
+def netbox_rows(cables: dict) -> tuple[list[dict], dict]:
+    """NetBox cable records ({id: [a_dev, a_port, b_dev, b_port]}, as the sync caches them)
+    as connections.csv rows. Leaf-spine and leaf-GPU cables only; a cable whose terminations
+    are not one interface on each side is counted as unusable and left out."""
+    rows, unusable, other = [], [], 0
+    for cid, ends in sorted(cables.items(), key=lambda kv: int(kv[0]) if str(kv[0]).isdigit() else 0):
+        if not ends or len(ends) != 4 or not all(ends):
+            unusable.append([cid, ends[4] if ends and len(ends) > 4 else "missing termination"])
+            continue
+        a, b = (ends[0], ends[1]), (ends[2], ends[3])
+        if SPINE.search(a[0]) and leaf_no(b[0]):
+            a, b = b, a
+        if leaf_no(b[0]) and not leaf_no(a[0]):
+            a, b = b, a
+        if leaf_no(a[0]) and SPINE.search(b[0]):
+            kind = "leaf-spine"
+        elif leaf_no(a[0]) and "-swi-" not in b[0]:
+            kind = "leaf-gpu-rdma"
+        else:
+            other += 1
+            continue
+        rows.append({"netbox_cable_id": str(cid), "connection_type": kind, "endpoint_a_device": a[0], "endpoint_a_port": a[1],
+                     "endpoint_b_device": b[0], "endpoint_b_port": b[1]})
+    info = {"cables": len(rows), "leaf_spine": sum(r["connection_type"] == "leaf-spine" for r in rows),
+            "gpu": sum(r["connection_type"] == "leaf-gpu-rdma" for r in rows), "unusable": len(unusable),
+            "unusable_list": unusable[:50], "other": other}
+    return rows, info
 
-    NetBox is reported next to each link (agrees with the design / records the current
-    cabling / differs / missing) but is not used as the reference when a design exists.
+
+def analyse(scan: Path, baseline: list[dict], expected: list[dict] | None = None, master: dict | None = None,
+            ufm_compare: dict | None = None, reference_info: dict | None = None,
+            design: list[dict] | None = None, design_info: dict | None = None) -> dict:
+    """Compare UFM's current cabling (actual) with the reference (expected).
+
+    Reference: NetBox (`baseline`) when `expected` is None -- the default in the dashboard --
+    otherwise the given design rows. With NetBox as the reference, the approved design
+    (`design`) is a cross-check on every finding: it tells whether a difference is a
+    cabling fault (design agrees with NetBox) or a NetBox record to correct (design agrees
+    with UFM). With a design as the reference, NetBox is reported alongside instead.
     """
     lanes, meta = read_lanes(scan)
     stat = scan.stat()
@@ -339,8 +372,17 @@ def analyse(scan: Path, baseline: list[dict], expected: list[dict] | None = None
         elif row["link_type"] == "leaf-gpu":
             exp_gpu[ea] = eb
     reference = ((reference_info or {}).get("kind") or "inferred design") if exp_switch else "NetBox"
-    if not exp_switch:
+    netbox_ref = not exp_switch
+    if netbox_ref:
         exp_switch = [(leaf, spine) for cid, leaf, spine in switch_cables]
+    # the approved design as a cross-check (NetBox reference only); its GPU hosts still name the slots
+    des_switch: dict[tuple[str, str], tuple[str, str]] = {}
+    for row in (design or []) if netbox_ref else []:
+        ea, eb = (row["a_device"], row["a_port"]), (row["b_device"], row["b_port"])
+        if row["link_type"] == "leaf-spine":
+            des_switch[ea] = eb
+        elif row["link_type"] == "leaf-gpu" and ea not in exp_gpu:
+            exp_gpu[ea] = eb
     exp_ends = {end for pair in exp_switch for end in pair}
 
     # ---- leaf <-> spine: expected (design) vs current (UFM), NetBox alongside ----------
@@ -382,13 +424,29 @@ def analyse(scan: Path, baseline: list[dict], expected: list[dict] | None = None
             counts["master-" + m_state] += 1
             if current and m_far and tuple(m_far) != current:
                 counts["changed-since-master"] += 1
+        d_far = des_switch.get(tuple(leaf)) if des_switch else None
+        if not des_switch:
+            d_state = None
+        elif d_far is None:
+            d_state = "missing"
+        elif tuple(d_far) == tuple(spine):
+            d_state = "matches-expected"
+        elif current and tuple(d_far) == current:
+            d_state = "matches-current"
+        else:
+            d_state = "differs"
+        if d_state and d_state != "matches-expected":
+            counts["design-differs"] += 1
         counts["switch-" + status] += 1
         if nb_state != "matches-expected":
             counts["netbox-differs"] += 1
         changed_ok = status == "ok" and m_state not in (None, "matches-expected")
-        if status != "ok" or nb_state != "matches-expected" or changed_ok:
+        design_differs = status == "ok" and d_state not in (None, "matches-expected")
+        if status != "ok" or nb_state != "matches-expected" or changed_ok or design_differs:
             item = pl or ps or {"planes": set(), "logs": set()}
-            switch_findings.append({"status": status if status != "ok" else ("changed-since-master" if changed_ok and nb_state == "matches-expected" else "netbox-differs"),
+            ok_status = "design-differs" if design_differs else "changed-since-master" if changed_ok and nb_state == "matches-expected" else "netbox-differs"
+            switch_findings.append({"status": status if status != "ok" else ok_status,
+                                    "design": list(d_far) if d_far else None, "design_state": d_state,
                                     "cable": nb[1] if nb else "", "master": list(m_far) if m_far else None, "master_state": m_state,
                                     "leaf": list(leaf), "spine": list(spine), "leaf_actual": actual,
                                     "spine_actual": sorted({(p[1], p[2]) for p in (ps or {"peers": set()})["peers"] if p[0] == "SW"}),
@@ -512,9 +570,12 @@ def analyse(scan: Path, baseline: list[dict], expected: list[dict] | None = None
             issues.append("not on the same port of all four leaves")
         for ad in ads:
             rail = su_of_leaf(ad["leaf"])[2]
-            design = exp_gpu.get(("sys1-ice2-p-swi-bel%d" % ad["leaf"], ad["port"]))
+            design = None if netbox_ref else exp_gpu.get(("sys1-ice2-p-swi-bel%d" % ad["leaf"], ad["port"]))
             want = design[1] if design else rail_hca.get(rail)
-            if design is None and exp_gpu:
+            if netbox_ref:
+                if want and ad["hca"] != want:
+                    issues.append("%s on rail %d leaf BEL%d (rail %d uses %s)" % (ad["hca"], rail, ad["leaf"], rail, want))
+            elif design is None and exp_gpu:
                 issues.append("BEL%d %s is not a GPU port in the design" % (ad["leaf"], ad["port"]))
             elif want and ad["hca"] != want:
                 issues.append("%s on rail %d leaf BEL%d (design expects %s)" % (ad["hca"], rail, ad["leaf"], want))
@@ -577,7 +638,7 @@ def analyse(scan: Path, baseline: list[dict], expected: list[dict] | None = None
     gpu_not_seen.sort(key=lambda x: (x["host"], x["rdma"]))
 
     summary = {
-        "reference": reference,
+        "reference": reference, "switch_design_differs": counts["design-differs"],
         "switch_cables": len(exp_switch), "netbox_switch_cables": len(switch_cables),
         "switch_netbox_differs": counts["netbox-differs"],
         "switch_ok": counts["switch-ok"], "switch_miscabled": counts["switch-miscabled"],
@@ -609,6 +670,7 @@ def analyse(scan: Path, baseline: list[dict], expected: list[dict] | None = None
     return {
         "master": master_summary, "ufm_compare": ufm_compare,
         "reference": reference_info or ({"kind": "inferred design", "file": "expected_topology.csv"} if expected else {"kind": "NetBox"}),
+        "design": design_info if netbox_ref and design else None,
         "source": {"file": str(scan), "scanned_at": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(timespec="seconds"),
                    "bytes": stat.st_size, "lanes": len(lanes), "tool": meta["tool"], "unparsed": meta["unparsed"]},
         "summary": summary,
@@ -630,12 +692,17 @@ def findings_csv(report: dict) -> str:
     w = csv.writer(out)
     w.writerow(["finding", "netbox_cable_id", "switch", "port", "expected_far_end", "current_far_end_ufm", "planes_up_of_4", "state",
                 "expected_connection", "current_connection_ufm", "netbox_connection", "netbox_vs_expected", "fix_or_note",
-                "master_connection_ufm", "master_vs_expected"])
+                "master_connection_ufm", "master_vs_expected", "design_connection", "design_vs_expected"])
     end = lambda e: " ".join(e) if e else ""
     for f in report["switch_findings"]:
         current = f["leaf_actual"][0] if f["leaf_actual"] else None
-        if f["status"] == "miscabled":
-            note = "Re-patch the cable in %s from %s to %s (expected by the design)" % (end(f["leaf"]), end(current), end(f["spine"]))
+        ref = "NetBox" if (report.get("reference") or {}).get("kind") == "NetBox" else "the design"
+        if f["status"] == "miscabled" and f.get("design_state") == "matches-current":
+            note = "UFM differs from NetBox, but the approved design agrees with UFM: confirm, then correct NetBox%s" % ((" #" + f["cable"]) if f["cable"] else "")
+        elif f["status"] == "miscabled":
+            note = "Re-patch the cable in %s from %s to %s (expected by %s)" % (end(f["leaf"]), end(current), end(f["spine"]), ref)
+        elif f["status"] == "design-differs":
+            note = "Cabling matches NetBox; the approved design shows %s: confirm which is right" % end(f.get("design"))
         elif f["status"] == "netbox-differs":
             note = "Cabling matches the design; correct NetBox%s" % ((" #" + f["cable"]) if f["cable"] else "")
         else:
@@ -645,9 +712,10 @@ def findings_csv(report: dict) -> str:
                     "; ".join(" ".join(x) for x in f["leaf_actual"]), f["planes"], f["state"],
                     "%s <-> %s" % (end(f["leaf"]), end(f["spine"])), ("%s <-> %s" % (end(f["leaf"]), end(current))) if current else "",
                     ("%s <-> %s" % (end(f["leaf"]), end(nb))) if nb else "", f.get("netbox_state", ""), note,
-                    ("%s <-> %s" % (end(f["leaf"]), end(f["master"]))) if f.get("master") else "", f.get("master_state") or ""])
+                    ("%s <-> %s" % (end(f["leaf"]), end(f["master"]))) if f.get("master") else "", f.get("master_state") or "",
+                    ("%s <-> %s" % (end(f["leaf"]), end(f["design"]))) if f.get("design") else "", f.get("design_state") or ""])
     for x in report["switch_undocumented"]:
-        w.writerow(["switch-link-not-in-netbox", "", x["a"][0], x["a"][1], "", " ".join(x["b"]), x["planes"], x["state"], "", "%s <-> %s" % (end(x["a"]), end(x["b"])), "", "", "not in the design topology", "", ""])
+        w.writerow(["switch-link-not-in-netbox", "", x["a"][0], x["a"][1], "", " ".join(x["b"]), x["planes"], x["state"], "", "%s <-> %s" % (end(x["a"]), end(x["b"])), "", "", "not in the reference (%s)" % (report.get("reference") or {}).get("kind", "design"), "", ""])
     for su in report["sus"]:
         for t in su["trays"]:
             for rail, leaf, port, hca, planes, state, cid, rdma in t["adapters"]:
@@ -696,8 +764,13 @@ if __name__ == "__main__":
 
     here = Path(__file__).resolve().parent.parent
     parser = argparse.ArgumentParser(
-        description="Read-only comparison of UFM cabling against the approved design topology."
+        description="Read-only comparison of UFM cabling (actual) against NetBox (expected), with the approved design as a cross-check."
     )
+    parser.add_argument("--reference", choices=("netbox", "design"), default="netbox",
+                        help="what counts as expected: NetBox cable records (default) or the approved design")
+    parser.add_argument("--netbox-cables", type=Path,
+                        default=here / ".netbox-live-sync" / "netbox-cables.json",
+                        help="NetBox cables saved by the dashboard's last NetBox sync; used instead of the export when present")
     parser.add_argument("scan", type=Path, help="UFM ibdiagnet2.lst file (plain or .gz)")
     parser.add_argument("connections", nargs="?", type=Path,
                         default=here / "assets" / "connections.csv",
@@ -718,16 +791,26 @@ if __name__ == "__main__":
 
     rules = load_expected(args.expected_topology)
     if args.design_topo.is_file():
-        expected, reference = load_design_topo(args.design_topo, rules)
+        design, design_info = load_design_topo(args.design_topo, rules)
     else:
-        expected = rules
-        reference = {"kind": "inferred design", "file": args.expected_topology.name}
+        design, design_info = rules, {"kind": "inferred design", "file": args.expected_topology.name}
+    if args.netbox_cables.is_file():
+        saved = json.loads(args.netbox_cables.read_text(encoding="utf-8"))
+        baseline, nb_info = netbox_rows(saved.get("cables", {}))
+        nb_info.update(kind="NetBox", source="NetBox sync %s" % saved.get("synced_at"), synced_at=saved.get("synced_at"))
+    else:
+        baseline = load_baseline(args.connections)
+        nb_info = {"kind": "NetBox", "source": "export %s" % args.connections.name, "cables": len(baseline)}
     master = read_master(args.ufm_master) if args.ufm_master.is_file() else None
     ufm_report = read_ufm_compare(args.ufm_report) if args.ufm_report.is_file() else None
-    report = analyse(args.scan, load_baseline(args.connections), expected, master, ufm_report, reference)
+    if args.reference == "netbox":
+        report = analyse(args.scan, baseline, None, master, ufm_report, nb_info, design, design_info)
+    else:
+        report = analyse(args.scan, baseline, design, master, ufm_report, design_info)
     print(json.dumps({
         "source": report["source"],
         "reference": report["reference"],
         "summary": report["summary"],
         "miscabled": [f for f in report["switch_findings"] if f["status"] == "miscabled"],
+        "netbox_vs_design": [f for f in report["switch_findings"] if f["status"] == "design-differs"],
     }, indent=1))

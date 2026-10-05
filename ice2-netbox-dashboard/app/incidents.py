@@ -146,21 +146,29 @@ def fabric(out: Incidents, r: dict) -> None:
                 "%d of %d leaf–spine cables are not seen by UFM." % (total_exp - total_seen, total_exp), "Check UFM and the spine layer first.")
 
     # miscabling, by impact
-    mis = by_status["miscabled"]
+    ref_name = "NetBox" if (r.get("reference") or {}).get("kind") == "NetBox" else "design"
+    # NetBox reference: a difference the approved design sides with UFM on is a NetBox record to fix, not a cable
+    nb_wrong = [f for f in by_status["miscabled"] if f.get("design_state") == "matches-current"]
+    mis = [f for f in by_status["miscabled"] if f not in nb_wrong]
     groups = collections.defaultdict(list)
     for f in mis:
         groups[f.get("impact", "topology")].append(f)
     def line(f):
         tag = " · in UFM master" if f.get("master_state") == "matches-current" else ""
+        tag += " · design agrees" if f.get("design_state") == "matches-expected" else ""
         if f["leaf_actual"]:
-            return "%s %s → %s %s (design: %s %s)%s" % (short(f["leaf"][0]), f["leaf"][1], short(f["leaf_actual"][0][0]), f["leaf_actual"][0][1],
-                                                     short(f["spine"][0]), f["spine"][1], tag)
+            return "%s %s → %s %s (%s: %s %s)%s" % (short(f["leaf"][0]), f["leaf"][1], short(f["leaf_actual"][0][0]), f["leaf_actual"][0][1],
+                                                 ref_name, short(f["spine"][0]), f["spine"][1], tag)
         other = ", ".join("%s %s" % (short(a), b) for a, b in f.get("spine_actual") or []) or "another cable"
-        return "%s %s not seen; its design far end %s %s has %s%s" % (short(f["leaf"][0]), f["leaf"][1], short(f["spine"][0]), f["spine"][1], other, tag)
+        return "%s %s not seen; its %s far end %s %s has %s%s" % (short(f["leaf"][0]), f["leaf"][1], ref_name, short(f["spine"][0]), f["spine"][1], other, tag)
+    if nb_wrong:
+        out.add("minor", "documentation", n(len(nb_wrong), "NetBox leaf–spine record") + " disagree with UFM and the approved design",
+                "UFM's cabling matches the approved design here, so the NetBox record is probably wrong rather than the cable.",
+                "Confirm on site, then correct these NetBox cables.", evidence=map(line, nb_wrong), scope=[f["leaf"][0] for f in nb_wrong])
     if groups["topology"]:
         out.add("major", "cabling", n(len(groups["topology"]), "leaf–spine cable") + (" changes" if len(groups["topology"]) == 1 else " change") + " the fabric topology",
                 "Some leaf–spine pairs have more cables than designed and others fewer: uneven bandwidth, hot spots, and the fat-tree routing may not hold.",
-                "Re-patch these cables to the design soon (section 1 of Cabling vs UFM).", evidence=map(line, groups["topology"]),
+                "Re-patch these cables as %s records them soon (section 1 of Cabling vs UFM)." % ref_name, evidence=map(line, groups["topology"]),
                 scope=[f["leaf"][0] for f in groups["topology"]])
     if groups["plane-split"]:
         out.add("major", "cabling", n(len(groups["plane-split"]), "cable") + " with planes landing on different far ends",
@@ -176,7 +184,7 @@ def fabric(out: Incidents, r: dict) -> None:
     if r.get("switch_undocumented"):
         bad = [u for u in r["switch_undocumented"] if (LEAF.search(u["a"][0]) and LEAF.search(u["b"][0])) or (SPINE.search(u["a"][0]) and SPINE.search(u["b"][0]))]
         sev = "major" if bad else "minor"
-        out.add(sev, "cabling", n(len(r["switch_undocumented"]), "switch-to-switch link") + " not in the design",
+        out.add(sev, "cabling", n(len(r["switch_undocumented"]), "switch-to-switch link") + " not in " + ref_name,
                 "Leaf–leaf or spine–spine links break the fat tree and can cause routing loops or credit deadlocks." if bad
                 else "Extra links the design does not have.", "Find and remove or document these links.",
                 evidence=["%s %s ↔ %s %s" % (short(u["a"][0]), u["a"][1], short(u["b"][0]), u["b"][1]) for u in r["switch_undocumented"]],
@@ -207,16 +215,37 @@ def fabric(out: Incidents, r: dict) -> None:
                 "Check the UFM host HCAs and their leaf ports.", evidence=["%s %s %s (%s)" % (short(u["leaf"]), u["port"], u["adapter"], u["state"]) for u in bad_ufm])
 
     ref = r.get("reference") or {}
+    if ref.get("kind") == "NetBox" and ref.get("source") == "bundled export":
+        out.add("info", "data", "Cabling is checked against the bundled NetBox export, not live NetBox",
+                "NetBox has not been read by this dashboard yet, so recent NetBox changes are not reflected.",
+                "Press Refresh NetBox.")
+    if ref.get("kind") == "NetBox" and ref.get("unusable"):
+        out.add("info", "documentation", "%d NetBox cables have unusable terminations" % ref["unusable"],
+                "A cable that is not one interface on each side cannot be compared, so it is left out of the cabling check.",
+                "Fix these cables in NetBox.", evidence=["#%s: %s" % (c, why) for c, why in ref.get("unusable_list", [])])
+    design = r.get("design") or {}
+    if ref.get("kind") == "NetBox" and not design:
+        out.add("info", "data", "No approved design to cross-check NetBox",
+                "Differences between NetBox and UFM cannot be told apart from wrong NetBox records.",
+                "Fetch from UFM (it copies /root/nscale_Compute.topo) or copy it to local-inputs/ufm/.")
     if ref.get("kind") == "inferred design":
         out.add("info", "data", "Cabling is checked against inferred rules, not an approved design",
                 "expected_topology.csv is derived from the pattern the fabric follows; it is not a signed-off cabling plan.",
                 "Copy the approved design (UFM host /root/nscale_Compute.topo) to local-inputs/ufm/ (README 6.1).")
-    if ref.get("suspect_count"):
+    sus_ref = ref if ref.get("suspect_count") else design
+    if sus_ref.get("suspect_count"):
+        ref = sus_ref
         out.add("info", "documentation", "%d entries in the approved design file look wrong" % ref["suspect_count"],
                 "These entries cannot be physically right (for example one adapter port on four leaves), so the inferred rule is used for those ports.",
                 "Have the design owner correct %s." % ref.get("file", "the design file"),
                 evidence=["%s %s: %s" % (short(x["port"][0]), x["port"][1], x["why"]) for x in ref.get("suspect", [])])
     # documentation
+    if s.get("switch_design_differs"):
+        out.add("info", "documentation", "%d leaf–spine cables differ between NetBox and the approved design" % s["switch_design_differs"],
+                "UFM matches NetBox for these, but the design file says otherwise.", "Ask the design owner which is right.",
+                evidence=["%s %s: NetBox %s %s, design %s" % (short(f["leaf"][0]), f["leaf"][1], short(f["spine"][0]), f["spine"][1],
+                                                            " ".join(f["design"]) if f.get("design") else "none")
+                          for f in r["switch_findings"] if f["status"] == "design-differs"])
     if s.get("switch_netbox_differs"):
         out.add("info", "documentation", "%d leaf–spine cables differ in NetBox from the design" % s["switch_netbox_differs"],
                 "NetBox is not the reference here, but runbooks built on it will be wrong.", "Review the NetBox import CSV.")

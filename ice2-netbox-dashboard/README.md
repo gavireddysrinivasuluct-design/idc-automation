@@ -388,11 +388,25 @@ GPU-side RDMA ports are not collected by the switch sync; only the leaf side of 
 
 ### 6.1 Cabling vs UFM (miscabling check)
 
-The live sync tells you whether each port is *up*. This check tells you whether each cable goes *where the fabric design says it should go*. It compares the **expected** connection for every port with the **current** connection as UFM sees it, with both ends of every link: UFM's live links (REST) or its periodic fabric scan. Nothing is sent to the fabric.
+The live sync tells you whether each port is *up*. This check tells you whether each cable goes *where NetBox says it goes*. It compares the **expected** connection for every port with the **current** connection as UFM sees it, with both ends of every link: UFM's live links (REST) or its periodic fabric scan. Nothing is sent to the fabric.
 
-**The reference is the design, not NetBox.** NetBox can be wrong too, so it is reported next to each link (*agrees with the design*, *records the current cabling*, *differs*, or *missing*) but is never used as the truth.
+**Source of truth: NetBox (expected) + UFM (actual).**
 
-**Where the expected connections come from**, in order:
+- **Expected = NetBox.** The leaf–spine and leaf–GPU cables NetBox records, as read by the last **Refresh NetBox** (`.netbox-live-sync/netbox-cables.json`). Until NetBox has been read once, the bundled export `assets/connections.csv` is used and the tab and the Incidents tab say so. A NetBox cable that is not exactly one interface on each side is left out and listed in Incidents.
+- **Actual = UFM.** Live links (REST) or the periodic fabric scan.
+- **Cross-check = the approved design.** NetBox can be wrong too, so every difference between NetBox and UFM is also checked against the approved design (below):
+  - design agrees with NetBox → **the cable is wrong**: re-patch it;
+  - design agrees with UFM → **the NetBox record is probably wrong**: confirm on site, then correct NetBox (reported as a documentation incident, not a cabling one);
+  - cables where UFM matches NetBox but the design differs are listed as *design differs* so the design owner can confirm.
+- **GPU trays.** NetBox records only some GPU cables (816 today). Trays with NetBox cables are checked against them (host and RDMA port); all trays are checked against the rail rules (same port on all four leaves of one SU, rail *r* on `mlx5_(r−1)`). The design's host names label the slots in the GPU pod view.
+
+As of 5 Oct 2026, NetBox and the approved design agree on all 4,608 leaf–spine cables, so the 8 crossed cables on BEL21 and BEL55 are confirmed by both.
+
+To make the approved design the reference instead (NetBox then shown alongside), start the service with `--cabling-reference design` (for example `ICE2_DASHBOARD_ARGS="--cabling-reference design" ./scripts/open_dashboard.command`).
+
+From a terminal: `python3 app/ufm_cabling.py local-inputs/ufm/ibdiagnet2.lst.gz` prints the same comparison (add `--reference design` for the other mode).
+
+**The approved design and the rules** (the cross-check, and the reference with `--cabling-reference design`):
 
 1. **The approved design: `local-inputs/ufm/nscale_Compute.topo`.** This is the signed-off compute-fabric topology kept on the UFM host as `/root/nscale_Compute.topo` (IBDM `.topo` format, physical ports `P1`–`P144`, where `swNpM` = 2·(N−1)+M). It lists every leaf–spine cable and the designed host and adapter on every GPU port (1,152 hosts, gpu1256–gpu2407). Copy it once, keeping its date:
 
@@ -546,7 +560,8 @@ What it cannot see: link errors, congestion and UFM alarms (not collected yet), 
 | `--netbox-page-size N` | `250` | Cables per NetBox page during a full pull |
 | `--netbox-concurrency N` | `2` | NetBox pages fetched in parallel through the Teleport app proxy |
 | `--netbox-host-header` | — | Only if the platform owner tells you a proxy needs it |
-| `--design-topo PATH` | `local-inputs/ufm/nscale_Compute.topo` | Approved design topology (`.topo`), the reference for the cabling check ([6.1](#61-cabling-vs-ufm-miscabling-check)) |
+| `--cabling-reference netbox\|design` | `netbox` | Expected cabling for the miscabling check: NetBox cable records, cross-checked with the approved design; or the approved design ([6.1](#61-cabling-vs-ufm-miscabling-check)) |
+| `--design-topo PATH` | `local-inputs/ufm/nscale_Compute.topo` | Approved design topology (`.topo`): the cross-check for the cabling check, or its reference with `--cabling-reference design` ([6.1](#61-cabling-vs-ufm-miscabling-check)) |
 | `--expected-topology PATH` | `assets/expected_topology.csv` | Inferred rules, used where the approved design has no (or a suspect) entry ([6.1](#61-cabling-vs-ufm-miscabling-check)) |
 | `--ufm-master PATH` | `local-inputs/ufm/master.topo.gz` | UFM's master topology, the second reference ([6.1](#61-cabling-vs-ufm-miscabling-check)) |
 | `--ufm-report PATH` | `local-inputs/ufm/topology-compare.json.gz` | UFM's latest Topology Compare report, summarized in the tab |
@@ -707,7 +722,7 @@ Also revoke the NetBox API token in NetBox (**API Tokens → delete**).
 | Path | Contents |
 | --- | --- |
 | `app/netbox_live_sync.py` | Local service: dashboard, sync and API |
-| `assets/expected_topology.csv` | Designed topology: the reference for the cabling check |
+| `assets/expected_topology.csv` | Inferred design rules: fill gaps in the approved design; rail rules for GPU trays |
 | `scripts/build_expected_topology.py` | Design rules that generate `expected_topology.csv` |
 | `app/ufm_cabling.py` | Cabling vs UFM check (also runs on its own: `python3 app/ufm_cabling.py <scan>`) |
 | `app/ufm_fetch.py` | Fetch from UFM: live links over the UFM REST API, or UFM's files, through `jmp0` (read-only) |
@@ -740,5 +755,5 @@ Also revoke the NetBox API token in NetBox (**API Tokens → delete**).
 | `local-inputs/ufm/ibdiagnet2.lst.gz` | Fetch from UFM or `fetch_ufm_scan.sh` | UFM fabric scan for the cabling check. The previous copy is kept as `ibdiagnet2.lst.previous.gz`. |
 | `local-inputs/ufm/master.topo.gz`, `topology-compare.json.gz` | Fetch from UFM or `fetch_ufm_scan.sh` | UFM's master topology and its latest Topology Compare report |
 | `.netbox-live-sync/tray-history.json` | The service | When each GPU tray was last seen, to report trays that go offline |
-| `local-inputs/ufm/nscale_Compute.topo` | You (copied from the UFM host) | The approved design topology, the reference for the cabling check |
+| `local-inputs/ufm/nscale_Compute.topo` | You (copied from the UFM host) | The approved design topology, the cross-check for the cabling check |
 | `local-inputs/ufm/links.json.gz`, `tls-pins.json` | Fetch from UFM (live links) | UFM's raw live link list, and the pinned UFM certificate fingerprints |

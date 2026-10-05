@@ -231,6 +231,7 @@ class SyncState:
         self.ufm_scan = Path(getattr(opts, "ufm_scan", None) or DEFAULT_UFM_SCAN)
         self.expected_topology = Path(getattr(opts, "expected_topology", None) or DEFAULT_EXPECTED)
         self.design_topo = Path(getattr(opts, "design_topo", None) or DEFAULT_DESIGN_TOPO)
+        self.cabling_reference = getattr(opts, "cabling_reference", None) or "netbox"
         self.load_latest()
         self.ufm_master = Path(getattr(opts, "ufm_master", None) or DEFAULT_UFM_MASTER)
         self.ufm_report = Path(getattr(opts, "ufm_report", None) or DEFAULT_UFM_REPORT)
@@ -276,6 +277,26 @@ class SyncState:
                 print("[netbox-live-sync] approved design %s unreadable, using the inferred rules: %s" % (topo, error))
         self._expected = (key, result)
         return result
+
+    def netbox_reference(self) -> tuple[list[dict], dict]:
+        """NetBox as the expected cabling: the cables from the last NetBox sync, or the
+        bundled export (assets/connections.csv) until NetBox has been read once."""
+        key = (self.nb_synced_at, len(self.nb_cables), len(self.baseline))
+        cached = getattr(self, "_nb_reference", None)
+        if cached and cached[0] == key:
+            return cached[1]
+        _sys.path.insert(0, str(APP_DIR))
+        import ufm_cabling  # noqa: E402
+        if self.nb_cables:
+            rows, info = ufm_cabling.netbox_rows(self.nb_cables)
+            info.update(kind="NetBox", source="NetBox sync", synced_at=self.nb_synced_at, full_at=self.nb_full_at)
+        else:
+            rows = list(self.baseline.values())
+            info = {"kind": "NetBox", "source": "bundled export", "file": self.connections.name, "synced_at": None, "cables": len(rows),
+                    "leaf_spine": sum(r["connection_type"] == "leaf-spine" for r in rows),
+                    "gpu": sum(r["connection_type"] == "leaf-gpu-rdma" for r in rows), "unusable": 0}
+        self._nb_reference = (key, (rows, info))
+        return rows, info
 
     def load_latest(self) -> None:
         """Re-apply the most recent collection so a restart keeps the newest evidence.
@@ -707,13 +728,14 @@ class SyncState:
                     self.bump()
             return None
         rows, reference = self.expected_rows()
+        nb_rows, nb_info = self.netbox_reference()
         def pick(p: Path) -> Path | None:
             for c in (p, p.with_suffix("") if p.suffix == ".gz" else p.with_name(p.name + ".gz")):
                 if c.is_file():
                     return c
             return None
         master_file, report_file = pick(self.ufm_master), pick(self.ufm_report)
-        key = (str(path), path.stat().st_mtime_ns, path.stat().st_size, id(rows),
+        key = (str(path), path.stat().st_mtime_ns, path.stat().st_size, id(rows), id(nb_rows), self.cabling_reference,
                master_file.stat().st_mtime_ns if master_file else 0, report_file.stat().st_mtime_ns if report_file else 0)
         with self.lock:
             cached = self._cabling
@@ -730,7 +752,11 @@ class SyncState:
             ufm_report = ufm_cabling.read_ufm_compare(report_file) if report_file else None
         except (OSError, ValueError) as error:
             print("[netbox-live-sync] ignoring unreadable UFM compare report %s: %s" % (report_file, error))
-        report = ufm_cabling.analyse(path, ufm_cabling.load_baseline(self.connections), rows, master, ufm_report, reference)
+        if self.cabling_reference == "netbox":
+            # expected = NetBox, actual = UFM; the approved design cross-checks each difference
+            report = ufm_cabling.analyse(path, nb_rows, None, master, ufm_report, nb_info, rows, reference)
+        else:
+            report = ufm_cabling.analyse(path, nb_rows, rows, master, ufm_report, reference)
         body = json.dumps(report, separators=(",", ":")).encode("utf-8")
         payload = ('"c%d-%s"' % (key[1] % 10**9, hashlib.sha1(body).hexdigest()[:10]), body, gzip.compress(body, compresslevel=5))
         try:
@@ -1564,6 +1590,9 @@ def main() -> int:
     parser.add_argument("--commands", type=Path, default=ASSETS_DIR / "read_only_commands.txt", help="Read-only command file (bundled by default).")
     parser.add_argument("--expected-topology", type=Path, default=DEFAULT_EXPECTED,
                         help="Designed topology the cabling check compares against (scripts/build_expected_topology.py writes it).")
+    parser.add_argument("--cabling-reference", choices=["netbox", "design"], default="netbox",
+                        help="Expected cabling for the miscabling check: NetBox cable records (default; the approved design "
+                             "cross-checks each difference) or the approved design topology (NetBox shown alongside).")
     parser.add_argument("--ufm-master", type=Path, default=DEFAULT_UFM_MASTER,
                         help="Local copy of UFM's master (reference) topology, periodicTopo/master.topo; fetch_ufm_scan.sh copies it.")
     parser.add_argument("--ufm-report", type=Path, default=DEFAULT_UFM_REPORT,
