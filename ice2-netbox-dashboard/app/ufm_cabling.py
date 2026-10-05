@@ -682,11 +682,44 @@ def netbox_import_csv(report: dict) -> str:
     return out.getvalue()
 
 
-if __name__ == "__main__":  # quick report: python3 app/ufm_cabling.py <ibdiagnet2.lst[.gz]> [connections.csv]
+if __name__ == "__main__":
+    import argparse
     import json
-    import sys
+
     here = Path(__file__).resolve().parent.parent
-    report = analyse(Path(sys.argv[1]), load_baseline(Path(sys.argv[2]) if len(sys.argv) > 2 else here / "assets" / "connections.csv"),
-                     load_expected(here / "assets" / "expected_topology.csv"))
-    print(json.dumps({"source": report["source"], "summary": report["summary"],
-                      "miscabled": [f for f in report["switch_findings"] if f["status"] == "miscabled"]}, indent=1))
+    parser = argparse.ArgumentParser(
+        description="Read-only comparison of UFM cabling against the approved design topology."
+    )
+    parser.add_argument("scan", type=Path, help="UFM ibdiagnet2.lst file (plain or .gz)")
+    parser.add_argument("connections", nargs="?", type=Path,
+                        default=here / "assets" / "connections.csv",
+                        help="NetBox cable export (default: assets/connections.csv)")
+    parser.add_argument("--design-topo", type=Path,
+                        default=here / "local-inputs" / "ufm" / "nscale_Compute.topo",
+                        help="approved IBDM design topology; used when it exists")
+    parser.add_argument("--expected-topology", type=Path,
+                        default=here / "assets" / "expected_topology.csv",
+                        help="rule-based fallback topology")
+    parser.add_argument("--ufm-master", type=Path,
+                        default=here / "local-inputs" / "ufm" / "master.topo.gz",
+                        help="optional UFM master topology")
+    parser.add_argument("--ufm-report", type=Path,
+                        default=here / "local-inputs" / "ufm" / "topology-compare.json.gz",
+                        help="optional UFM Topology Compare report")
+    args = parser.parse_args()
+
+    rules = load_expected(args.expected_topology)
+    if args.design_topo.is_file():
+        expected, reference = load_design_topo(args.design_topo, rules)
+    else:
+        expected = rules
+        reference = {"kind": "inferred design", "file": args.expected_topology.name}
+    master = read_master(args.ufm_master) if args.ufm_master.is_file() else None
+    ufm_report = read_ufm_compare(args.ufm_report) if args.ufm_report.is_file() else None
+    report = analyse(args.scan, load_baseline(args.connections), expected, master, ufm_report, reference)
+    print(json.dumps({
+        "source": report["source"],
+        "reference": report["reference"],
+        "summary": report["summary"],
+        "miscabled": [f for f in report["switch_findings"] if f["status"] == "miscabled"],
+    }, indent=1))

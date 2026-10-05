@@ -465,6 +465,14 @@ The script:
 
 The dashboard picks up the new file automatically; reload the page if it is open. If you have a read-only login on the UFM host, use it with `UFM_USER=<user> ./scripts/fetch_ufm_scan.sh` instead of the default `root`.
 
+**Run the comparison from a terminal.** After fetching, this read-only command compares UFM's saved snapshot directly with the approved `nscale_Compute.topo` design (and shows the UFM master beside each difference when it is available):
+
+```bash
+python3 app/ufm_cabling.py local-inputs/ufm/ibdiagnet2.lst.gz
+```
+
+The command uses `local-inputs/ufm/nscale_Compute.topo` automatically when the file exists. `assets/expected_topology.csv` is used only to fill design-file gaps or as the fallback when the approved file is unavailable. To compare another approved file, pass `--design-topo /path/to/design.topo`.
+
 **What changes on the dashboard when a scan is loaded:**
 
 - **GPU area, redrawn from UFM.** It shows 4 pods × 4 scalable units × 72 tray slots, with every GPU tray in the slot where UFM actually sees it. Tile colours:
