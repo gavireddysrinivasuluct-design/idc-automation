@@ -176,7 +176,7 @@ ul.chk li#chk-live:not(.ok)::before{background:var(--lc)}
 /* ---- cabling vs UFM ---- */
 .tt{stroke-width:1.1}
 .tt.ok{fill:#122238;stroke:#4a6488}
-.tt.ufm{fill:rgba(95,151,255,.16);stroke:#5f97ff;stroke-dasharray:3 2}
+.tt.ufm{fill:rgba(154,168,187,.10);stroke:#718096;stroke-dasharray:3 2}
 .tt.warn{fill:rgba(255,181,71,.16);stroke:#ffb547;stroke-width:1.6}
 .tt.err{fill:rgba(255,94,120,.2);stroke:#ff5e78;stroke-width:1.8}
 .tt.unn{fill:rgba(154,168,187,.12);stroke:#9aa8bb;stroke-dasharray:1.5 2}
@@ -743,7 +743,7 @@ function ufmLive(j, lp) { const u = (LIVE.ufm || []).find(x => devId(x[2]) === '
 // When the local service has a UFM fabric scan (scripts/fetch_ufm_scan.sh), the GPU area is
 // redrawn from what UFM actually sees (16 SUs x 72 tray slots), swapped leaf-spine cables are
 // drawn on the mesh, and the "Cabling vs UFM" card explains every difference with NetBox.
-const CB = {mis:'#e879f9', ufm:'#5f97ff', err:'#ff5e78', warn:'#ffb547', ok:'#38d9a0', unn:'#9aa8bb', empty:'#22324a'};
+const CB = {mis:'#e879f9', ufm:'#718096', err:'#ff5e78', warn:'#ffb547', ok:'#38d9a0', unn:'#9aa8bb', empty:'#22324a'};
 let CAB = null, cabStamp = null, ufmOn = false;
 const gMis = el('g', {class:'mislayer'}); svg.insertBefore(gMis, gf);
 const gUFM = el('g', {class:'ufmgpu'}, svg); gUFM.style.display = 'none';
@@ -760,14 +760,14 @@ const cablingFindingLabel = s => {
   return `${num(cables)} miscabled cable${cables === 1 ? '' : 's'}`;
 };
 const tileStyle = t => !t ? 'empty' : t.status === 'error' ? 'err' : t.status === 'incomplete' ? 'warn' : t.doc === 'documented' ? 'ok' : 'ufm';
-const TILE_TXT = {ok:'Matches NetBox', ufm:'Seen by UFM · not in NetBox', warn:'Needs attention · a rail link is missing or not Active', err:'Wiring error · rail, slot or host mismatch', unn:'Adapter without a name · tray unknown', empty:'Empty slot · nothing connected'};
+const TILE_TXT = {ok:'Documented in NetBox', ufm:'UFM-only · not documented in NetBox', warn:'Needs attention · a rail link is missing or not Active', err:'Wiring error · rail, slot or host mismatch', unn:'Adapter without a name · tray unknown', empty:'Empty slot · nothing connected'};
 
 function drawGPU() {
   gUFM.innerHTML = ''; Object.keys(trayById).forEach(k => delete trayById[k]);
   const H = GY0 + 4*POD_H + 10;
   el('rect', {x:16, y:GY0 - 40, width:1568, height:H - GY0 + 30, rx:12, class:'zone'}, gUFM);
-  txt(gUFM, {x:30, y:GY0 - 23, class:'zl'}, 'GPU SCALABLE UNITS · AS SEEN BY UFM · 4 PODS × 4 SU × 72 TRAY SLOTS');
-  const lg = [['ok', 'in NetBox'], ['ufm', 'UFM only · not in NetBox'], ['warn', 'needs attention'], ['err', 'wiring error'], ['unn', 'unnamed adapter'], ['empty', 'empty slot']];
+  txt(gUFM, {x:30, y:GY0 - 23, class:'zl'}, 'GPU SCALABLE UNITS · NETBOX-DOCUMENTED CABLING · UFM-ONLY DISCOVERIES GREYED · 4 PODS × 4 SU × 72 SLOTS');
+  const lg = [['ok', 'documented in NetBox'], ['ufm', 'UFM-only · not documented'], ['warn', 'needs attention'], ['err', 'wiring error'], ['unn', 'unnamed adapter'], ['empty', 'empty slot']];
   let lx = 760; lg.forEach(([k, t]) => { const x = lx; lx += 30 + t.length*6.3; el('rect', {x, y:GY0 - 33, width:13, height:13, rx:3, class:'tt ' + k}, gUFM); txt(gUFM, {x:x + 18, y:GY0 - 23, class:'rk', style:'fill:#8b9db6'}, t); });
   for (let pod = 1; pod <= 4; pod++) txt(gUFM, {x:30, y:py2(pod) - 6, class:'nv', fill:'#8b9db6', style:'font-size:10.5px;letter-spacing:.14em'}, `POD ${pod} · BEL${(pod - 1)*16 + 1}–BEL${pod*16}`);
   CAB.sus.forEach(su => {
@@ -790,7 +790,7 @@ function drawGPU() {
       txt(tg, {x:tx + tw/2, y:ty + 10, class:'tn', 'text-anchor':'middle'}, t ? trayNo(t.code) : un ? '?' : '');
       if (t || un) for (let r = 1; r <= 4; r++) {
         const ad = t ? t.adapters.find(a => a[0] === r) : null, u = !t && un.find(v => v[1] === r);
-        const fill = ad ? (ad[5] === 'ok' ? R[r - 1] : CB.warn) : u ? CB.unn : 'none';
+        const fill = ad ? (ad[6] ? (ad[5] === 'ok' ? R[r - 1] : CB.warn) : CB.ufm) : u ? CB.unn : 'none';
         el('rect', {x:tx + 1.6 + (r - 1)*3.6, y:ty + 15, width:2.8, height:7, rx:.8, fill, stroke: fill === 'none' ? '#5b6d86' : 'none', 'stroke-width':.6}, tg);
       }
       hook(tg, id);
@@ -912,7 +912,7 @@ function renderCab(err) {
     ${tile(CB.ok, `${num(S.switch_ok + S.switch_init)}<em>/${num(S.switch_cables)}</em>`, 'leaf–spine cables as designed', S.switch_init ? `${S.switch_init} of them initializing` : '')}
     ${tile(S.switch_miscabled ? CB.mis : CB.ok, S.swaps && S.switch_miscabled === S.swaps * 2 ? num(S.swaps) : num(S.switch_miscabled), S.swaps && S.switch_miscabled === S.swaps * 2 ? 'crossed cable pairs (vs. design)' : 'leaf–spine cables miscabled (vs. design)', S.swaps ? `${new Set(CAB.switch_findings.filter(f => f.status === 'miscabled').map(f => f.leaf[0])).size} leaves · port mapping differs` : 'none')}
     ${tile(CB.ok, `${num(S.trays)}<em>/${num(S.tray_slots)}</em>`, 'GPU trays seen by UFM', (n => `${n} slot${n === 1 ? '' : 's'} empty`)(S.tray_slots - S.trays - Math.round(S.unnamed_adapters/4)))}
-    ${tile(CB.ufm, num(S.trays_missing), 'trays missing from NetBox', `${num(S.gpu_links_undocumented)} links`)}
+    ${tile(CB.ufm, num(S.trays_missing), 'UFM-only trays not documented in NetBox', `${num(S.gpu_links_undocumented)} greyed links`)}
     ${tile(att ? CB.warn : CB.ok, num(att), 'trays needing attention', 'rail missing / not Active')}
     ${tile(CB.unn, num(S.unnamed_adapters), 'adapters without a name', 'tray cannot be identified')}
     ${tile(S.gpu_not_seen ? CB.err : CB.ok, num(S.gpu_not_seen), 'NetBox cables UFM does not see', '')}
@@ -931,7 +931,7 @@ function renderCab(err) {
           <div class="mrfix">${esc(misFix(f))}${impactChip(f)} &nbsp;${nbLine(f)}${masterVerdict(f) ? '<br>' + masterVerdict(f) : ''}</div></div>`).join('')}</div>
         <p class="small"><b>Quickest fix:</b> ${cages.length === 2 ? `swap the cables in ${cages[0]} and ${cages[1]} on ${devId(leaf).toUpperCase()} (both lanes p1 and p2). That restores all ${fs.length} expected connections.` : 're-patch each cable as listed.'} ${fs.every(f => f.netbox_state === 'matches-expected') ? 'NetBox already matches the design, so no NetBox change is needed.' : 'Then correct the NetBox records flagged above.'}</p></div>`; });
     h += `</div>`; }
-  h += `<h4>2 · GPU trays by scalable unit</h4><p class="small">Each SU uses one leaf from each rail; every tray lands its four RDMA ports on the same port of those four leaves. Bars: <span style="color:${CB.ok}">■</span> in NetBox <span style="color:${CB.ufm}">■</span> UFM only <span style="color:${CB.warn}">■</span> attention <span style="color:${CB.unn}">■</span> unnamed <span style="color:#34405a">■</span> empty</p>
+  h += `<h4>2 · GPU trays by scalable unit</h4><p class="small">Leaf-to-GPU cabling follows NetBox: <span style="color:${CB.ok}">■</span> documented in NetBox. UFM-only discoveries are <span style="color:${CB.ufm}">■</span> grey so they cannot be mistaken for documented GPU connections. Each SU uses one leaf from each rail; every tray lands its four RDMA ports on the same port of those four leaves. <span style="color:${CB.warn}">■</span> attention <span style="color:${CB.unn}">■</span> unnamed <span style="color:#34405a">■</span> empty</p>
     <div class="tablewrap">${tbl(['SU', 'Leaves (rail 1–4)', 'Trays', 'In NetBox', 'Missing in NetBox', 'Attention', 'Unnamed', ''], CAB.sus.map(su => { const d = su.trays.filter(t => t.doc === 'documented' && t.status === 'ok').length, a = su.trays.filter(t => t.status !== 'ok').length,
       m = su.trays.filter(t => t.doc !== 'documented' && t.status === 'ok').length, u = Math.round(su.unnamed.length/4), e = Math.max(0, 72 - d - a - m - u), bar = (n, c) => n ? `<i style="width:${n/72*100}%;background:${c}"></i>` : '';
       return [`<b>SU${su.su}</b>`, su.leaves.map(l => lk('bel' + l, 'BEL' + l)).join(' '), su.trays.length, su.trays.filter(t => t.doc === 'documented').length, su.trays.filter(t => t.doc !== 'documented').length || '—', a || '—', su.unnamed.length || '—',

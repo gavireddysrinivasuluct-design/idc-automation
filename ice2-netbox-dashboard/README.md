@@ -480,15 +480,15 @@ The command uses `local-inputs/ufm/nscale_Compute.topo` automatically when the f
 
   | Tile | Meaning |
   | --- | --- |
-  | Solid | The tray matches NetBox |
-  | Blue, dashed | UFM sees the tray, but it is not in NetBox |
+  | Rail-coloured solid | The tray and its leaf-to-GPU cables are documented in NetBox |
+  | Grey, dashed | UFM sees the tray, but its leaf-to-GPU cables are not documented in NetBox |
   | Amber | A rail link is missing or not Active |
   | Red | Wiring error: wrong rail, slot or host |
   | Grey `?` | The adapter has no name, so the tray can't be identified |
   | Faint | Empty slot |
 
-  The four small bars in each tile are the tray's rails 1–4. Click a tray to see its four links, adapter by adapter, with the NetBox cable for each.
-- **Leaves** take their rail colour and show their real GPU downlink count from UFM.
+  The four small bars in each tile are the tray's rails 1–4. Click a tray to see its four links, adapter by adapter, with the NetBox cable for each. UFM-only details stay grey so they are clearly distinct from the NetBox cabling record.
+- **Leaves** take their rail colour; documented GPU downlinks are rail-coloured, and UFM-only GPU discoveries are grey.
 - **Miscabled leaf–spine cables** are drawn in **magenta** on the mesh, and both switches get a ◆ marker. The **Miscabling** chip turns the layer on or off.
 - **Cabling vs UFM tab**, in six sections:
   1. Miscabled cables, grouped per leaf. Each one shows the **Current** connection (UFM), the **Expected** connection (design) and the **Master** connection, end to end. It also gives the re-patch instruction, the impact (*port swap · no fabric impact* or *topology change*, see [6.2](#62-incidents)) and whether NetBox agrees with the design.
