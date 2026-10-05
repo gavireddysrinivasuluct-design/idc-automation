@@ -146,7 +146,7 @@ def fabric(out: Incidents, r: dict) -> None:
                 "%d of %d leaf–spine cables are not seen by UFM." % (total_exp - total_seen, total_exp), "Check UFM and the spine layer first.")
 
     # miscabling, by impact
-    ref_name = "NetBox" if (r.get("reference") or {}).get("kind") == "NetBox" else "design"
+    ref_name = {"NetBox": "NetBox", "NetBox + design": "NetBox and the design"}.get((r.get("reference") or {}).get("kind"), "design")
     # NetBox reference: a difference the approved design sides with UFM on is a NetBox record to fix, not a cable
     nb_wrong = [f for f in by_status["miscabled"] if f.get("design_state") == "matches-current"]
     mis = [f for f in by_status["miscabled"] if f not in nb_wrong]
@@ -215,16 +215,16 @@ def fabric(out: Incidents, r: dict) -> None:
                 "Check the UFM host HCAs and their leaf ports.", evidence=["%s %s %s (%s)" % (short(u["leaf"]), u["port"], u["adapter"], u["state"]) for u in bad_ufm])
 
     ref = r.get("reference") or {}
-    if ref.get("kind") == "NetBox" and ref.get("source") == "bundled export":
+    if str(ref.get("kind", "")).startswith("NetBox") and ref.get("source") == "bundled export":
         out.add("info", "data", "Cabling is checked against the bundled NetBox export, not live NetBox",
                 "NetBox has not been read by this dashboard yet, so recent NetBox changes are not reflected.",
                 "Press Refresh NetBox.")
-    if ref.get("kind") == "NetBox" and ref.get("unusable"):
+    if str(ref.get("kind", "")).startswith("NetBox") and ref.get("unusable"):
         out.add("info", "documentation", "%d NetBox cables have unusable terminations" % ref["unusable"],
                 "A cable that is not one interface on each side cannot be compared, so it is left out of the cabling check.",
                 "Fix these cables in NetBox.", evidence=["#%s: %s" % (c, why) for c, why in ref.get("unusable_list", [])])
     design = r.get("design") or {}
-    if ref.get("kind") == "NetBox" and not design:
+    if str(ref.get("kind", "")).startswith("NetBox") and not design:
         out.add("info", "data", "No approved design to cross-check NetBox",
                 "Differences between NetBox and UFM cannot be told apart from wrong NetBox records.",
                 "Fetch from UFM (it copies /root/nscale_Compute.topo) or copy it to local-inputs/ufm/.")
@@ -241,12 +241,20 @@ def fabric(out: Incidents, r: dict) -> None:
                 evidence=["%s %s: %s" % (short(x["port"][0]), x["port"][1], x["why"]) for x in ref.get("suspect", [])])
     # documentation
     if s.get("switch_design_differs"):
-        out.add("info", "documentation", "%d leaf–spine cables differ between NetBox and the approved design" % s["switch_design_differs"],
-                "UFM matches NetBox for these, but the design file says otherwise.", "Ask the design owner which is right.",
+        out.add("minor", "documentation", "%d leaf–spine cables where NetBox and the approved design disagree" % s["switch_design_differs"],
+                "UFM matches NetBox for these, but the design file says otherwise: either the design entry is out of date, "
+                "or the cable was miscabled and NetBox was updated to match it.", "Ask the design owner which is intended.",
                 evidence=["%s %s: NetBox %s %s, design %s" % (short(f["leaf"][0]), f["leaf"][1], short(f["spine"][0]), f["spine"][1],
                                                             " ".join(f["design"]) if f.get("design") else "none")
                           for f in r["switch_findings"] if f["status"] == "design-differs"])
-    if s.get("switch_netbox_differs"):
+    if s.get("switch_netbox_differs") and (r.get("reference") or {}).get("kind") == "NetBox + design":
+        out.add("minor", "documentation", "%d NetBox leaf–spine records disagree with UFM and the approved design" % s["switch_netbox_differs"],
+                "The cable matches the approved design, so the NetBox record is missing or wrong. Runbooks built on NetBox will be wrong.",
+                "Correct these cables in NetBox (Findings CSV, status netbox-differs).",
+                evidence=["%s %s: NetBox %s, UFM and design %s %s" % (short(f["leaf"][0]), f["leaf"][1], " ".join(f["netbox"]) if f.get("netbox") else "none",
+                                                                    short(f["spine"][0]), f["spine"][1])
+                          for f in r["switch_findings"] if f["status"] == "netbox-differs"])
+    elif s.get("switch_netbox_differs"):
         out.add("info", "documentation", "%d leaf–spine cables differ in NetBox from the design" % s["switch_netbox_differs"],
                 "NetBox is not the reference here, but runbooks built on it will be wrong.", "Review the NetBox import CSV.")
     m = r.get("master") or {}

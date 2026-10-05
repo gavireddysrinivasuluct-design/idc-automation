@@ -231,7 +231,7 @@ class SyncState:
         self.ufm_scan = Path(getattr(opts, "ufm_scan", None) or DEFAULT_UFM_SCAN)
         self.expected_topology = Path(getattr(opts, "expected_topology", None) or DEFAULT_EXPECTED)
         self.design_topo = Path(getattr(opts, "design_topo", None) or DEFAULT_DESIGN_TOPO)
-        self.cabling_reference = getattr(opts, "cabling_reference", None) or "netbox"
+        self.cabling_reference = getattr(opts, "cabling_reference", None) or "both"
         self.load_latest()
         self.ufm_master = Path(getattr(opts, "ufm_master", None) or DEFAULT_UFM_MASTER)
         self.ufm_report = Path(getattr(opts, "ufm_report", None) or DEFAULT_UFM_REPORT)
@@ -752,8 +752,12 @@ class SyncState:
             ufm_report = ufm_cabling.read_ufm_compare(report_file) if report_file else None
         except (OSError, ValueError) as error:
             print("[netbox-live-sync] ignoring unreadable UFM compare report %s: %s" % (report_file, error))
-        if self.cabling_reference == "netbox":
-            # expected = NetBox, actual = UFM; the approved design cross-checks each difference
+        if self.cabling_reference == "both" and reference and reference.get("kind") == "approved design":
+            # expected = NetBox and the approved design together, actual = UFM live links
+            both = dict(nb_info, kind="NetBox + design", design_file=reference.get("file"))
+            report = ufm_cabling.analyse(path, nb_rows, None, master, ufm_report, both, rows, reference, combined=True)
+        elif self.cabling_reference in ("both", "netbox"):
+            # expected = NetBox, actual = UFM; the design (or the inferred rules) cross-checks each difference
             report = ufm_cabling.analyse(path, nb_rows, None, master, ufm_report, nb_info, rows, reference)
         else:
             report = ufm_cabling.analyse(path, nb_rows, rows, master, ufm_report, reference)
@@ -1590,9 +1594,9 @@ def main() -> int:
     parser.add_argument("--commands", type=Path, default=ASSETS_DIR / "read_only_commands.txt", help="Read-only command file (bundled by default).")
     parser.add_argument("--expected-topology", type=Path, default=DEFAULT_EXPECTED,
                         help="Designed topology the cabling check compares against (scripts/build_expected_topology.py writes it).")
-    parser.add_argument("--cabling-reference", choices=["netbox", "design"], default="netbox",
-                        help="Expected cabling for the miscabling check: NetBox cable records (default; the approved design "
-                             "cross-checks each difference) or the approved design topology (NetBox shown alongside).")
+    parser.add_argument("--cabling-reference", choices=["both", "netbox", "design"], default="both",
+                        help="Expected cabling for the miscabling check: NetBox and the approved design together (default), "
+                             "NetBox with the design as a cross-check, or the approved design alone (NetBox shown alongside).")
     parser.add_argument("--ufm-master", type=Path, default=DEFAULT_UFM_MASTER,
                         help="Local copy of UFM's master (reference) topology, periodicTopo/master.topo; fetch_ufm_scan.sh copies it.")
     parser.add_argument("--ufm-report", type=Path, default=DEFAULT_UFM_REPORT,
