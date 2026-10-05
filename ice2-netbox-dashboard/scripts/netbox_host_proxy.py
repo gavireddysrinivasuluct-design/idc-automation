@@ -9,7 +9,7 @@ LISTEN_PORT = int(os.environ.get("NETBOX_PROXY_PORT", "8444"))
 UPSTREAM_HOST = "127.0.0.1"
 UPSTREAM_PORT = int(os.environ.get("NETBOX_TSH_PORT", "8443"))
 REWRITE_HOST = os.environ.get(
-    "NETBOX_HOST_HEADER", "netbox-prod-europe-west2-netbox.nscale.teleport.sh"
+    "NETBOX_HOST_HEADER", "netbox.nscale.teleport.sh"
 )
 HOP_BY_HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailers", "transfer-encoding", "upgrade"}
 

@@ -6,7 +6,14 @@ script_dir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/netbox-mcp"
 tsh_port="${NETBOX_TSH_PORT:-8443}"
 proxy_port="${NETBOX_PROXY_PORT:-8444}"
-teleport_app="${NETBOX_TELEPORT_APP:-netbox-prod-europe-west2-netbox}"
+# The Teleport app that fronts NetBox (https://netbox.nscale.teleport.sh). Override for a
+# different app, e.g. NETBOX_TELEPORT_APP=netbox-prod-europe-west2-netbox, or set it once in
+# ~/.config/idc-automation/netbox.env (NETBOX_TELEPORT_APP=...).
+env_file="${XDG_CONFIG_HOME:-$HOME/.config}/idc-automation/netbox.env"
+[ -f "$env_file" ] && . "$env_file"
+teleport_app="${NETBOX_TELEPORT_APP:-netbox}"
+teleport_cluster="${NETBOX_TELEPORT_CLUSTER:-nscale.teleport.sh}"
+host_header="${NETBOX_HOST_HEADER:-$teleport_app.$teleport_cluster}"
 python_bin="${NETBOX_PROXY_PYTHON:-/usr/bin/python3}"
 mkdir -p "$state_dir"
 
@@ -17,10 +24,10 @@ start() {
   tsh status >/dev/null
   nohup tsh proxy app "$teleport_app" --port "$tsh_port" > "$state_dir/tsh.log" 2>&1 & echo $! > "$state_dir/tsh.pid"
   [ -x "$python_bin" ] || { echo "Python interpreter not found: $python_bin" >&2; exit 2; }
-  NETBOX_TSH_PORT="$tsh_port" NETBOX_PROXY_PORT="$proxy_port" nohup "$python_bin" "$script_dir/netbox_host_proxy.py" > "$state_dir/proxy.log" 2>&1 & echo $! > "$state_dir/proxy.pid"
+  NETBOX_TSH_PORT="$tsh_port" NETBOX_PROXY_PORT="$proxy_port" NETBOX_HOST_HEADER="$host_header" nohup "$python_bin" "$script_dir/netbox_host_proxy.py" > "$state_dir/proxy.log" 2>&1 & echo $! > "$state_dir/proxy.pid"
   for _ in {1..20}; do
     if is_running "$state_dir/tsh.pid" && is_running "$state_dir/proxy.pid"; then
-      echo "NetBox proxy is available at http://127.0.0.1:$proxy_port/."
+      echo "NetBox proxy is available at http://127.0.0.1:$proxy_port/ (Teleport app $teleport_app, https://$host_header)."
       return
     fi
     sleep 0.25
@@ -37,6 +44,7 @@ stop() {
   done
 }
 status() {
+  echo "app: $teleport_app (https://$host_header)"
   for name in tsh proxy; do
     if is_running "$state_dir/$name.pid"; then echo "$name: running (pid $(cat "$state_dir/$name.pid"))"; else echo "$name: stopped"; fi
   done
