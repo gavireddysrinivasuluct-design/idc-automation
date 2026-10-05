@@ -115,7 +115,7 @@ svg.hot .tile:not(.on):not(.nb){opacity:.35}
 .vt{font:600 10px var(--mono);letter-spacing:.06em}
 .rb{fill:none;stroke-linecap:round;transition:opacity .2s}
 .search{display:flex;gap:8px;align-items:center}
-.search input{font:13px var(--mono);padding:7px 10px;border:1px solid var(--line2);border-radius:6px;background:var(--panel);color:var(--fg);width:260px;max-width:60vw}
+.search input{font:13px var(--mono);padding:7px 10px;border:1px solid var(--line2);border-radius:6px;background:var(--panel);color:var(--fg);width:340px;max-width:60vw}
 .search input:focus-visible{outline:2px solid var(--edge);outline-offset:2px}
 .pgrid{display:grid;grid-template-columns:repeat(36,1fr);gap:2px}
 .pgrid i{display:block;aspect-ratio:1;border-radius:2px;background:#18263b}
@@ -181,6 +181,17 @@ ul.chk li#chk-live:not(.ok)::before{background:var(--lc)}
 .tt.err{fill:rgba(255,94,120,.2);stroke:#ff5e78;stroke-width:1.8}
 .tt.unn{fill:rgba(154,168,187,.12);stroke:#9aa8bb;stroke-dasharray:1.5 2}
 .tt.empty{fill:none;stroke:#22324a;stroke-dasharray:2 2}
+.tt.off{fill:rgba(12,22,36,.6);stroke:#2c3a50;stroke-dasharray:1 3}
+.ttile.dim .tn{fill:#4f6079}
+.podtab{cursor:pointer}.podtab rect{fill:#0c1624;stroke:#2d4566}.podtab.sel rect{fill:#142339;stroke:var(--edge)}.podtab text{fill:#8b9db6}.podtab.sel text{fill:#e7eef7}
+.podtab:focus-visible rect{stroke:var(--edge);stroke-width:2}
+.srchbox{position:relative}
+.srchres{position:absolute;top:calc(100% + 4px);left:0;z-index:30;min-width:420px;max-width:80vw;max-height:360px;overflow:auto;background:var(--panel2);border:1px solid var(--line2);border-radius:8px;box-shadow:0 10px 30px rgba(0,0,0,.45);padding:4px}
+.srchres button{all:unset;display:grid;grid-template-columns:auto 1fr auto;gap:2px 10px;width:calc(100% - 16px);padding:6px 8px;border-radius:6px;cursor:pointer;font:12.5px var(--mono);color:var(--fg)}
+.srchres button small{grid-column:2 / 4;color:var(--dim);font-size:11.5px}
+.srchres button em{font-style:normal;color:var(--dim);font-size:11px}
+.srchres button[aria-selected="true"],.srchres button:hover{background:#1b2d48}
+.srchres .k{font:600 10px var(--mono);letter-spacing:.08em;text-transform:uppercase;padding:1px 6px;border-radius:7px;border:1px solid currentColor;align-self:center}
 .tn{font:600 8px var(--mono);fill:#b8c7da;pointer-events:none}
 .sup{fill:#0d1828;stroke:#2d4566;stroke-width:1.1;transition:stroke .2s}
 svg.hot .supanel.on .sup{stroke:#e7eef7;stroke-width:1.6}
@@ -281,7 +292,7 @@ svg.ufm .lvlayer circle.lbadge{display:none}
 
 <div class="controls">
   <div class="chips" id="layers"></div>
-  <div class="search"><input id="q" list="dl" placeholder="Find bes7, bel12, gpu1300…" aria-label="Find a device"><datalist id="dl"></datalist><button class="btn" id="clr">Clear</button></div>
+  <div class="search"><span class="srchbox"><input id="q" list="dl" autocomplete="off" placeholder="Search: bel21, bes13, 10.1.97.80, gpu1345, nvl72d031-T04…" aria-label="Search devices" aria-controls="srchres" aria-autocomplete="list"><div class="srchres" id="srchres" role="listbox" hidden></div></span><datalist id="dl"></datalist><button class="btn" id="clr">Clear</button></div>
 </div>
 
 <div class="card rx">
@@ -760,45 +771,68 @@ const cablingFindingLabel = s => {
   return `${num(cables)} miscabled cable${cables === 1 ? '' : 's'}`;
 };
 const tileStyle = t => !t ? 'empty' : t.status === 'error' ? 'err' : t.status === 'incomplete' ? 'warn' : t.doc === 'documented' ? 'ok' : 'ufm';
-const TILE_TXT = {ok:'Documented in NetBox', ufm:'UFM-only · not documented in NetBox', warn:'Needs attention · a rail link is missing or not Active', err:'Wiring error · rail, slot or host mismatch', unn:'Adapter without a name · tray unknown', empty:'Empty slot · nothing connected'};
+const TILE_TXT = {off:'Designed · not on the fabric (powered off, unplugged or not installed)', ok:'Documented in NetBox', ufm:'UFM-only · not documented in NetBox', warn:'Needs attention · a rail link is missing or not Active', err:'Wiring error · rail, slot or host mismatch', unn:'Adapter without a name · tray unknown', empty:'Empty slot · nothing connected'};
 
+const designSlot = {};
+let podSel = 1; try { podSel = +localStorage.getItem('ice2-pod') || 1; } catch (e) {}
+const UPX = k => 40 + k*385, UPY = GY0 + 10, UPW = 365, UPH = 318;
+function slotState(su, slot) { const t = su.trays.find(x => x.slot === slot), un = su.unnamed.filter(u => u[0] === slot), design = (su.design || [])[slot] || '';
+  return {t, un, design, style: t ? tileStyle(t) : un.length ? 'unn' : design ? 'off' : 'empty'}; }
 function drawGPU() {
-  gUFM.innerHTML = ''; Object.keys(trayById).forEach(k => delete trayById[k]);
-  const H = GY0 + 4*POD_H + 10;
+  gUFM.innerHTML = ''; Object.keys(trayById).forEach(k => delete trayById[k]); Object.keys(slotInfo).forEach(k => delete slotInfo[k]); Object.keys(panelOf).forEach(k => delete panelOf[k]);
+  const H = UPY + UPH + 44;
   el('rect', {x:16, y:GY0 - 40, width:1568, height:H - GY0 + 30, rx:12, class:'zone'}, gUFM);
-  txt(gUFM, {x:30, y:GY0 - 23, class:'zl'}, 'GPU SCALABLE UNITS · NETBOX-DOCUMENTED CABLING · UFM-ONLY DISCOVERIES GREYED · 4 PODS × 4 SU × 72 SLOTS');
-  const lg = [['ok', 'documented in NetBox'], ['ufm', 'UFM-only · not documented'], ['warn', 'needs attention'], ['err', 'wiring error'], ['unn', 'unnamed adapter'], ['empty', 'empty slot']];
-  let lx = 760; lg.forEach(([k, t]) => { const x = lx; lx += 30 + t.length*6.3; el('rect', {x, y:GY0 - 33, width:13, height:13, rx:3, class:'tt ' + k}, gUFM); txt(gUFM, {x:x + 18, y:GY0 - 23, class:'rk', style:'fill:#8b9db6'}, t); });
-  for (let pod = 1; pod <= 4; pod++) txt(gUFM, {x:30, y:py2(pod) - 6, class:'nv', fill:'#8b9db6', style:'font-size:10.5px;letter-spacing:.14em'}, `POD ${pod} · BEL${(pod - 1)*16 + 1}–BEL${pod*16}`);
-  CAB.sus.forEach(su => {
-    const k = (su.su - 1) % 4, x = px2(k), y = py2(su.pod), g = el('g', {class:'supanel'}, gUFM); panelOf[su.su] = g;
-    const doc = su.trays.filter(t => t.doc === 'documented').length, miss = su.trays.filter(t => t.doc !== 'documented').length, att = su.trays.filter(t => t.status !== 'ok').length;
-    el('rect', {x, y, width:PW2, height:PH2, rx:10, class:'sup'}, g);
-    txt(g, {x:x + 12, y:y + 21, class:'nl', fill:'#e7eef7', style:'font-size:15px'}, 'SU' + su.su);
-    txt(g, {x:x + (su.su >= 10 ? 64 : 54), y:y + 20, class:'nh'}, `${su.trays.length}/72 trays · ${doc} in NetBox${att ? ` · ⚠ ${att}` : ''}${su.unnamed.length ? ` · ? ${su.unnamed.length}` : ''}`);
-    su.leaves.forEach((l, r) => { const ax = x + 12 + r*88; el('rect', {x:ax, y:y + 29, width:82, height:17, rx:8.5, fill:'#0c1624', stroke:R[r], 'stroke-opacity':.8}, g);
-      txt(g, {x:ax + 41, y:y + 41, class:'nv', fill:R[r], 'text-anchor':'middle', style:'font-size:9.5px'}, `R${r + 1} · BEL${l}`); });
-    const bySlot = {}; su.trays.forEach(t => { (bySlot[t.slot] ||= []).push(t); trayById['tray:' + t.code] = t; t.su = su.su; if (t.host) trayOfHost[sh(t.host)] = t.code; });
-    const unBySlot = {}; su.unnamed.forEach(u => (unBySlot[u[0]] ||= []).push(u));
-    const tw = 17, gap = (PW2 - 24 - 18*tw)/17, th = 25;
+  txt(gUFM, {x:30, y:GY0 - 23, class:'zl'}, 'GPU SCALABLE UNITS · NETBOX-DOCUMENTED CABLING · UFM-ONLY DISCOVERIES GREYED');
+  // every SU is indexed (search, inspector); the selected pod is drawn
+  CAB.sus.forEach(su => { su.trays.forEach(t => { trayById['tray:' + t.code] = t; t.su = su.su; if (t.host) trayOfHost[sh(t.host)] = t.code; if (t.design_host) trayOfHost[t.design_host] = trayOfHost[t.design_host] || t.code; });
+    for (let slot = 0; slot < 72; slot++) { const st = slotState(su, slot), id = st.t ? 'tray:' + st.t.code : `slot:${su.su}:${slot}`; slotInfo[id] = {su, slot, tray:st.t, unnamed:st.un, design:st.design, style:st.style};
+      if (st.design) designSlot[st.design] = id; } });
+  const lg = [['ok', 'documented in NetBox'], ['ufm', 'UFM-only · not documented'], ['warn', 'rail missing / not Active'], ['err', 'wiring error'], ['unn', 'unnamed adapter'], ['off', 'designed · not on fabric']];
+  let lx = 40; lg.forEach(([k, t]) => { const x = lx; lx += 40 + t.length*7; el('rect', {x, y:H - 25, width:13, height:13, rx:3, class:'tt ' + k}, gUFM); txt(gUFM, {x:x + 18, y:H - 15, class:'rk', style:'fill:#8b9db6'}, t); });
+  CAB.sus.filter(su => su.pod === podSel).forEach(su => {
+    const k = (su.su - 1) % 4, x = UPX(k), y = UPY, g = el('g', {class:'supanel'}, gUFM); panelOf[su.su] = g;
+    const off = (su.design || []).filter((h, i) => h && slotState(su, i).style === 'off').length, doc = su.trays.filter(t => t.doc === 'documented').length, att = su.trays.filter(t => t.status !== 'ok').length;
+    el('rect', {x, y, width:UPW, height:UPH, rx:12, class:'sup'}, g);
+    txt(g, {x:x + 14, y:y + 24, class:'nl', fill:'#e7eef7', style:'font-size:16px'}, 'SU' + su.su);
+    const hosts = (su.design || []).filter(Boolean);
+    txt(g, {x:x + 14, y:y + UPH - 12, class:'nh'}, `${su.trays.length}/72 on fabric${off ? ` · ${off} off` : ''} · ${doc} in NetBox${att ? ` · ⚠ ${att}` : ''}`);
+    if (hosts.length) txt(g, {x:x + UPW - 12, y:y + UPH - 12, class:'nh', 'text-anchor':'end'}, `${hosts[0]}–${hosts[hosts.length - 1].replace(/^gpu/, '')}`);
+    su.leaves.forEach((l, r) => { const ax = x + 22 + r*86, live = su.trays.filter(t => t.adapters.some(a => a[0] === r + 1 && a[5] === 'ok')).length, frac = live / 72;
+      el('rect', {x:ax, y:y + 34, width:78, height:20, rx:10, fill:'#0c1624', stroke:R[r], 'stroke-opacity':.8}, g);
+      txt(g, {x:ax + 39, y:y + 48, class:'nv', fill:R[r], 'text-anchor':'middle', style:'font-size:10px'}, `R${r + 1} · BEL${l}`);
+      const lx2 = LX(l) + LW/2, ly = LY + LH, bx = ax + 39, d = `M${bx},${y + 34} C${bx},${y - 20} ${lx2},${ly + 40} ${lx2},${ly}`;
+      el('path', {d, class:'rb', stroke:R[r], 'stroke-width': live ? 1.5 + 4*frac : 1.2, 'stroke-opacity': live ? .35 + .45*frac : .3, 'stroke-dasharray': live ? 'none' : '4 5'}, gUFM);
+      if (live) { const f = el('path', {d, class:'flow', stroke:'#fff', 'stroke-width':2}, gUFM); f.style.animationDelay = `${-(k*4 + r)*.23}s`; } });
+    const cols = 12, tw = 26, gap = (UPW - 24 - cols*tw)/(cols - 1);
     for (let slot = 0; slot < 72; slot++) {
-      const tx = x + 12 + (slot % 18)*(tw + gap), ty = y + 54 + Math.floor(slot/18)*(th + 4), t = (bySlot[slot] || [])[0], un = unBySlot[slot];
-      const style = t ? tileStyle(t) : un ? 'unn' : 'empty', id = t ? 'tray:' + t.code : `slot:${su.su}:${slot}`;
-      slotInfo[id] = {su, slot, tray:t, unnamed:un || [], style};
-      const tg = el('g', {class:'tile ttile', tabindex:0, 'aria-label':`SU${su.su} slot ${slot + 1}`}, g); tiles[id] = tg;
-      el('rect', {x:tx, y:ty, width:tw, height:th, rx:3, class:'bx tt ' + style}, tg);
-      txt(tg, {x:tx + tw/2, y:ty + 10, class:'tn', 'text-anchor':'middle'}, t ? trayNo(t.code) : un ? '?' : '');
-      if (t || un) for (let r = 1; r <= 4; r++) {
-        const ad = t ? t.adapters.find(a => a[0] === r) : null, u = !t && un.find(v => v[1] === r);
+      const tx = x + 12 + (slot % cols)*(tw + gap), ty = y + 66 + Math.floor(slot/cols)*36, st = slotState(su, slot), t = st.t, id = t ? 'tray:' + t.code : `slot:${su.su}:${slot}`;
+      const tg = el('g', {class:'tile ttile' + (st.style === 'off' || st.style === 'empty' ? ' dim' : ''), tabindex:0, 'aria-label':`SU${su.su} slot ${slot + 1}${st.design ? ' ' + st.design : ''}`}, g); tiles[id] = tg;
+      el('rect', {x:tx, y:ty, width:tw, height:31, rx:4, class:'bx tt ' + st.style}, tg);
+      const label = st.design ? st.design.replace(/^gpu/, '').slice(-2) : t ? trayNo(t.code) : st.un.length ? '?' : '';
+      txt(tg, {x:tx + tw/2, y:ty + 12, class:'tn', 'text-anchor':'middle'}, label);
+      if (t || st.un.length) for (let r = 1; r <= 4; r++) {
+        const ad = t ? t.adapters.find(a => a[0] === r) : null, u = !t && st.un.find(v => v[1] === r);
         const fill = ad ? (ad[6] ? (ad[5] === 'ok' ? R[r - 1] : CB.warn) : CB.ufm) : u ? CB.unn : 'none';
-        el('rect', {x:tx + 1.6 + (r - 1)*3.6, y:ty + 15, width:2.8, height:7, rx:.8, fill, stroke: fill === 'none' ? '#5b6d86' : 'none', 'stroke-width':.6}, tg);
+        el('rect', {x:tx + 3 + (r - 1)*5.5, y:ty + 18, width:4.5, height:8, rx:1.2, fill, stroke: fill === 'none' ? '#5b6d86' : 'none', 'stroke-width':.6}, tg);
       }
       hook(tg, id);
     }
   });
+  // pod tabs with per-pod counts
+  for (let pod = 1; pod <= 4; pod++) {
+    const sus = CAB.sus.filter(s => s.pod === pod), seen = sus.reduce((n, s) => n + s.trays.length, 0), off = sus.reduce((n, s) => n + (s.design || []).filter((h, i) => h && slotState(s, i).style === 'off').length, 0),
+      att = sus.reduce((n, s) => n + s.trays.filter(t => t.status !== 'ok').length, 0), x = 760 + (pod - 1)*205, y = GY0 - 36;
+    const g = el('g', {class:'podtab' + (pod === podSel ? ' sel' : ''), tabindex:0, role:'tab', 'aria-selected':pod === podSel, 'aria-label':`Pod ${pod}`}, gUFM);
+    el("rect", {x, y, width:200, height:22, rx:11}, g);
+    txt(g, {x:x + 12, y:y + 15, class:'nv', style:'font-size:10.5px'}, `POD ${pod} · ${seen} on${off ? ` · ${off} off` : ''}${att ? ` · ⚠${att}` : ''}`);
+    const tt = el('title', {}, g); tt.textContent = `Pod ${pod}: BEL${(pod - 1)*16 + 1}–BEL${pod*16}, SU${(pod - 1)*4 + 1}–SU${pod*4}. ${seen} trays on the fabric, ${off} designed but not on the fabric, ${att} needing attention.`;
+    const go = () => { podSel = pod; try { localStorage.setItem('ice2-pod', pod); } catch (e) {} drawGPU(); drawMis(); if (cur && tiles[cur]) hot(cur); };
+    g.addEventListener('click', go); g.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); go(); } });
+  }
   svg.setAttribute('viewBox', `0 0 1600 ${H}`);
   const dots = svg.querySelector('rect[fill="url(#dots)"]'); if (dots) dots.setAttribute('height', H);
 }
+function showPodOf(id) { const s = slotInfo[id]; if (s && s.su.pod !== podSel) { podSel = s.su.pod; try { localStorage.setItem('ice2-pod', podSel); } catch (e) {} drawGPU(); drawMis(); } }
 
 function drawMis() {
   gMis.innerHTML = ''; misBadges.splice(0).forEach(b => b.remove());
@@ -824,8 +858,9 @@ const _hot2 = hot; hot = function (id) { _hot2(id);
 // ---- tooltip + inspector ----
 const _tip2 = tipFor; tipFor = function (e, id) { _tip2(e, id); const s = slotInfo[id];
   if (s) { const t = s.tray;
-    tip.innerHTML = t ? `<b>${esc(t.host ? sh(t.host) : t.code)}</b>${t.host ? esc(t.code) + ' · ' : ''}SU${s.su.su} · slot ${s.slot + 1} · ${t.adapters.length}/4 rails<br><span style="color:${CB[s.style]}">● ${TILE_TXT[s.style]}</span>${t.issues.length ? '<br><span class="k">' + t.issues.slice(0, 3).map(esc).join('<br>') + '</span>' : ''}`
-      : s.unnamed.length ? `<b>SU${s.su.su} · slot ${s.slot + 1}${s.unnamed[0][6] ? ' · ' + esc(sh(s.unnamed[0][6])) + ' (UFM master)' : ''}</b><span style="color:${CB.unn}">● ${TILE_TXT.unn}</span><br><span class="k">${esc(s.unnamed[0][4])}</span>` : `<b>SU${s.su.su} · slot ${s.slot + 1}</b><span class="k">empty · no adapter on BEL${s.su.leaves.join('/')} port ${slotLabel(s.slot)}</span>`;
+    tip.innerHTML = t ? `<b>${esc(t.host ? sh(t.host) : t.design_host || t.code)}</b>${t.host || t.design_host ? esc(t.code) + ' · ' : ''}SU${s.su.su} · slot ${s.slot + 1} · ${t.adapters.length}/4 rails<br><span style="color:${CB[s.style]}">● ${TILE_TXT[s.style]}</span>${t.issues.length ? '<br><span class="k">' + t.issues.slice(0, 3).map(esc).join('<br>') + '</span>' : ''}`
+      : s.unnamed.length ? `<b>SU${s.su.su} · slot ${s.slot + 1}${s.unnamed[0][6] ? ' · ' + esc(sh(s.unnamed[0][6])) + ' (UFM master)' : ''}</b><span style="color:${CB.unn}">● ${TILE_TXT.unn}</span><br><span class="k">${esc(s.unnamed[0][4])}</span>` : s.design ? `<b>${esc(s.design)}</b>SU${s.su.su} · slot ${s.slot + 1} · BEL${s.su.leaves.join('/')} ${slotLabel(s.slot)}<br><span style="color:#8b9db6">● ${TILE_TXT.off}</span>`
+      : `<b>SU${s.su.su} · slot ${s.slot + 1}</b><span class="k">empty · no adapter on BEL${s.su.leaves.join('/')} port ${slotLabel(s.slot)}</span>`;
     tip.style.left = Math.min(e.clientX + 16, innerWidth - 380) + 'px'; tip.style.top = (e.clientY + 16) + 'px'; tip.hidden = false; return; }
   if (CAB && /^(bel|bes)\d+$/.test(id)) { const n = misFor(id).length; if (n) tip.insertAdjacentHTML('beforeend', `<br><span style="color:${CB.mis}">◆ ${n} miscabled cable${n > 1 ? 's' : ''} (UFM vs. design)</span>`); } };
 const slotLabel = slot => `sw${Math.floor(slot/2) + 1}p${slot % 2 + 1}`;
@@ -855,6 +890,9 @@ const misFor = id => (CAB ? CAB.switch_findings : []).filter(f => f.status === '
 const pill = (c, t) => `<span class="lpill" style="--c:${c}"><i></i>${t}</span>`;
 const stTxt = s => s === 'ok' ? pill(CB.ok, 'Active') : s === 'init' ? pill(CB.warn, 'initializing') : pill(CB.err, esc(s));
 function trayHtml(s) { const t = s.tray, su = s.su;
+  if (!t && !s.unnamed.length && s.design) return `<div class="role" style="color:#8b9db6">SU${su.su} · slot ${s.slot + 1} · port ${slotLabel(s.slot)}</div><h2>${esc(s.design.toUpperCase())}</h2>
+    <div class="live-sum" style="--c:#8b9db6"><b>Designed here, but not on the fabric</b><br>UFM sees no adapter on BEL${su.leaves.join(' / ')} port ${slotLabel(s.slot)}. The tray is probably powered off, unplugged, or not installed yet. It is not counted as a cabling error.</div>
+    <dl class="kv"><dt>Design host</dt><dd>${esc(s.design)} · ${esc((CAB.reference || {}).file || 'design')}</dd><dt>Expected</dt><dd>${su.leaves.map((l, r) => `R${r + 1} BEL${l}`).join(' · ')} on ${slotLabel(s.slot)}, adapters mlx5_0–mlx5_3</dd></dl>`;
   if (!t) return `<div class="role" style="color:${CB[s.style]}">SU${su.su} · slot ${s.slot + 1} · port ${slotLabel(s.slot)}</div><h2>${s.unnamed.length ? 'Unnamed adapter' : 'Empty slot'}</h2>
     <p class="small" style="margin:0">${s.unnamed.length ? 'UFM sees an adapter here but it has no node description, so the tray cannot be identified. Set the node description on the host (for example via the OS hostname service) and refetch the scan.' : 'No adapter is connected on this port of the SU’s four leaves.'}</p>
     ${s.unnamed.length && s.unnamed.some(u => u[6]) ? `<div class="live-sum" style="--c:${MCOL}"><b>UFM's master (${esc(mDate())}) names this tray: ${esc(sh(s.unnamed.find(u => u[6])[6]).toUpperCase())}</b><br><span class="small">The host has since lost its adapter node description; setting it again lets UFM identify the tray.</span></div>` : ''}${s.unnamed.length ? tbl(['Rail', 'Leaf', 'Port', 'Adapter as UFM sees it', 'State'], s.unnamed.map(u => [pill(R[u[1] - 1], 'R' + u[1]), lk('bel' + u[2], 'BEL' + u[2]), u[3], esc(u[4]), stTxt(u[5])])) : ''}`;
@@ -897,7 +935,7 @@ const _insp2 = inspect; inspect = function (id) {
     html += `<br>GPU downlinks seen by UFM: <b style="color:var(--fg)">${trs.length + su.unnamed.filter(u => u[2] === j).length}</b> · rail ${r} of SU${su.su} · ${doc} in NetBox${trs.length - doc ? ` · <span style="color:${CB.ufm}">${trs.length - doc} missing in NetBox</span>` : ''}${su.unnamed.filter(u => u[2] === j).length ? ` · ${su.unnamed.filter(u => u[2] === j).length} unnamed` : ''}`; } }
   box.innerHTML = html + `<span class="small"> · UFM scan ${esc(fmtTime(CAB.source.scanned_at))}</span>`;
   const after = insp.querySelector('.live-sum') || insp.querySelector('h2'); if (after) after.after(box); };
-const _pick2 = pick; pick = function (id) { if (ufmOn && /^gpu\d+$/.test(id) && trayOfHost[id]) id = 'tray:' + trayOfHost[id]; _pick2(id); };
+const _pick2 = pick; pick = function (id) { if (ufmOn && /^gpu\d+$/.test(id)) id = trayOfHost[id] ? 'tray:' + trayOfHost[id] : designSlot[id] || id; if (ufmOn) showPodOf(id); _pick2(id); };
 document.getElementById('q').addEventListener('change', e => { if (!ufmOn) return; const v = e.target.value.trim(); const t = trayById['tray:' + v] ? 'tray:' + v : trayOfHost[v.toLowerCase().replace(/^sys1-ice2-p-phy-/, '')] ? 'tray:' + trayOfHost[v.toLowerCase().replace(/^sys1-ice2-p-phy-/, '')] : null; if (t) pick(t); });
 
 // ---- the Cabling vs UFM card ----
@@ -1032,6 +1070,37 @@ async function fetchFromUfm() {
     poll();
   } catch (err) { ufmBusy = false; setUfmMsg(`<span style="color:${CB.err}">✗ ${esc(err.message)}</span>`); document.querySelectorAll('#ufm-fetch').forEach(b => b.disabled = false); } }
 document.addEventListener('click', e => { if (e.target.closest('#ufm-fetch')) fetchFromUfm(); });
+
+// ---- device search: switches, IPs, GPU trays by design host, NetBox host or UFM name ----
+{ const q = document.getElementById('q'), box = document.getElementById('srchres'); q.removeAttribute('list');
+  let hits = [], sel = -1;
+  const KCOL = {leaf:'#39c6e3', spine:'#a98bff', tray:'#38d9a0', off:'#8b9db6', gpu:'#38d9a0'};
+  function index() { const out = [], devs = LIVE.devices || {};
+    for (let j = 1; j <= 64; j++) { const h = 'sys1-ice2-p-swi-bel' + j, d = devs[h] || []; out.push({id:'bel' + j, kind:'leaf', title:'BEL' + j, sub:`${h}${d[0] ? ' · ' + d[0] : ''}${d[2] ? ' · ' + d[2] : ''}`, keys:[h, 'bel' + j, d[0] || ''], state:d[3] || ''}); }
+    for (let i = 1; i <= 36; i++) { const h = 'sys1-ice2-p-swi-bes' + i, d = devs[h] || []; out.push({id:'bes' + i, kind:'spine', title:'BES' + i, sub:`${h}${d[0] ? ' · ' + d[0] : ''}${d[2] ? ' · ' + d[2] : ''}`, keys:[h, 'bes' + i, d[0] || ''], state:d[3] || ''}); }
+    if (typeof ufmOn !== 'undefined' && ufmOn) Object.entries(slotInfo).forEach(([id, s]) => { const t = s.tray; if (!t && !s.design && !s.unnamed.length) return;
+      const name = s.design || (t && t.host ? sh(t.host) : t ? t.code : 'unnamed adapter');
+      out.push({id, kind: s.style === 'off' ? 'off' : 'tray', title:name, keys:[s.design, t && t.code, t && t.host, t && sh(t.host || ''), `su${s.su.su}`].filter(Boolean),
+        sub:`SU${s.su.su} slot ${s.slot + 1} · BEL${s.su.leaves.join('/')} ${slotLabel(s.slot)}${t ? ' · UFM ' + t.code : ''}${t && t.host ? ' · NetBox ' + sh(t.host) : ''}`, state: TILE_TXT[s.style] || ''}); });
+    else Object.keys(trBy || {}).forEach(n => out.push({id:'gpu' + n, kind:'gpu', title:'gpu' + n, sub:'sys1-ice2-p-phy-gpu' + n, keys:['gpu' + n, 'sys1-ice2-p-phy-gpu' + n], state:''}));
+    return out; }
+  function search(text) { const v = text.trim().toLowerCase().replace(/^sys1-ice2-p-(swi|phy)-/, ''); if (!v) return [];
+    return index().map(e => { const ks = e.keys.map(k => String(k).toLowerCase().replace(/^sys1-ice2-p-(swi|phy)-/, '').replace(/\/\d+$/, ''));
+        const score = ks.some(k => k === v) ? 0 : ks.some(k => k.startsWith(v)) ? 1 : ks.some(k => k.includes(v)) ? 2 : 9; return [score, e]; })
+      .filter(x => x[0] < 9).sort((a, b) => a[0] - b[0] || a[1].title.localeCompare(b[1].title, undefined, {numeric:true})).slice(0, 14).map(x => x[1]); }
+  function render() { box.hidden = !hits.length;
+    box.innerHTML = hits.map((e, n) => `<button type="button" role="option" aria-selected="${n === sel}" data-n="${n}"><span class="k" style="color:${KCOL[e.kind]}">${e.kind === 'off' ? 'not on fabric' : e.kind}</span><b>${esc(e.title)}</b><em>${esc(e.state)}</em><small>${esc(e.sub)}</small></button>`).join('')
+      + (q.value.trim() && !hits.length ? '' : ''); }
+  function choose(e) { if (!e) return; box.hidden = true; q.value = e.title; pick(e.id);
+    const t = tiles[e.id] || tiles[e.id.replace(/^gpu/, 'gpu')]; if (t && t.scrollIntoView) t.scrollIntoView({block:'center', behavior:'smooth'}); }
+  q.addEventListener('input', () => { hits = search(q.value); sel = hits.length ? 0 : -1; render(); });
+  q.addEventListener('keydown', e => { if (box.hidden && e.key !== 'Enter') return;
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); sel = (sel + (e.key === 'ArrowDown' ? 1 : hits.length - 1)) % hits.length; render(); }
+    else if (e.key === 'Enter') { e.preventDefault(); if (box.hidden) hits = search(q.value); choose(hits[Math.max(sel, 0)]); }
+    else if (e.key === 'Escape') { box.hidden = true; } });
+  box.addEventListener('mousedown', e => { const b = e.target.closest('button[data-n]'); if (b) { e.preventDefault(); choose(hits[+b.dataset.n]); } });
+  q.addEventListener('blur', () => setTimeout(() => { box.hidden = true; }, 150));
+  window.searchDevices = search; }
 
 // ---- Incidents (ranked, from /api/incidents) ----
 const SEV = {critical:['Critical','#ff5e78'], major:['Major','#ffb547'], minor:['Minor','#c9b458'], info:['Info','#9aa8bb']};

@@ -368,7 +368,8 @@ Sync complete in 34.2 s   devices 34.2 s ‖ IPs 0.0 s ‖ UFM 6.9 s
   - Leaf–spine links with a problem are drawn as dashed overlay lines.
   - A GPU port that is down is outlined, and its tray turns red.
   - The **Live status** chip turns this layer on or off.
-- **Hover or click** a spine, leaf or tray to trace its cables. Use the search box to find a device by name (for example `bel12` or `gpu1300`).
+- **Hover or click** a spine, leaf or tray to trace its cables.
+- **Search** (top of the page): type part of a hostname, short name, management IP, designed GPU host, NetBox host or UFM tray name, for example `bel21`, `bes13`, `10.1.97.80`, `gpu1345` or `nvl72d031-T04`. Results list the device type, where it is (SU, slot, leaf ports) and its state; use the arrow keys and Enter, or click. Choosing a GPU tray opens its pod and selects it.
 - **Inspector (right panel).**
   - A live summary for the selected device.
   - The device's NetBox **vendor, model, management IP and status**, taken from the most recent NetBox refresh. Clicking a device makes no NetBox call, so this works even when the NetBox proxy is down. A device not seen by any sync yet is looked up once, then remembered.
@@ -476,7 +477,7 @@ The command uses `local-inputs/ufm/nscale_Compute.topo` automatically when the f
 
 **What changes on the dashboard when a scan is loaded:**
 
-- **GPU area, redrawn from UFM.** It shows 4 pods × 4 scalable units × 72 tray slots, with every GPU tray in the slot where UFM actually sees it. Tile colours:
+- **GPU area, redrawn from UFM, one pod at a time.** The **POD 1–4** buttons switch pods and show how many trays are on the fabric, designed but off, and needing attention. Each pod shows its 4 scalable units with 72 tray slots each, and the rail-coloured bundles from its 16 leaves: a bundle is thicker the more trays on that rail are Active, and dashed when none are. Each tile is labelled with the last two digits of the slot's **designed host** from `nscale_Compute.topo` (`56` = gpu1256), and sits in the slot where UFM actually sees a tray. Tile colours:
 
   | Tile | Meaning |
   | --- | --- |
@@ -485,7 +486,8 @@ The command uses `local-inputs/ufm/nscale_Compute.topo` automatically when the f
   | Amber | A rail link is missing or not Active |
   | Red | Wiring error: wrong rail, slot or host |
   | Grey `?` | The adapter has no name, so the tray can't be identified |
-  | Faint | Empty slot |
+  | Grey, dashed, dim number | **Designed but not on the fabric**: the approved design has a host here, but UFM sees no adapter. The tray is probably powered off, unplugged or not installed; it is not counted as a cabling error. |
+  | Faint | Empty slot (no design host, nothing seen) |
 
   The four small bars in each tile are the tray's rails 1–4. Click a tray to see its four links, adapter by adapter, with the NetBox cable for each. UFM-only details stay grey so they are clearly distinct from the NetBox cabling record.
 - **Leaves** take their rail colour; documented GPU downlinks are rail-coloured, and UFM-only GPU discoveries are grey.

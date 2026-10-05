@@ -558,6 +558,14 @@ def analyse(scan: Path, baseline: list[dict], expected: list[dict] | None = None
     for item in unnamed:
         sus[item["su"]]["unnamed"].append([item["slot"], item["rail"], item["leaf"], item["port"], item["adapter"], item["state"], item["master_host"]])
     for su in sus.values():
+        # designed host per slot (approved design only; the inferred rules name slots, not hosts)
+        design = []
+        for slot in range(72):
+            label = "sw%dp%d" % (slot // 2 + 1, slot % 2 + 1)
+            hosts = [exp_gpu.get(("sys1-ice2-p-swi-bel%d" % l, label), ("",))[0] for l in su["leaves"]]
+            named = [h for h in hosts if h and not h.startswith("SU")]
+            design.append(named[0] if named else "")
+        su["design"] = design
         su["trays"].sort(key=lambda t: (t["slot"] if t["slot"] is not None else 99, t["code"]))
         su["unnamed"].sort(key=lambda u: (u[0] if u[0] is not None else 99, u[1]))
     gpu_not_seen = []
