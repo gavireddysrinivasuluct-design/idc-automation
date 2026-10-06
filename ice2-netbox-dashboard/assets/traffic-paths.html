@@ -87,6 +87,9 @@ header{display:grid;gap:16px}
 .s-txt{fill:var(--muted);font:500 8.5px var(--mono)}
 .s-lbl{fill:var(--muted);font:600 10px var(--mono);letter-spacing:.14em}
 .s-big{fill:var(--ink);font:700 13px var(--display)}
+.s-tag{font:700 13px var(--mono);letter-spacing:.02em}
+.s-tagbg{fill:var(--panel);stroke-width:1.4}
+.steps code{font-size:11px}
 .s-mesh{stroke:var(--mesh);stroke-width:.5;opacity:.28}
 .s-panel{fill:var(--panel2);stroke:var(--line)}
 .s-rack{fill:var(--panel);stroke:var(--line)}
@@ -148,6 +151,7 @@ footer{font-size:12.5px;color:var(--muted);border-top:1px solid var(--line);padd
       <select id="sSu" aria-label="Source SU"></select><select id="sRack" aria-label="Source rack"></select><select id="sTray" aria-label="Source tray"></select><select id="sGpu" aria-label="Source GPU"></select></fieldset>
     <fieldset><legend>To</legend>
       <select id="dSu" aria-label="Destination SU"></select><select id="dRack" aria-label="Destination rack"></select><select id="dTray" aria-label="Destination tray"></select><select id="dGpu" aria-label="Destination GPU"></select></fieldset>
+    <span class="mono" id="leafnote" style="font-size:12px;color:var(--muted)"></span>
     <label class="toggle"><input type="checkbox" id="pxn" checked> NCCL PXN (rail-align over NVLink first)</label>
   </div>
   <div class="stage">
@@ -317,15 +321,15 @@ function route(s, d, pxn) {
   else steps.push({c:RC[rs - 1], t:lbl(s), n:`Sends from its own port, mlx5_${rs - 1} (rail ${rs}).`});
   const a = gp(src), lt = leafBot(L1);
   segs.push({c:RC[rs - 1], d:`M${a[0]},${a[1]} C${a[0]},${PY - 60} ${lt[0]},${PY - 40} ${lt[0]},${lt[1]}`});
-  steps.push({c:RC[rs - 1], t:`BEL${L1}`, n:`Rail ${rs} leaf of SU${src.su}. All 72 trays of SU${src.su} put their GPU ${rs} on this leaf.`});
+  steps.push({c:RC[rs - 1], t:`BEL${L1}`, h:`sys1-ice2-p-swi-bel${L1}`, n:`Rail ${rs} leaf of SU${src.su}. All 72 trays of SU${src.su} put their GPU ${rs} on this leaf.`});
   let spine = null, hops = 1, kind;
   if (L1 === L2) { kind = 'same SU · same rail'; }
   else {
     spine = 1 + ((L1 * 7 + L2 * 13 + s.tray * 5 + d.tray * 3) % 36); hops = 3;
     const p1 = leafTop(L1), p2 = leafTop(L2), sp = [spineX(spine), SPY + SPH];
     segs.push({c:'var(--spine)', d:`M${p1[0]},${p1[1]} L${sp[0]},${sp[1]}`}, {c:'var(--spine)', d:`M${sp[0]},${sp[1]} L${p2[0]},${p2[1]}`});
-    steps.push({c:'var(--spine)', t:`BES${spine} (or any of the 36)`, n:`Uplink BEL${L1} sw${36 + spine}p1/p2 → BES${spine} sw${L1}p1/p2. UFM's adaptive routing spreads flows over all 72 uplinks.`},
-               {c:RC[rd - 1], t:`BEL${L2}`, n:`Down on BES${spine} sw${L2}p1/p2 to the rail ${rd} leaf of SU${d.su}.`});
+    steps.push({c:'var(--spine)', t:`BES${spine} (or any of the 36)`, h:`sys1-ice2-p-swi-bes${spine}`, n:`Uplink BEL${L1} sw${36 + spine}p1/p2 → BES${spine} sw${L1}p1/p2. UFM's adaptive routing spreads flows over all 72 uplinks.`},
+               {c:RC[rd - 1], t:`BEL${L2}`, h:`sys1-ice2-p-swi-bel${L2}`, n:`Down on BES${spine} sw${L2}p1/p2 to the rail ${rd} leaf of SU${d.su}.`});
     kind = s.su === d.su ? 'same SU · different rail' : Math.ceil(s.su / 4) === Math.ceil(d.su / 4) ? 'different SU · same pod' : 'different pod';
   }
   const b = gp(d), lb = leafBot(L2);
@@ -359,6 +363,7 @@ function setPreset(i) { const p = PRESETS[i];
   [['sSu','sRack','sTray','sGpu'], ['dSu','dRack','dTray','dGpu']].forEach((ids, side) => ids.forEach((id, k) => { $(id).value = (side ? p.d : p.s)[k] - (k === 0 ? 1 : 0); }));
   if (i === 2) $('pxn').checked = false;
   render(i); }
+const leafNote = () => { const s = read('s'), d = read('d'); return `source on BEL${leafOf(s.su, s.gpu + 1)} · destination on BEL${leafOf(d.su, d.gpu + 1)}`; };
 const read = pre => ({su:+$(pre + 'Su').value + 1, rack:+$(pre + 'Rack').value, tray:+$(pre + 'Tray').value, gpu:+$(pre + 'Gpu').value});
 ['sSu','sRack','sTray','sGpu','dSu','dRack','dTray','dGpu','pxn'].forEach(id => $(id).addEventListener('change', () => render(-1)));
 
@@ -366,6 +371,7 @@ let anim = null;
 function render(presetIdx) {
   [...pb.children].forEach((b, i) => b.setAttribute('aria-pressed', i === presetIdx ? 'true' : 'false'));
   const s = read('s'), d = read('d');
+  document.getElementById('leafnote').textContent = leafNote();
   drawPanels(s.su === d.su ? [s.su] : [s.su, d.su].sort((a, b) => a - b));
   const r = route(s, d, $('pxn').checked);
   // highlight nodes
@@ -376,6 +382,13 @@ function render(presetIdx) {
   // paths
   gPath.innerHTML = ''; gPkt.innerHTML = '';
   if (r.spine) r.leaves.forEach(j => { for (let i = 1; i <= 36; i += 1) if (i !== r.spine) el('line', {x1:leafX(j), y1:LY, x2:spineX(i), y2:SPY + SPH, class:'fan'}, gPath); });
+  // name the switches on the path
+  const tag = (x, y, text, color) => { const w = text.length * 8.4 + 16, g = el('g', {}, gPath);
+    el('rect', {x:x - w / 2, y:y - 13, width:w, height:20, rx:10, class:'s-tagbg', stroke:color}, g);
+    const t = el('text', {x, y:y + 2.5, 'text-anchor':'middle', class:'s-tag', fill:color}, g); t.textContent = text; };
+  const pathLeaves = [...new Set(r.leaves || [])];
+  pathLeaves.forEach((j, k) => tag(leafX(j), LY + LH + 30 + (pathLeaves.length > 1 && Math.abs(leafX(pathLeaves[0]) - leafX(pathLeaves[1])) < 60 ? k * 20 : 0), 'BEL' + j, RC[railOfLeaf(j) - 1]));
+  if (r.spine) tag(spineX(r.spine), SPY + SPH + 16, 'BES' + r.spine, 'var(--hot)');
   const paths = r.segs.map(sg => { el('path', {d:sg.d, class:'halo', stroke:sg.c}, gPath); return el('path', {d:sg.d, class:'path', stroke:sg.c}, gPath); });
   (r.ends || []).forEach((e, k) => { el('rect', {x:e[0] - 8, y:e[1] - 7, width:16, height:14, rx:4, fill:'none', stroke:'var(--hot)', 'stroke-width':2}, gPath);
     el('text', {x:e[0] + 11, y:e[1] + 3.5, class:'s-txt', style:'fill:var(--hot);font-weight:600'}, gPath).textContent = k ? 'to' : 'from'; });
@@ -383,7 +396,7 @@ function render(presetIdx) {
   const hopsTxt = r.hopsTxt || '';
   $('route').innerHTML = `<div class="verdict"><span class="kind" style="color:${r.kc || 'var(--muted)'}">${r.kind}</span>
     <div class="hops"><b>${r.hops}</b><span>${hopsTxt}</span></div></div>
-    <ol class="steps">${r.steps.map((st, i) => `<li><span class="dot" style="background:${st.c}">${i + 1}</span><div><b>${st.t}</b><small>${st.n}</small></div></li>`).join('')}</ol>
+    <ol class="steps">${r.steps.map((st, i) => `<li><span class="dot" style="background:${st.c}">${i + 1}</span><div><b>${st.t}</b>${st.h ? `<small><code>${st.h}</code></small>` : ''}<small>${st.n}</small></div></li>`).join('')}</ol>
     <div class="why">${r.why}</div>`;
   // packet animation along the whole route
   if (anim) cancelAnimationFrame(anim);
