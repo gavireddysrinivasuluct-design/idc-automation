@@ -292,6 +292,29 @@ def gpu(out: Incidents, r: dict, history: dict) -> None:
         out.add("minor", "gpu", n(len(planes), "GPU tray") + " with links not fully active", "Reduced bandwidth on one or more adapters.",
                 "Check the listed adapter ports.", evidence=["%s: %s" % (l, "; ".join(t["issues"])) for l, t in planes])
 
+    # NVL72 racks: 4 per SU, 18 trays each (slots 1-18, 19-36, 37-54, 55-72)
+    racks = [(su["su"], rk) for su in r["sus"] for rk in su.get("racks", [])]
+    rname = lambda su, rk: "SU%d rack %d%s" % (su, rk["pos"], " (%s)" % rk["name"] if rk["name"] else "")
+    split = [(su, rk) for su, rk in racks if rk["state"] == "split"]
+    if split:
+        out.add("major", "gpu", n(len(split), "NVL72 rack position") + " holding trays of more than one rack",
+                "A rack's 18 trays share one NVLink domain and should land on one rack position of one SU. Split racks put "
+                "NVLink peers on different leaves or SUs, so rail-local traffic crosses the spines.",
+                "Re-patch the trays to their rack's position (Cabling vs UFM, trays needing attention).",
+                evidence=["%s: %s" % (rname(su, rk), "; ".join(rk["issues"])) for su, rk in split])
+    dark = [(su, rk) for su, rk in racks if rk["off"] >= 9]
+    if dark:
+        out.add("major", "gpu", n(len(dark), "NVL72 rack") + " mostly off the fabric",
+                "Half or more of the rack's designed trays have no adapter in UFM: the rack is probably powered off or being serviced.",
+                "Confirm with the DC team whether the rack is in maintenance.",
+                evidence=["%s: %d of 18 designed trays not seen (%s)" % (rname(su, rk), rk["off"], "–".join(rk["hosts"])) for su, rk in dark])
+    nameless = [(su, rk) for su, rk in racks if rk["state"] == "unnamed"]
+    if nameless:
+        out.add("info", "documentation", n(len(nameless), "NVL72 rack") + " whose trays UFM cannot name",
+                "Every adapter in the rack position is up but has no node description, so the rack and its trays cannot be identified.",
+                "Set the node description on these hosts and refetch from UFM.",
+                evidence=["%s: %d unnamed trays · design hosts %s" % (rname(su, rk), rk["unnamed"], "–".join(rk["hosts"])) for su, rk in nameless])
+
     # trays that disappeared since they were last seen
     now = r["source"]["scanned_at"]
     current = {code for _, _, code in r.get("gpu_ports_seen", [])}

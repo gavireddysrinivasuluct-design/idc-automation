@@ -36,6 +36,7 @@ UFM_HOST = re.compile(r"-ufm\d", re.I)
 LEAF = re.compile(r"-bel(\d+)$")
 SPINE = re.compile(r"-bes(\d+)$")
 PLANES = 4
+RACK_TRAYS = 18  # NVL72: 18 compute trays per rack, 4 racks per SU
 
 
 def port_label(number: int) -> str:
@@ -646,6 +647,38 @@ def analyse(scan: Path, baseline: list[dict], expected: list[dict] | None = None
         su["design"] = design
         su["trays"].sort(key=lambda t: (t["slot"] if t["slot"] is not None else 99, t["code"]))
         su["unnamed"].sort(key=lambda u: (u[0] if u[0] is not None else 99, u[1]))
+    # ---- NVL72 racks: each SU's 72 slots are 4 racks of 18 (slots 1-18, 19-36, 37-54, 55-72).
+    # UFM names trays <rack>-T<n>; a rack whose trays sit in two blocks, or a block holding
+    # trays of two racks, is a cabling error (the rack's GPUs would span SUs or rails).
+    rack_blocks = collections.defaultdict(set)
+    for su in sus.values():
+        for t in su["trays"]:
+            m = re.match(r"^(.*)-T(\d+)$", t["code"])
+            if m and t["slot"] is not None:
+                rack_blocks[m.group(1)].add((su["su"], t["slot"] // RACK_TRAYS))
+    rack_counts = collections.Counter()
+    for su in sus.values():
+        su["racks"] = []
+        for pos in range(4):
+            lo, hi = pos * RACK_TRAYS, (pos + 1) * RACK_TRAYS
+            trs = [t for t in su["trays"] if t["slot"] is not None and lo <= t["slot"] < hi]
+            names = collections.Counter(re.sub(r"-T\d+$", "", t["code"]) for t in trs)
+            n_unnamed = len({x[0] for x in su["unnamed"] if x[0] is not None and lo <= x[0] < hi})
+            hosts = [h for h in su["design"][lo:hi] if h]
+            off = sum(1 for i in range(lo, hi) if su["design"][i] and not any(t["slot"] == i for t in trs)
+                      and not any(x[0] == i for x in su["unnamed"]))
+            name = names.most_common(1)[0][0] if names else ""
+            issues = []
+            if len(names) > 1:
+                issues.append("trays of %d racks in one rack position: %s" % (len(names), ", ".join("%s (%d)" % kv for kv in names.most_common())))
+            if name and len(rack_blocks[name]) > 1:
+                issues.append("%s also has trays in %s" % (name, ", ".join("SU%d rack %d" % (a, b + 1) for a, b in sorted(rack_blocks[name]) if (a, b) != (su["su"], pos))))
+            state = "split" if issues else "empty" if not trs and not n_unnamed else "unnamed" if not trs else "ok"
+            rack_counts["racks-" + state] += 1
+            su["racks"].append({"pos": pos + 1, "name": name, "slots": [lo, hi - 1], "trays": len(trs), "unnamed": n_unnamed,
+                                "off": off, "attention": sum(1 for t in trs if t["status"] != "ok"),
+                                "documented": sum(1 for t in trs if t["doc"] == "documented"),
+                                "hosts": [hosts[0], hosts[-1]] if hosts else [], "state": state, "issues": issues})
     gpu_not_seen = []
     seen_ports = {(f"sys1-ice2-p-swi-bel{ad['leaf']}", ad["port"]) for ads in trays.values() for ad in ads}
     seen_ports |= {(f"sys1-ice2-p-swi-bel{u['leaf']}", u["port"]) for u in unnamed}
@@ -670,6 +703,8 @@ def analyse(scan: Path, baseline: list[dict], expected: list[dict] | None = None
         "gpu_links_undocumented": gpu_counts["adapters"] - gpu_counts["adapters-documented"],
         "gpu_not_seen": len(gpu_not_seen), "unnamed_adapters": len(unnamed),
         "netbox_gpu_cables": len(nb_gpu),
+        "racks_named": len(rack_blocks), "rack_positions": 16 * 4, "racks_split": rack_counts["racks-split"],
+        "racks_unnamed": rack_counts["racks-unnamed"], "racks_empty": rack_counts["racks-empty"],
     }
     master_summary = None
     if master:

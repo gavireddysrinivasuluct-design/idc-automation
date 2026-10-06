@@ -1497,6 +1497,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if path in {"/", "/index.html"}:
                 self.respond(HTTPStatus.OK, self.diagram.read_text(encoding="utf-8"), "text/html; charset=utf-8")
+            elif path in {"/traffic-paths.html", "/paths"}:
+                self.respond(HTTPStatus.OK, (ASSETS_DIR / "traffic-paths.html").read_text(encoding="utf-8"), "text/html; charset=utf-8")
             elif path == "/api/cabling":
                 payload = self.state.cabling_payload()
                 if payload is None:  # not an error: nothing fetched yet

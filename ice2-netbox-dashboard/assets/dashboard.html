@@ -185,6 +185,8 @@ ul.chk li#chk-live:not(.ok)::before{background:var(--lc)}
 .ttile.dim .tn{fill:#4f6079}
 .podtab{cursor:pointer}.podtab rect{fill:#0c1624;stroke:#2d4566}.podtab.sel rect{fill:#142339;stroke:var(--edge)}.podtab text{fill:#8b9db6}.podtab.sel text{fill:#e7eef7}
 .podtab:focus-visible rect{stroke:var(--edge);stroke-width:2}
+.rackhd{cursor:pointer}.rackhd .rb2{fill:rgba(169,139,255,.05);stroke:rgba(169,139,255,.35);stroke-dasharray:2 3}.rackhd text{fill:#b9a6ff}.rackhd.on .rb2,.rackhd.nb .rb2,.rackhd:hover .rb2{fill:rgba(169,139,255,.14);stroke:#a98bff;stroke-dasharray:none}.rackhd.split .rb2{stroke:#ff5e78;stroke-dasharray:none}.rackhd.split text{fill:#ff5e78}
+.rackhd:focus-visible .rb2{stroke:#a98bff;stroke-width:2}
 .srchbox{position:relative}
 .srchres{position:absolute;top:calc(100% + 4px);left:0;z-index:30;min-width:420px;max-width:80vw;max-height:360px;overflow:auto;background:var(--panel2);border:1px solid var(--line2);border-radius:8px;box-shadow:0 10px 30px rgba(0,0,0,.45);padding:4px}
 .srchres button{all:unset;display:grid;grid-template-columns:auto 1fr auto;gap:2px 10px;width:calc(100% - 16px);padding:6px 8px;border-radius:6px;cursor:pointer;font:12.5px var(--mono);color:var(--fg)}
@@ -277,7 +279,7 @@ svg.ufm .lvlayer circle.lbadge{display:none}
     <h1>ICE2 Backend GPU Fabric <span>/ spine · leaf · rail</span></h1>
     <p class="sub">A two-tier rail-optimised fabric: 64 leaves fully meshed to 36 spines, and every GPU tray landing its four RDMA ports on four different leaves. Hover or click a spine, leaf or tray to trace it; every port pair comes from the NetBox cable export, and every link is coloured by its live switch-side state. Press <b>Sync fabric</b> to re-collect the 100 backend switches and fetch what UFM sees; <b>Refresh NetBox</b> updates the NetBox inventory and cable records.</p>
   </div>
-  <div class="meta" style="margin-left:auto">5,424 fabric cables<br>4,608 spine · 816 GPU</div>
+  <div class="meta" style="margin-left:auto">5,424 fabric cables<br>4,608 spine · 816 GPU<br><a class="btn" href="traffic-paths.html" target="_blank" rel="noopener" style="margin-top:8px;display:inline-block" title="How GPUs talk inside a rack, across rails, SUs and pods">How traffic flows ↗</a></div>
 </header>
 
 <div class="sync" id="sync" role="status" aria-live="polite">
@@ -292,7 +294,7 @@ svg.ufm .lvlayer circle.lbadge{display:none}
 
 <div class="controls">
   <div class="chips" id="layers"></div>
-  <div class="search"><span class="srchbox"><input id="q" list="dl" autocomplete="off" placeholder="Search: bel21, bes13, 10.1.97.80, gpu1345, nvl72d031-T04…" aria-label="Search devices" aria-controls="srchres" aria-autocomplete="list"><div class="srchres" id="srchres" role="listbox" hidden></div></span><datalist id="dl"></datalist><button class="btn" id="clr">Clear</button></div>
+  <div class="search"><span class="srchbox"><input id="q" list="dl" autocomplete="off" placeholder="Search: bel21, bes13, 10.1.97.80, gpu1345, nvl72d031, nvl72d031-T04…" aria-label="Search devices" aria-controls="srchres" aria-autocomplete="list"><div class="srchres" id="srchres" role="listbox" hidden></div></span><datalist id="dl"></datalist><button class="btn" id="clr">Clear</button></div>
 </div>
 
 <div class="card rx">
@@ -775,7 +777,8 @@ const TILE_TXT = {off:'Designed · not on the fabric (powered off, unplugged or 
 
 const designSlot = {};
 let podSel = 1; try { podSel = +localStorage.getItem('ice2-pod') || 1; } catch (e) {}
-const UPX = k => 40 + k*385, UPY = GY0 + 10, UPW = 365, UPH = 318;
+const UPX = k => 40 + k*385, UPY = GY0 + 10, UPW = 365, UPH = 340;
+const RACKS = {}, rackId = (su, pos) => `rack:${su}:${pos}`, rackShort = n => n ? n.replace(/^nvl72/, '') : 'unnamed';
 function slotState(su, slot) { const t = su.trays.find(x => x.slot === slot), un = su.unnamed.filter(u => u[0] === slot), design = (su.design || [])[slot] || '';
   return {t, un, design, style: t ? tileStyle(t) : un.length ? 'unn' : design ? 'off' : 'empty'}; }
 function drawGPU() {
@@ -786,7 +789,8 @@ function drawGPU() {
   // every SU is indexed (search, inspector); the selected pod is drawn
   CAB.sus.forEach(su => { su.trays.forEach(t => { trayById['tray:' + t.code] = t; t.su = su.su; if (t.host) trayOfHost[sh(t.host)] = t.code; if (t.design_host) trayOfHost[t.design_host] = trayOfHost[t.design_host] || t.code; });
     for (let slot = 0; slot < 72; slot++) { const st = slotState(su, slot), id = st.t ? 'tray:' + st.t.code : `slot:${su.su}:${slot}`; slotInfo[id] = {su, slot, tray:st.t, unnamed:st.un, design:st.design, style:st.style};
-      if (st.design) designSlot[st.design] = id; } });
+      if (st.design) designSlot[st.design] = id; }
+    (su.racks || []).forEach(rk => { RACKS[rackId(su.su, rk.pos)] = {su, rk}; }); });
   const lg = [['ok', 'documented in NetBox'], ['ufm', 'UFM-only · not documented'], ['warn', 'rail missing / not Active'], ['err', 'wiring error'], ['unn', 'unnamed adapter'], ['off', 'designed · not on fabric']];
   let lx = 40; lg.forEach(([k, t]) => { const x = lx; lx += 40 + t.length*7; el('rect', {x, y:H - 25, width:13, height:13, rx:3, class:'tt ' + k}, gUFM); txt(gUFM, {x:x + 18, y:H - 15, class:'rk', style:'fill:#8b9db6'}, t); });
   CAB.sus.filter(su => su.pod === podSel).forEach(su => {
@@ -803,9 +807,14 @@ function drawGPU() {
       const lx2 = LX(l) + LW/2, ly = LY + LH, bx = ax + 39, d = `M${bx},${y + 34} C${bx},${y - 20} ${lx2},${ly + 40} ${lx2},${ly}`;
       el('path', {d, class:'rb', stroke:R[r], 'stroke-width': live ? 1.5 + 4*frac : 1.2, 'stroke-opacity': live ? .35 + .45*frac : .3, 'stroke-dasharray': live ? 'none' : '4 5'}, gUFM);
       if (live) { const f = el('path', {d, class:'flow', stroke:'#fff', 'stroke-width':2}, gUFM); f.style.animationDelay = `${-(k*4 + r)*.23}s`; } });
-    const cols = 12, tw = 26, gap = (UPW - 24 - cols*tw)/(cols - 1);
+    const RG = 8, gw = (UPW - 24 - 3*RG)/4, tw = 24, gap = (gw - 3*tw)/2;
+    (su.racks || []).forEach(rk => { const gx = x + 12 + (rk.pos - 1)*(gw + RG), id = rackId(su.su, rk.pos);
+      const hg = el('g', {class:'rackhd' + (rk.state === 'split' ? ' split' : ''), tabindex:0, 'aria-label':`SU${su.su} rack ${rk.pos} ${rk.name || 'unnamed'}`}, g); tiles[id] = hg;
+      el('rect', {x:gx - 3, y:y + 62, width:gw + 6, height:6*36 + 22, rx:6, class:'rb2'}, hg);
+      txt(hg, {x:gx + gw/2, y:y + 75, class:'nv', 'text-anchor':'middle', style:'font-size:8.5px;letter-spacing:0'}, `${rackShort(rk.name)} · ${rk.trays}${rk.unnamed ? '+' + rk.unnamed + '?' : ''}/18`);
+      hook(hg, id); });
     for (let slot = 0; slot < 72; slot++) {
-      const tx = x + 12 + (slot % cols)*(tw + gap), ty = y + 66 + Math.floor(slot/cols)*36, st = slotState(su, slot), t = st.t, id = t ? 'tray:' + t.code : `slot:${su.su}:${slot}`;
+      const rp = Math.floor(slot/18), ps = slot % 18, tx = x + 12 + rp*(gw + RG) + (ps % 3)*(tw + gap), ty = y + 82 + Math.floor(ps/3)*36, st = slotState(su, slot), t = st.t, id = t ? 'tray:' + t.code : `slot:${su.su}:${slot}`;
       const tg = el('g', {class:'tile ttile' + (st.style === 'off' || st.style === 'empty' ? ' dim' : ''), tabindex:0, 'aria-label':`SU${su.su} slot ${slot + 1}${st.design ? ' ' + st.design : ''}`}, g); tiles[id] = tg;
       el('rect', {x:tx, y:ty, width:tw, height:31, rx:4, class:'bx tt ' + st.style}, tg);
       const label = st.design ? st.design.replace(/^gpu/, '').slice(-2) : t ? trayNo(t.code) : st.un.length ? '?' : '';
@@ -813,7 +822,7 @@ function drawGPU() {
       if (t || st.un.length) for (let r = 1; r <= 4; r++) {
         const ad = t ? t.adapters.find(a => a[0] === r) : null, u = !t && st.un.find(v => v[1] === r);
         const fill = ad ? (ad[6] ? (ad[5] === 'ok' ? R[r - 1] : CB.warn) : CB.ufm) : u ? CB.unn : 'none';
-        el('rect', {x:tx + 3 + (r - 1)*5.5, y:ty + 18, width:4.5, height:8, rx:1.2, fill, stroke: fill === 'none' ? '#5b6d86' : 'none', 'stroke-width':.6}, tg);
+        el('rect', {x:tx + 2.5 + (r - 1)*5, y:ty + 18, width:4, height:8, rx:1.2, fill, stroke: fill === 'none' ? '#5b6d86' : 'none', 'stroke-width':.6}, tg);
       }
       hook(tg, id);
     }
@@ -832,7 +841,7 @@ function drawGPU() {
   svg.setAttribute('viewBox', `0 0 1600 ${H}`);
   const dots = svg.querySelector('rect[fill="url(#dots)"]'); if (dots) dots.setAttribute('height', H);
 }
-function showPodOf(id) { const s = slotInfo[id]; if (s && s.su.pod !== podSel) { podSel = s.su.pod; try { localStorage.setItem('ice2-pod', podSel); } catch (e) {} drawGPU(); drawMis(); } }
+function showPodOf(id) { const s = slotInfo[id] || RACKS[id]; if (s && s.su.pod !== podSel) { podSel = s.su.pod; try { localStorage.setItem('ice2-pod', podSel); } catch (e) {} drawGPU(); drawMis(); } }
 
 function drawMis() {
   gMis.innerHTML = ''; misBadges.splice(0).forEach(b => b.remove());
@@ -853,10 +862,18 @@ const _hot2 = hot; hot = function (id) { _hot2(id);
   if (id.startsWith('bel')) { const j = +id.slice(3); CAB.sus.forEach(su => { if (su.leaves.includes(j)) on(panelOf[su.su]); }); }
   const t = trayById[id] || (slotInfo[id] || {}).tray; if (t) { t.adapters.forEach(a => on(tiles['bel' + a[1]], 'nb')); on(panelOf[t.su]); }
   const s = slotInfo[id]; if (s && !s.tray) { s.su.leaves.forEach(l => on(tiles['bel' + l], 'nb')); on(panelOf[s.su.su]); }
+  if (s) on(tiles[rackId(s.su.su, Math.floor(s.slot/18) + 1)], 'nb');
+  const R0 = RACKS[id]; if (R0) { const {su, rk} = R0; on(panelOf[su.su]); su.leaves.forEach(l => on(tiles['bel' + l], 'nb'));
+    for (let sl = rk.slots[0]; sl <= rk.slots[1]; sl++) { const st = slotState(su, sl); on(tiles[st.t ? 'tray:' + st.t.code : `slot:${su.su}:${sl}`], 'nb'); } }
 };
 
 // ---- tooltip + inspector ----
-const _tip2 = tipFor; tipFor = function (e, id) { _tip2(e, id); const s = slotInfo[id];
+const rackLine = rk => `${rk.trays}/18 trays on the fabric${rk.unnamed ? ` · ${rk.unnamed} unnamed` : ''}${rk.off ? ` · ${rk.off} designed but not seen` : ''}${rk.attention ? ` · ⚠ ${rk.attention}` : ''}`;
+const _tip2 = tipFor; tipFor = function (e, id) { _tip2(e, id); const R0 = RACKS[id];
+  if (R0) { const {su, rk} = R0;
+    tip.innerHTML = `<b>${esc(rk.name || 'Unnamed rack')}</b>SU${su.su} · rack ${rk.pos} of 4 · slots ${rk.slots[0] + 1}–${rk.slots[1] + 1}${rk.hosts.length ? ' · ' + esc(rk.hosts.join('–')) : ''}<br><span style="color:#b9a6ff">● ${rackLine(rk)}</span>${rk.issues.length ? '<br><span style="color:' + CB.err + '">' + rk.issues.map(esc).join('<br>') + '</span>' : ''}<br><span class="k">One NVLink domain: its 72 GPUs talk over NVSwitch without using the leaves.</span>`;
+    tip.style.left = Math.min(e.clientX + 16, innerWidth - 380) + 'px'; tip.style.top = (e.clientY + 16) + 'px'; tip.hidden = false; return; }
+  const s = slotInfo[id];
   if (s) { const t = s.tray;
     tip.innerHTML = t ? `<b>${esc(t.host ? sh(t.host) : t.design_host || t.code)}</b>${t.host || t.design_host ? esc(t.code) + ' · ' : ''}SU${s.su.su} · slot ${s.slot + 1} · ${t.adapters.length}/4 rails<br><span style="color:${CB[s.style]}">● ${TILE_TXT[s.style]}</span>${t.issues.length ? '<br><span class="k">' + t.issues.slice(0, 3).map(esc).join('<br>') + '</span>' : ''}`
       : s.unnamed.length ? `<b>SU${s.su.su} · slot ${s.slot + 1}${s.unnamed[0][6] ? ' · ' + esc(sh(s.unnamed[0][6])) + ' (UFM master)' : ''}</b><span style="color:${CB.unn}">● ${TILE_TXT.unn}</span><br><span class="k">${esc(s.unnamed[0][4])}</span>` : s.design ? `<b>${esc(s.design)}</b>SU${s.su.su} · slot ${s.slot + 1} · BEL${s.su.leaves.join('/')} ${slotLabel(s.slot)}<br><span style="color:#8b9db6">● ${TILE_TXT.off}</span>`
@@ -913,7 +930,7 @@ function trayHtml(s) { const t = s.tray, su = s.su;
   const m = t.code.match(/^(.*)-T(\d+)$/);
   return `<div class="role" style="color:${CB[s.style]}">GPU tray · SU${su.su} · slot ${s.slot + 1}</div><h2>${esc(t.host ? sh(t.host).toUpperCase() : t.code)}</h2>
     <div class="live-sum" style="--c:${CB[s.style]}"><b>${TILE_TXT[s.style]}</b>${t.issues.length ? '<br>' + t.issues.map(esc).join('<br>') : ''}</div>
-    <dl class="kv"><dt>UFM name</dt><dd>${esc(t.code)}</dd><dt>Rack / tray</dt><dd>${esc(m ? m[1] : '?')} · tray ${esc(m ? +m[2] : '?')}</dd>${t.design_host ? `<dt>Design host</dt><dd>${esc(t.design_host)}${t.host && !t.host.endsWith(t.design_host) ? ` <span style="color:${CB.warn}">· NetBox says ${esc(sh(t.host))}</span>` : ''}</dd>` : ''}<dt>NetBox</dt><dd>${t.host ? esc(t.host) : `<span style="color:${CB.ufm}">not in NetBox</span>`}</dd>${CAB.master ? `<dt>UFM master</dt><dd>${t.in_master ? (t.master_host ? esc(t.master_host) : 'present (no host name)') : `<span class="small">not in the master · added after ${esc(mDate())}</span>`}</dd>` : ''}<dt>Leaf port</dt><dd>${slotLabel(s.slot)} on BEL${su.leaves.join(' / ')}</dd></dl>
+    <dl class="kv"><dt>UFM name</dt><dd>${esc(t.code)}</dd><dt>NVL72 rack</dt><dd>${lk(rackId(su.su, Math.floor(s.slot/18) + 1), esc(m ? m[1] : '?'))} · tray ${esc(m ? +m[2] : '?')} · rack ${Math.floor(s.slot/18) + 1} of SU${su.su}, position ${s.slot % 18 + 1} of 18</dd><dt>NVLink peers</dt><dd>the other 17 trays of ${esc(m ? m[1] : 'the rack')} (NVSwitch, no leaf hop)</dd>${t.design_host ? `<dt>Design host</dt><dd>${esc(t.design_host)}${t.host && !t.host.endsWith(t.design_host) ? ` <span style="color:${CB.warn}">· NetBox says ${esc(sh(t.host))}</span>` : ''}</dd>` : ''}<dt>NetBox</dt><dd>${t.host ? esc(t.host) : `<span style="color:${CB.ufm}">not in NetBox</span>`}</dd>${CAB.master ? `<dt>UFM master</dt><dd>${t.in_master ? (t.master_host ? esc(t.master_host) : 'present (no host name)') : `<span class="small">not in the master · added after ${esc(mDate())}</span>`}</dd>` : ''}<dt>Leaf port</dt><dd>${slotLabel(s.slot)} on BEL${su.leaves.join(' / ')}</dd></dl>
     ${tbl(['Rail', 'Leaf', 'Port', 'Adapter', 'UFM', 'NetBox'], [1, 2, 3, 4].map(r => { const a = t.adapters.find(x => x[0] === r);
       return a ? [pill(R[r - 1], 'R' + r), lk('bel' + a[1], 'BEL' + a[1]), a[2], esc(a[3]) + (a[7] ? ` <span class="small">${esc(a[7])}</span>` : ''), stTxt(a[5]) + ` <span class="small">${a[4]}/4</span>`, a[6] ? cableRef(a[6]) : `<span style="color:${CB.ufm}">missing</span>`]
         : [pill(R[r - 1], 'R' + r), lk('bel' + su.leaves[r - 1], 'BEL' + su.leaves[r - 1]), slotLabel(s.slot), '—', pill(CB.err, 'no link'), '—']; }))}
@@ -931,7 +948,17 @@ function trayOtherHtml(t) {
   const missing = order.filter(nm => !other.some(x => x[0] === nm));
   return `<h4 class="inch" style="margin-top:14px">Frontend and out-of-band (from NetBox)</h4>${tbl(['Port', 'Plane', 'Peer', 'Peer port', 'NetBox'], rows)}
     <p class="small">UFM sees only the RDMA fabric, so these come from the NetBox cable records${missing.length ? `; <span style="color:${CB.warn}">no NetBox cable for ${missing.map(esc).join(', ')}</span>` : ''}. eth0/eth1 are 400G QSFP112, the OOB ports 1G. Their switches (SpectrumX frontend leaves, OOB leaves) are not collected yet, so there is no live state for them.</p>`; }
+function rackHtml(su, rk) {
+  const rows = []; for (let sl = rk.slots[0]; sl <= rk.slots[1]; sl++) { const st = slotState(su, sl), t = st.t, sid = t ? 'tray:' + t.code : `slot:${su.su}:${sl}`;
+    rows.push([sl - rk.slots[0] + 1, lk(sid, esc(t ? t.code : st.un.length ? 'unnamed adapter' : st.design ? 'not on fabric' : 'empty')), esc(st.design || ''), t && t.host ? esc(sh(t.host)) : '—',
+      `<span style="color:${CB[st.style] || '#8b9db6'}">● ${esc((TILE_TXT[st.style] || '').split(' · ')[0])}</span>`]); }
+  return `<div class="role" style="color:#b9a6ff">NVL72 rack · SU${su.su} · rack ${rk.pos} of 4 · pod ${su.pod}</div><h2>${esc(rk.name ? rk.name.toUpperCase() : 'Unnamed rack')}</h2>
+    <div class="live-sum" style="--c:${rk.state === 'split' ? CB.err : '#a98bff'}"><b>${rackLine(rk)}</b>${rk.issues.length ? '<br>' + rk.issues.map(esc).join('<br>') : ''}${rk.state === 'unnamed' ? '<br>UFM sees adapters in every slot but none has a node description, so the rack name is unknown.' : ''}</div>
+    <dl class="kv"><dt>Slots</dt><dd>${rk.slots[0] + 1}–${rk.slots[1] + 1} of SU${su.su} · leaf ports ${slotLabel(rk.slots[0])}–${slotLabel(rk.slots[1])}</dd><dt>Leaves</dt><dd>${su.leaves.map((l, r) => lk('bel' + l, `<span style="color:${R[r]}">R${r + 1} BEL${l}</span>`)).join(' · ')}</dd>${rk.hosts.length ? `<dt>Design hosts</dt><dd>${esc(rk.hosts.join(' – '))}</dd>` : ''}<dt>In NetBox</dt><dd>${rk.documented}/${rk.trays} trays</dd></dl>
+    <p class="small"><b>Inside the rack</b> its 72 GPUs (18 trays × 4) form one NVLink domain and talk through NVSwitch, never touching InfiniBand. <b>To another rack of SU${su.su}</b>: GPU <i>r</i> → BEL${su.leaves.join('/')} (its rail's leaf) → the other rack, one switch hop. <b>To another SU</b>: leaf → any of 36 spines → leaf, three hops.${SERVICE ? ' <a href="/traffic-paths.html" target="_blank" rel="noopener">See the traffic paths ↗</a>' : ''}</p>
+    ${tbl(['Pos', 'Tray', 'Design host', 'NetBox', 'State'], rows)}`; }
 const _insp2 = inspect; inspect = function (id) {
+  const R0 = RACKS[id]; if (R0 && ufmOn) { insp.innerHTML = rackHtml(R0.su, R0.rk); return; }
   const s = slotInfo[id]; if (s && ufmOn) { insp.innerHTML = trayHtml(s); return; }
   _insp2(id); if (!CAB || !id || !/^(bel|bes)\d+$/.test(id)) return;
   if (ufmOn && id.startsWith('bel')) { const d = leafDown(+id.slice(3)); if (d.su) { const role = insp.querySelector('.role'); if (role) { role.textContent = `rail ${d.rail} · SU${d.su.su} · pod ${d.su.pod}`; role.style.color = R[d.rail - 1]; }
@@ -986,9 +1013,9 @@ function renderCab(err) {
         <p class="small"><b>Quickest fix:</b> ${cages.length === 2 ? `swap the cables in ${cages[0]} and ${cages[1]} on ${devId(leaf).toUpperCase()} (both lanes p1 and p2). That restores all ${fs.length} expected connections.` : 're-patch each cable as listed.'} ${nbRef() ? (fs.every(f => f.design_state === 'matches-expected') ? (combo() ? 'NetBox and the approved design agree for all of them, so the cables are wrong.' : 'The approved design agrees with NetBox for all of them, so the cables are wrong, not NetBox.') : fs.some(f => f.design_state === 'matches-current') ? 'For the ones flagged above the approved design agrees with UFM: confirm on site before re-patching; NetBox may need correcting instead.' : '') : fs.every(f => f.netbox_state === 'matches-expected') ? 'NetBox already matches the design, so no NetBox change is needed.' : 'Then correct the NetBox records flagged above.'}</p></div>`; });
     h += `</div>`; }
   h += `<h4>2 · GPU trays by scalable unit</h4><p class="small">Leaf-to-GPU cabling follows NetBox: <span style="color:${CB.ok}">■</span> documented in NetBox. UFM-only discoveries are <span style="color:${CB.ufm}">■</span> grey so they cannot be mistaken for documented GPU connections. Each SU uses one leaf from each rail; every tray lands its four RDMA ports on the same port of those four leaves. <span style="color:${CB.warn}">■</span> attention <span style="color:${CB.unn}">■</span> unnamed <span style="color:#34405a">■</span> empty</p>
-    <div class="tablewrap">${tbl(['SU', 'Leaves (rail 1–4)', 'Trays', 'In NetBox', 'Missing in NetBox', 'Attention', 'Unnamed', ''], CAB.sus.map(su => { const d = su.trays.filter(t => t.doc === 'documented' && t.status === 'ok').length, a = su.trays.filter(t => t.status !== 'ok').length,
+    <div class="tablewrap">${tbl(['SU', 'Leaves (rail 1–4)', 'NVL72 racks (1–4)', 'Trays', 'In NetBox', 'Missing in NetBox', 'Attention', 'Unnamed', ''], CAB.sus.map(su => { const d = su.trays.filter(t => t.doc === 'documented' && t.status === 'ok').length, a = su.trays.filter(t => t.status !== 'ok').length,
       m = su.trays.filter(t => t.doc !== 'documented' && t.status === 'ok').length, u = Math.round(su.unnamed.length/4), e = Math.max(0, 72 - d - a - m - u), bar = (n, c) => n ? `<i style="width:${n/72*100}%;background:${c}"></i>` : '';
-      return [`<b>SU${su.su}</b>`, su.leaves.map(l => lk('bel' + l, 'BEL' + l)).join(' '), su.trays.length, su.trays.filter(t => t.doc === 'documented').length, su.trays.filter(t => t.doc !== 'documented').length || '—', a || '—', su.unnamed.length || '—',
+      return [`<b>SU${su.su}</b>`, su.leaves.map(l => lk('bel' + l, 'BEL' + l)).join(' '), (su.racks || []).map(rk => `<span class="peer" data-id="${rackId(su.su, rk.pos)}" style="color:${rk.state === 'split' ? CB.err : rk.state === 'ok' ? '#b9a6ff' : '#8b9db6'}">${esc(rackShort(rk.name))}</span>`).join(' '), su.trays.length, su.trays.filter(t => t.doc === 'documented').length, su.trays.filter(t => t.doc !== 'documented').length || '—', a || '—', su.unnamed.length || '—',
         `<span class="subar">${bar(d, CB.ok)}${bar(m, CB.ufm)}${bar(a, CB.warn)}${bar(u, CB.unn)}${bar(e, '#22324a')}</span>`]; }))}</div>`;
   const attn = []; CAB.sus.forEach(su => su.trays.forEach(t => { if (t.status !== 'ok') attn.push([su, t]); }));
   h += `<h4>3 · Trays needing attention</h4>` + (attn.length ? tbl(['Tray', 'SU · slot', 'NetBox host', 'What UFM shows'], attn.map(([su, t]) => [`<span class="peer" data-id="tray:${esc(t.code)}">${esc(t.code)}</span>`, `SU${su.su} · ${t.slot + 1}`, t.host ? esc(sh(t.host)) : `<span style="color:${CB.ufm}">not in NetBox</span>`, t.issues.map(esc).join('<br>')])) : '<p class="small">None.</p>');
@@ -1090,7 +1117,7 @@ document.addEventListener('click', e => { if (e.target.closest('#ufm-fetch')) fe
 // ---- device search: switches, IPs, GPU trays by design host, NetBox host or UFM name ----
 { const q = document.getElementById('q'), box = document.getElementById('srchres'); q.removeAttribute('list');
   let hits = [], sel = -1;
-  const KCOL = {leaf:'#39c6e3', spine:'#a98bff', tray:'#38d9a0', off:'#8b9db6', gpu:'#38d9a0'};
+  const KCOL = {leaf:'#39c6e3', spine:'#a98bff', tray:'#38d9a0', off:'#8b9db6', gpu:'#38d9a0', rack:'#b9a6ff'};
   function index() { const out = [], devs = LIVE.devices || {};
     for (let j = 1; j <= 64; j++) { const h = 'sys1-ice2-p-swi-bel' + j, d = devs[h] || []; out.push({id:'bel' + j, kind:'leaf', title:'BEL' + j, sub:`${h}${d[0] ? ' · ' + d[0] : ''}${d[2] ? ' · ' + d[2] : ''}`, keys:[h, 'bel' + j, d[0] || ''], state:d[3] || ''}); }
     for (let i = 1; i <= 36; i++) { const h = 'sys1-ice2-p-swi-bes' + i, d = devs[h] || []; out.push({id:'bes' + i, kind:'spine', title:'BES' + i, sub:`${h}${d[0] ? ' · ' + d[0] : ''}${d[2] ? ' · ' + d[2] : ''}`, keys:[h, 'bes' + i, d[0] || ''], state:d[3] || ''}); }
@@ -1098,6 +1125,8 @@ document.addEventListener('click', e => { if (e.target.closest('#ufm-fetch')) fe
       const name = s.design || (t && t.host ? sh(t.host) : t ? t.code : 'unnamed adapter');
       out.push({id, kind: s.style === 'off' ? 'off' : 'tray', title:name, keys:[s.design, t && t.code, t && t.host, t && sh(t.host || ''), `su${s.su.su}`].filter(Boolean),
         sub:`SU${s.su.su} slot ${s.slot + 1} · BEL${s.su.leaves.join('/')} ${slotLabel(s.slot)}${t ? ' · UFM ' + t.code : ''}${t && t.host ? ' · NetBox ' + sh(t.host) : ''}`, state: TILE_TXT[s.style] || ''}); });
+    if (typeof ufmOn !== 'undefined' && ufmOn) Object.entries(RACKS).forEach(([id, {su, rk}]) => out.push({id, kind:'rack', title:rk.name || `SU${su.su} rack ${rk.pos} (unnamed)`,
+      keys:[rk.name, rackShort(rk.name), `su${su.su}-${rk.pos}`, `su${su.su} rack ${rk.pos}`].filter(Boolean), sub:`NVL72 · SU${su.su} rack ${rk.pos} · slots ${rk.slots[0] + 1}–${rk.slots[1] + 1}${rk.hosts.length ? ' · ' + rk.hosts.join('–') : ''}`, state:rackLine(rk)}));
     else Object.keys(trBy || {}).forEach(n => out.push({id:'gpu' + n, kind:'gpu', title:'gpu' + n, sub:'sys1-ice2-p-phy-gpu' + n, keys:['gpu' + n, 'sys1-ice2-p-phy-gpu' + n], state:''}));
     return out; }
   function search(text) { const v = text.trim().toLowerCase().replace(/^sys1-ice2-p-(swi|phy)-/, ''); if (!v) return [];

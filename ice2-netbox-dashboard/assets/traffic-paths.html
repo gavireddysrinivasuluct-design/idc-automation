@@ -1,0 +1,407 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ICE2 Traffic Paths</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700;12..96,800&family=IBM+Plex+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+/* Layout: a single long "fabric console" — thesis, live path explorer (diagram + route card), then the wiring rules that explain why. */
+:root{
+  --bg:#f3f5f9; --panel:#ffffff; --panel2:#eaeef5; --ink:#101826; --muted:#5a6880; --line:#cfd7e4; --mesh:#9fb0c8;
+  --r1:#0e9fbf; --r2:#2f9e44; --r3:#d48a06; --r4:#d6457f; --nv:#7c4dff; --spine:#3b5bdb; --hot:#e8590c;
+  --display:"Bricolage Grotesque", "Avenir Next", system-ui, sans-serif;
+  --body:"IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+  --mono:"JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){
+  --bg:#0a1019; --panel:#111a28; --panel2:#0d1520; --ink:#e7eef7; --muted:#8b9db6; --line:#223047; --mesh:#3a4d6b;
+  --r1:#39c6e3; --r2:#7ee081; --r3:#ffc15e; --r4:#ff7eb6; --nv:#a98bff; --spine:#7c95ff; --hot:#ff8a3d; color-scheme:dark}}
+:root[data-theme="dark"]{
+  --bg:#0a1019; --panel:#111a28; --panel2:#0d1520; --ink:#e7eef7; --muted:#8b9db6; --line:#223047; --mesh:#3a4d6b;
+  --r1:#39c6e3; --r2:#7ee081; --r3:#ffc15e; --r4:#ff7eb6; --nv:#a98bff; --spine:#7c95ff; --hot:#ff8a3d; color-scheme:dark}
+*{box-sizing:border-box}
+body{background:var(--bg);color:var(--ink);font:15px/1.6 var(--body);padding-inline:clamp(16px,4vw,48px);padding-block:28px 64px}
+.wrap{max-width:1240px;margin:0 auto;display:grid;gap:40px}
+h1,h2,h3{font-family:var(--display);text-wrap:balance;margin:0;line-height:1.08}
+h1{font-size:clamp(34px,5.4vw,64px);font-weight:800;letter-spacing:-.02em}
+h2{font-size:clamp(24px,3vw,34px);font-weight:700;letter-spacing:-.01em}
+h3{font-size:18px;font-weight:700}
+p{margin:0;max-width:68ch}
+.eyebrow{font:600 11px/1 var(--mono);letter-spacing:.18em;text-transform:uppercase;color:var(--muted)}
+.mono{font-family:var(--mono)}
+code{font:500 .9em var(--mono);background:var(--panel2);border:1px solid var(--line);padding:1px 5px;border-radius:5px}
+.r1{color:var(--r1)}.r2{color:var(--r2)}.r3{color:var(--r3)}.r4{color:var(--r4)}
+
+/* hero */
+header{display:grid;gap:16px}
+.hero-line{display:flex;flex-wrap:wrap;gap:6px 18px;align-items:baseline}
+.hero-line h1 span{color:var(--muted);font-weight:500}
+.lede{font-size:17px;color:var(--muted)}
+.lede b{color:var(--ink)}
+.facts{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:1px;background:var(--line);border:1px solid var(--line);border-radius:12px;overflow:hidden}
+.facts div{background:var(--panel);padding:12px 14px;display:grid;gap:2px}
+.facts b{font:700 24px/1.1 var(--display);font-variant-numeric:tabular-nums}
+.facts span{font-size:12px;color:var(--muted)}
+
+/* explorer */
+.explorer{display:grid;gap:14px}
+.presets{display:flex;flex-wrap:wrap;gap:8px}
+.presets button{font:600 13px var(--body);color:var(--ink);background:var(--panel);border:1px solid var(--line);border-radius:999px;padding:8px 14px;cursor:pointer;display:flex;gap:8px;align-items:center}
+.presets button i{font-style:normal;font:600 11px var(--mono);color:var(--muted)}
+.presets button[aria-pressed="true"]{border-color:var(--hot);box-shadow:0 0 0 1px var(--hot) inset}
+.presets button:focus-visible,.picker select:focus-visible,.toggle:focus-within{outline:2px solid var(--hot);outline-offset:2px}
+.stage{display:grid;grid-template-columns:minmax(0,1fr) 330px;gap:16px;align-items:start}
+@media (max-width:980px){.stage{grid-template-columns:1fr}}
+.canvas{background:var(--panel);border:1px solid var(--line);border-radius:16px;overflow-x:auto}
+.canvas svg{display:block;min-width:900px;width:100%;height:auto}
+.route{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:18px;display:grid;gap:14px;min-width:0}
+.verdict{display:grid;gap:6px}
+.verdict .hops{display:flex;align-items:baseline;gap:10px}
+.verdict .hops b{font:800 54px/1 var(--display);font-variant-numeric:tabular-nums}
+.verdict .hops span{color:var(--muted);font-size:13px;line-height:1.3}
+.kind{justify-self:start;font:600 11px var(--mono);letter-spacing:.08em;text-transform:uppercase;padding:4px 9px;border-radius:999px;border:1px solid currentColor}
+.steps{list-style:none;margin:0;padding:0;display:grid;gap:0}
+.steps li{display:grid;grid-template-columns:22px 1fr;gap:10px;padding:7px 0;position:relative}
+.steps li::before{content:"";position:absolute;left:10px;top:24px;bottom:-6px;width:2px;background:var(--line)}
+.steps li:last-child::before{display:none}
+.dot{width:22px;height:22px;border-radius:50%;display:grid;place-items:center;font:700 10px var(--mono);color:var(--bg);margin-top:1px}
+.steps b{font-weight:600}
+.steps small{display:block;color:var(--muted);font-size:12.5px;line-height:1.4}
+.why{font-size:13.5px;color:var(--muted);border-top:1px solid var(--line);padding-top:12px;display:grid;gap:8px}
+.why b{color:var(--ink)}
+.picker{display:flex;flex-wrap:wrap;gap:10px 18px;align-items:center;background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:10px 14px}
+.picker fieldset{border:0;margin:0;padding:0;display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+.picker legend{float:left;font:600 11px var(--mono);letter-spacing:.12em;text-transform:uppercase;color:var(--muted);margin-right:6px}
+.picker select{font:500 13px var(--mono);color:var(--ink);background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:5px 6px}
+.toggle{display:flex;gap:8px;align-items:center;font-size:13px;cursor:pointer;margin-left:auto}
+.toggle input{accent-color:var(--nv);width:16px;height:16px}
+.legend{display:flex;flex-wrap:wrap;gap:6px 16px;font-size:12px;color:var(--muted)}
+.legend span{display:flex;gap:6px;align-items:center}
+.legend i{width:18px;height:3px;border-radius:2px;display:inline-block}
+
+/* svg styling via tokens */
+.s-spine{fill:var(--panel2);stroke:var(--spine);stroke-width:1}
+.s-leaf{fill:var(--panel2);stroke-width:1.4}
+.s-txt{fill:var(--muted);font:500 8.5px var(--mono)}
+.s-lbl{fill:var(--muted);font:600 10px var(--mono);letter-spacing:.14em}
+.s-big{fill:var(--ink);font:700 13px var(--display)}
+.s-mesh{stroke:var(--mesh);stroke-width:.5;opacity:.28}
+.s-panel{fill:var(--panel2);stroke:var(--line)}
+.s-rack{fill:var(--panel);stroke:var(--line)}
+.s-nvs{fill:var(--nv);opacity:.22}
+.s-tray{fill:var(--panel2)}
+.dim{opacity:.18}
+.path{fill:none;stroke-width:3.2;stroke-linecap:round}
+.halo{fill:none;stroke-width:9;stroke-linecap:round;opacity:.18}
+.fan{stroke:var(--spine);stroke-width:.8;stroke-dasharray:2 3;opacity:.55;fill:none}
+.pkt{filter:drop-shadow(0 0 4px currentColor)}
+@media (prefers-reduced-motion: reduce){.pkt{display:none}}
+
+/* rules + cards */
+section{display:grid;gap:18px}
+.grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,360px),1fr));gap:16px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px;display:grid;gap:10px;align-content:start;min-width:0}
+.card .tag{font:600 11px var(--mono);color:var(--muted);letter-spacing:.1em}
+.formula{font:500 13px var(--mono);background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:8px 10px;overflow-x:auto;white-space:nowrap}
+table{border-collapse:collapse;width:100%;font-size:13px}
+th,td{text-align:left;padding:7px 8px;border-bottom:1px solid var(--line);vertical-align:top}
+th{font:600 11px var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+td.num{font-family:var(--mono);font-variant-numeric:tabular-nums;white-space:nowrap}
+.tablewrap{overflow-x:auto}
+.lanes{display:grid;gap:6px}
+.lane{display:grid;grid-template-columns:70px 1fr 70px;gap:8px;align-items:center;font:500 12px var(--mono);color:var(--muted)}
+.lane .wire{height:6px;border-radius:3px;background:linear-gradient(90deg,var(--spine),var(--hot));opacity:.75}
+.lane:nth-child(2) .wire{opacity:.6}.lane:nth-child(3) .wire{opacity:.45}.lane:nth-child(4) .wire{opacity:.32}
+.ladder{display:grid;gap:8px}
+.ladder div{display:grid;grid-template-columns:160px 1fr;gap:12px;align-items:baseline;padding:8px 0;border-bottom:1px solid var(--line)}
+@media (max-width:560px){.ladder div{grid-template-columns:1fr}}
+.ladder b{font-family:var(--display)}
+.note{font-size:13px;color:var(--muted)}
+footer{font-size:12.5px;color:var(--muted);border-top:1px solid var(--line);padding-top:16px}
+</style>
+</head>
+<body>
+
+<div class="wrap">
+<header>
+  <div class="eyebrow">ICE2 · Keflavik · backend RDMA fabric · InfiniBand XDR</div>
+  <div class="hero-line"><h1>Where a GPU's bytes go <span>/ rack · rail · SU · pod</span></h1></div>
+  <p class="lede">Every GPU in ICE2 has its own 800G network port. Which <b>rail</b> it is on decides which <b>leaf</b> it plugs into. Every leaf has two cables to every one of the 36 <b>spines</b>, so the spines have no rails at all. Pick a pair of GPUs below and watch the path.</p>
+  <div class="facts">
+    <div><b>4,608</b><span>GPUs · 4 per tray</span></div>
+    <div><b>1,152</b><span>compute trays</span></div>
+    <div><b>16</b><span>scalable units (SU) · 72 trays each</span></div>
+    <div><b>4</b><span>pods · 4 SUs each</span></div>
+    <div><b>64</b><span>leaves BEL1–64</span></div>
+    <div><b>36</b><span>spines BES1–36</span></div>
+    <div><b>4</b><span>rails · 4 planes</span></div>
+  </div>
+</header>
+
+<section class="explorer" aria-labelledby="ex-h">
+  <div style="display:grid;gap:6px"><div class="eyebrow">Path explorer</div><h2 id="ex-h">Pick two GPUs</h2></div>
+  <div class="presets" id="presets" role="group" aria-label="Example paths"></div>
+  <div class="picker">
+    <fieldset><legend>From</legend>
+      <select id="sSu" aria-label="Source SU"></select><select id="sRack" aria-label="Source rack"></select><select id="sTray" aria-label="Source tray"></select><select id="sGpu" aria-label="Source GPU"></select></fieldset>
+    <fieldset><legend>To</legend>
+      <select id="dSu" aria-label="Destination SU"></select><select id="dRack" aria-label="Destination rack"></select><select id="dTray" aria-label="Destination tray"></select><select id="dGpu" aria-label="Destination GPU"></select></fieldset>
+    <label class="toggle"><input type="checkbox" id="pxn" checked> NCCL PXN (rail-align over NVLink first)</label>
+  </div>
+  <div class="stage">
+    <div class="canvas"><svg id="fab" viewBox="0 0 1200 800" role="img" aria-label="ICE2 fabric with the selected path"></svg></div>
+    <aside class="route" id="route" aria-live="polite"></aside>
+  </div>
+  <div class="legend">
+    <span><i style="background:var(--r1)"></i>rail 1 · GPU 1 · mlx5_0</span>
+    <span><i style="background:var(--r2)"></i>rail 2 · GPU 2 · mlx5_1</span>
+    <span><i style="background:var(--r3)"></i>rail 3 · GPU 3 · mlx5_2</span>
+    <span><i style="background:var(--r4)"></i>rail 4 · GPU 4 · mlx5_3</span>
+    <span><i style="background:var(--nv)"></i>NVLink inside the NVL72 rack</span>
+    <span><i style="background:var(--spine)"></i>spine hop (any of 36, chosen per flow)</span>
+  </div>
+</section>
+
+<section aria-labelledby="t-h">
+  <div style="display:grid;gap:6px"><div class="eyebrow">All cases at a glance</div><h2 id="t-h">Five kinds of conversation</h2></div>
+  <div class="tablewrap card" style="padding:6px 12px">
+  <table>
+    <thead><tr><th>Source and destination</th><th>Path</th><th>InfiniBand switch hops</th><th>Shares the path with</th></tr></thead>
+    <tbody>
+      <tr><td><b>Same NVL72 rack</b><br><span class="note">any tray, any GPU</span></td><td>GPU → NVSwitch → GPU. The backend network is not used.</td><td class="num">0</td><td>Nothing on InfiniBand</td></tr>
+      <tr><td><b>Same SU, same rail</b><br><span class="note">different racks</span></td><td>GPU → its rail's leaf → GPU</td><td class="num">1</td><td>The 72 trays on that leaf</td></tr>
+      <tr><td><b>Same SU, different rail</b></td><td>With PXN: NVLink to the tray-mate on the destination's rail, then 1 leaf hop. Without: leaf → spine → leaf.</td><td class="num">1 or 3</td><td>Leaf uplinks when PXN is off</td></tr>
+      <tr><td><b>Different SU, same pod</b></td><td>Leaf → any of 36 spines → leaf</td><td class="num">3</td><td>72 equal uplinks per leaf</td></tr>
+      <tr><td><b>Different pod</b></td><td>Leaf → any of 36 spines → leaf (the same as across SUs; there is no super-spine)</td><td class="num">3</td><td>72 equal uplinks per leaf</td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<section aria-labelledby="r-h">
+  <div style="display:grid;gap:6px"><div class="eyebrow">Why the paths look like this</div><h2 id="r-h">Four wiring rules</h2></div>
+  <div class="grid2">
+    <div class="card"><div class="tag">L1 · LEAF ⟷ SPINE</div><h3>Every leaf reaches every spine twice</h3>
+      <p>Leaf <i>j</i> uses its upper ports for spines; spine <i>i</i> uses one port pair per leaf. Nothing on a spine is rail-specific: BES7 carries rail 1, 2, 3 and 4 traffic from all 4 pods.</p>
+      <div class="formula">BEL<i>j</i> sw(36+<i>i</i>)p1/p2  ⟷  BES<i>i</i> sw<i>j</i>p1/p2</div>
+      <p class="note">Example: BEL5 sw43p1 ⟷ BES7 sw5p1. A leaf has 36 spines × 2 = 72 uplinks; a spine has 64 leaves × 2 = 128 downlinks.</p></div>
+    <div class="card"><div class="tag">G1 · PODS AND SUs</div><h3>An SU is one leaf from each rail block</h3>
+      <p>Each pod owns 16 leaves in four rail blocks of four. SU <i>k</i> of a pod takes the <i>k</i>-th leaf of every block.</p>
+      <div class="formula">leaf = 16·(pod−1) + 4·(rail−1) + SU-in-pod</div>
+      <p class="note">Pod 1: rail 1 = BEL1–4, rail 2 = BEL5–8, rail 3 = BEL9–12, rail 4 = BEL13–16. SU1 = BEL1, 5, 9, 13. SU2 = BEL2, 6, 10, 14.</p></div>
+    <div class="card"><div class="tag">G2 · TRAY SLOTS</div><h3>A tray sits on the same port of its four leaves</h3>
+      <p>Leaf ports sw1–sw36 face GPUs, two trays per cage (p1, p2), so 72 tray slots per SU. A tray's four GPUs land on the same port number of the SU's four leaves.</p>
+      <div class="formula">slot = 2·(N−1) + M   for leaf port swNpM, N ≤ 36</div>
+      <p class="note">Example: tray nvl72d031-T04 (gpu1349) is SU2 slot 22 on BEL2, BEL6, BEL10 and BEL14, port sw11p2.</p></div>
+    <div class="card"><div class="tag">G3 · RAILS</div><h3>GPU <i>r</i> of every tray is rail <i>r</i></h3>
+      <p>Each GPU has its own ConnectX-8 port. Rail <i>r</i> is adapter <code>mlx5_(r−1)</code> (RDMA<i>r</i>), so the four GPUs of a tray never share a leaf.</p>
+      <div class="formula"><span class="r1">mlx5_0 → rail 1</span> · <span class="r2">mlx5_1 → rail 2</span> · <span class="r3">mlx5_2 → rail 3</span> · <span class="r4">mlx5_3 → rail 4</span></div>
+      <p class="note">Leaves: 72 × 800G down and 72 × 800G up, so the fabric is non-blocking (1:1).</p></div>
+  </div>
+</section>
+
+<section aria-labelledby="p-h">
+  <div class="grid2">
+    <div class="card"><div class="eyebrow">The separation that does exist</div><h2 id="p-h" style="font-size:24px">One cable, four planes</h2>
+      <p>A Q3400 switch is four chips. Each 800G cable carries four 200G lanes, and lane <i>m</i> only ever meets chip <i>m</i> at the far end. So the fabric is four identical parallel planes. A flow uses all four, and a lost plane removes a quarter of that cable's bandwidth without breaking the path.</p>
+      <div class="lanes" aria-label="Four planes in one cable">
+        <div class="lane"><span>leaf A1</span><div class="wire"></div><span>spine A1</span></div>
+        <div class="lane"><span>leaf A2</span><div class="wire"></div><span>spine A2</span></div>
+        <div class="lane"><span>leaf A3</span><div class="wire"></div><span>spine A3</span></div>
+        <div class="lane"><span>leaf A4</span><div class="wire"></div><span>spine A4</span></div>
+      </div>
+      <p class="note">That is why UFM reports a cable as "degraded" with 3/4 planes, and why a cable whose planes land on different far ends is flagged as a plane split.</p></div>
+    <div class="card"><div class="eyebrow">What a failure takes away</div><h2 style="font-size:24px">Blast radius</h2>
+      <div class="ladder">
+        <div><b>One leaf–spine cable</b><span>1 of 72 uplinks on that leaf. Adaptive routing uses the other 71.</span></div>
+        <div><b>One spine</b><span>1/36 of every leaf's uplinks, across all rails and pods. Nothing is cut off.</span></div>
+        <div><b>One leaf</b><span>One rail of all 72 trays in its SU. Those GPUs still reach the fabric by NVLink to a tray-mate (PXN), at reduced bandwidth.</span></div>
+        <div><b>One GPU port</b><span>That GPU's direct path. NCCL routes its traffic through a tray-mate over NVLink.</span></div>
+        <div><b>Two swapped cables</b><span>No change: each leaf still has exactly two cables to each spine. Only labels and runbooks are wrong (BEL21, BEL55 today).</span></div>
+      </div></div>
+  </div>
+</section>
+
+<footer>Built from the ICE2 approved design (<code>nscale_Compute.topo</code>) and NetBox, which agree on all 4,608 leaf–spine cables. Each SU's 72 tray slots are 4 NVL72 racks of 18: rack 1 is slots 1–18, rack 2 is 19–36, rack 3 is 37–54 and rack 4 is 55–72. UFM's tray names (for example <code>nvl72d031-T04</code>) confirm it: each of the 63 named racks sits in exactly one rack position. PXN is NCCL's default on NVLink-connected GPUs; a job can turn it off with <code>NCCL_PXN_DISABLE=1</code>.<span id="back"></span></footer>
+</div>
+
+<script>
+(() => {
+const NS = 'http://www.w3.org/2000/svg', svg = document.getElementById('fab');
+const RC = ['var(--r1)', 'var(--r2)', 'var(--r3)', 'var(--r4)'];
+const el = (t, a, p) => { const e = document.createElementNS(NS, t); for (const k in a) e.setAttribute(k, a[k]); (p || svg).appendChild(e); return e; };
+const tx = (p, a, s) => { const e = el('text', a, p); e.textContent = s; return e; };
+const RACKS = ['1 · slots 1–18', '2 · slots 19–36', '3 · slots 37–54', '4 · slots 55–72'], RN = k => k + 1;
+// geometry
+const SX0 = 60, SW = 1080, SPY = 64, SPH = 30;
+const spineX = i => SX0 + (i - 0.5) * SW / 36;
+const PODW = (SW - 3 * 28) / 4, BLK = 8, LW = (PODW - 3 * BLK) / 16;
+const leafX = j => { const p = Math.floor((j - 1) / 16), w = (j - 1) % 16, b = Math.floor(w / 4); return SX0 + p * (PODW + 28) + b * BLK + (w + .5) * LW; };
+const LY = 292, LH = 36;
+const leafOf = (su, rail) => { const pod = Math.ceil(su / 4), k = (su - 1) % 4 + 1; return 16 * (pod - 1) + 4 * (rail - 1) + k; };
+const railOfLeaf = j => Math.floor(((j - 1) % 16) / 4) + 1;
+const suOfLeaf = j => (Math.ceil(j / 16) - 1) * 4 + ((j - 1) % 4) + 1;
+
+// static layers
+const gMesh = el('g', {}), gNodes = el('g', {}), gSU = el('g', {}), gPath = el('g', {}), gPkt = el('g', {});
+tx(gNodes, {x:SX0, y:SPY - 14, class:'s-lbl'}, 'SPINES · BES1–36 · NO RAILS: EVERY SPINE REACHES ALL 64 LEAVES');
+const spines = [], leaves = [];
+for (let i = 1; i <= 36; i++) { const x = spineX(i), w = SW / 36 - 6;
+  spines[i] = el('rect', {x:x - w / 2, y:SPY, width:w, height:SPH, rx:4, class:'s-spine'}, gNodes);
+  tx(gNodes, {x, y:SPY + 19, class:'s-txt', 'text-anchor':'middle'}, i); }
+for (let j = 1; j <= 64; j++) for (let i = 1; i <= 36; i++) el('line', {x1:leafX(j), y1:LY, x2:spineX(i), y2:SPY + SPH, class:'s-mesh'}, gMesh);
+for (let p = 1; p <= 4; p++) { const x0 = SX0 + (p - 1) * (PODW + 28);
+  tx(gNodes, {x:x0, y:LY - 30, class:'s-lbl'}, `POD ${p} · BEL${16 * (p - 1) + 1}–${16 * p}`);
+  for (let r = 1; r <= 4; r++) { const bx = x0 + (r - 1) * (4 * LW + BLK);
+    el('rect', {x:bx, y:LY - 18, width:4 * LW, height:3, rx:1.5, fill:RC[r - 1]}, gNodes);
+    tx(gNodes, {x:bx + 2 * LW, y:LY + LH + 14, class:'s-txt', 'text-anchor':'middle'}, 'R' + r); } }
+for (let j = 1; j <= 64; j++) { const x = leafX(j);
+  leaves[j] = el('rect', {x:x - LW / 2 + 1.2, y:LY, width:LW - 2.4, height:LH, rx:3, class:'s-leaf', stroke:RC[railOfLeaf(j) - 1]}, gNodes); }
+
+// SU detail panels
+const PY = 420, PH = 350, RACKW = 92, TRH = 13, TRG = 3.4;
+let panels = {};
+function drawPanels(sus) {
+  gSU.innerHTML = ''; panels = {};
+  const n = sus.length, pw = n === 1 ? 560 : 520, gap = 40, x0 = n === 1 ? 600 - pw / 2 : 600 - pw - gap / 2;
+  sus.forEach((su, idx) => {
+    const x = x0 + idx * (pw + gap), pod = Math.ceil(su / 4);
+    el('rect', {x, y:PY, width:pw, height:PH, rx:14, class:'s-panel'}, gSU);
+    tx(gSU, {x:x + 16, y:PY + 24, class:'s-big'}, `SU${su}`);
+    tx(gSU, {x:x + 60, y:PY + 23, class:'s-txt'}, `pod ${pod} · leaves ${[1,2,3,4].map(r => 'BEL' + leafOf(su, r)).join(' · ')} · 72 trays · 288 GPUs`);
+    for (let r = 1; r <= 4; r++) { const j = leafOf(su, r);  // the SU's four leaves drop to the panel
+      el('path', {d:`M${leafX(j)},${LY + LH} C${leafX(j)},${PY - 30} ${x + pw / 2 + (r - 2.5) * 40},${PY - 40} ${x + pw / 2 + (r - 2.5) * 40},${PY}`, fill:'none', stroke:RC[r - 1], 'stroke-width':1.2, opacity:.35}, gSU); }
+    const racks = [];
+    for (let k = 0; k < 4; k++) {
+      const rx = x + 22 + k * ((pw - 44 - RACKW) / 3), ry = PY + 42;
+      el('rect', {x:rx, y:ry, width:RACKW, height:18 * (TRH + TRG) + 26, rx:8, class:'s-rack'}, gSU);
+      tx(gSU, {x:rx + 8, y:ry + 14, class:'s-txt'}, `NVL72 rack ${RN(k)}`);
+      el('rect', {x:rx + RACKW - 14, y:ry + 22, width:8, height:18 * (TRH + TRG) - 2, rx:3, class:'s-nvs'}, gSU);
+      const trays = [];
+      for (let t = 0; t < 18; t++) { const ty = ry + 22 + t * (TRH + TRG);
+        el('rect', {x:rx + 6, y:ty, width:RACKW - 24, height:TRH, rx:2.5, class:'s-tray'}, gSU);
+        const gp = [];
+        for (let g = 0; g < 4; g++) { const gx = rx + 10 + g * 15;
+          el('rect', {x:gx, y:ty + 2.5, width:11, height:TRH - 5, rx:2, fill:RC[g], opacity:.35}, gSU); gp.push([gx + 5.5, ty + TRH / 2]); }
+        trays.push({y:ty + TRH / 2, gp}); }
+      racks.push({x:rx, nvx:rx + RACKW - 10, trays}); }
+    panels[su] = {x, pw, racks};
+  });
+}
+
+// routing
+function route(s, d, pxn) {
+  const same = (s.su === d.su && s.rack === d.rack);
+  const steps = [], segs = [];
+  const gp = o => panels[o.su].racks[o.rack].trays[o.tray].gp[o.gpu];
+  const nvx = o => panels[o.su].racks[o.rack].nvx;
+  const leafTop = j => [leafX(j), LY], leafBot = j => [leafX(j), LY + LH];
+  const lbl = o => `SU${o.su} rack ${RN(o.rack)} tray ${o.tray + 1} GPU ${o.gpu + 1}`;
+  if (s.su === d.su && s.rack === d.rack && s.tray === d.tray && s.gpu === d.gpu) return {kind:'same GPU', hops:0, steps:[{c:'var(--muted)', t:'Pick a different destination', n:'Source and destination are the same GPU.'}], segs:[], why:''};
+  if (same) {
+    const a = gp(s), b = gp(d), x = nvx(s);
+    segs.push({c:'var(--nv)', d:`M${a[0]},${a[1]} C${x},${a[1]} ${x},${a[1]} ${x},${(a[1] + b[1]) / 2} S${x},${b[1]} ${b[0]},${b[1]}`});
+    steps.push({c:'var(--nv)', t:`${lbl(s)}`, n:'Sends over NVLink 5 into the rack\'s NVSwitch trays.'},
+               {c:'var(--nv)', t:'NVSwitch', n:'One NVLink domain covers all 72 GPUs of the rack.'},
+               {c:'var(--nv)', t:`${lbl(d)}`, n:'Receives directly. No InfiniBand port is used.'});
+    return {ends:[a, b], kind:'intra-rack · NVLink', kc:'var(--nv)', hops:0, hopsTxt:'InfiniBand switch hops. The traffic never leaves the rack.', steps, segs, leaves:[], spine:null,
+      why:'<b>Why:</b> an NVL72 rack is one NVLink domain, so all 72 GPUs talk through NVSwitch at NVLink bandwidth. Rails, leaves and spines only matter once traffic leaves the rack.'};
+  }
+  let src = s, viaNv = null;
+  if (pxn && s.gpu !== d.gpu) { viaNv = {...s, gpu:d.gpu}; src = viaNv; }
+  const rs = src.gpu + 1, rd = d.gpu + 1, L1 = leafOf(src.su, rs), L2 = leafOf(d.su, rd);
+  if (viaNv) { const a = gp(s), b = gp(viaNv), x = nvx(s);
+    segs.push({c:'var(--nv)', d:`M${a[0]},${a[1]} C${a[0]},${a[1] - 9} ${b[0]},${b[1] - 9} ${b[0]},${b[1]}`});
+    steps.push({c:'var(--nv)', t:`${lbl(s)} → GPU ${d.gpu + 1} of the same tray`, n:`PXN: NCCL first moves the data over NVLink to the tray-mate on rail ${rd}, so the network part stays on one rail.`}); }
+  else steps.push({c:RC[rs - 1], t:lbl(s), n:`Sends from its own port, mlx5_${rs - 1} (rail ${rs}).`});
+  const a = gp(src), lt = leafBot(L1);
+  segs.push({c:RC[rs - 1], d:`M${a[0]},${a[1]} C${a[0]},${PY - 60} ${lt[0]},${PY - 40} ${lt[0]},${lt[1]}`});
+  steps.push({c:RC[rs - 1], t:`BEL${L1}`, n:`Rail ${rs} leaf of SU${src.su}. All 72 trays of SU${src.su} put their GPU ${rs} on this leaf.`});
+  let spine = null, hops = 1, kind;
+  if (L1 === L2) { kind = 'same SU · same rail'; }
+  else {
+    spine = 1 + ((L1 * 7 + L2 * 13 + s.tray * 5 + d.tray * 3) % 36); hops = 3;
+    const p1 = leafTop(L1), p2 = leafTop(L2), sp = [spineX(spine), SPY + SPH];
+    segs.push({c:'var(--spine)', d:`M${p1[0]},${p1[1]} L${sp[0]},${sp[1]}`}, {c:'var(--spine)', d:`M${sp[0]},${sp[1]} L${p2[0]},${p2[1]}`});
+    steps.push({c:'var(--spine)', t:`BES${spine} (or any of the 36)`, n:`Uplink BEL${L1} sw${36 + spine}p1/p2 → BES${spine} sw${L1}p1/p2. UFM's adaptive routing spreads flows over all 72 uplinks.`},
+               {c:RC[rd - 1], t:`BEL${L2}`, n:`Down on BES${spine} sw${L2}p1/p2 to the rail ${rd} leaf of SU${d.su}.`});
+    kind = s.su === d.su ? 'same SU · different rail' : Math.ceil(s.su / 4) === Math.ceil(d.su / 4) ? 'different SU · same pod' : 'different pod';
+  }
+  const b = gp(d), lb = leafBot(L2);
+  segs.push({c:RC[rd - 1], d:`M${lb[0]},${lb[1]} C${lb[0]},${PY - 40} ${b[0]},${PY - 60} ${b[0]},${b[1]}`});
+  steps.push({c:RC[rd - 1], t:lbl(d), n:`Receives on mlx5_${rd - 1}.`});
+  const whyMap = {
+    'same SU · same rail':'<b>Why one hop:</b> all 72 trays of an SU put their rail-' + rd + ' GPU on the same leaf, BEL' + L1 + '. Traffic between them turns around inside that leaf and never touches a spine.',
+    'same SU · different rail':'<b>Why three hops:</b> each rail of an SU has its own leaf and leaves only meet at the spines. Turn PXN on to see NCCL avoid this by changing rail over NVLink first.',
+    'different SU · same pod':'<b>Why three hops:</b> SUs have separate leaves, so traffic goes up to a spine and down. Every leaf has 2 cables to every spine, giving 72 equal paths.',
+    'different pod':'<b>Same cost as across SUs:</b> pods only group leaves. There is no super-spine; any two of the 64 leaves are one spine apart.'};
+  const label = viaNv ? kind.replace('same rail', 'different rail') + ' · via PXN' : kind;
+  return {ends:[gp(s), b], kind:label, kc:hops === 1 ? RC[rd - 1] : 'var(--spine)', hops, hopsTxt: hops === 1 ? 'InfiniBand switch hop (the leaf only)' : 'InfiniBand switch hops: leaf, spine, leaf', steps, segs, leaves:[L1, L2], spine, why:whyMap[kind] + (viaNv ? ' <b>PXN</b> added a short NVLink step inside the source tray so both ends use rail ' + rd + '.' : '')};
+}
+
+// UI state
+const $ = id => document.getElementById(id);
+const fill = (sel, n, f) => { sel.innerHTML = ''; for (let i = 0; i < n; i++) { const o = document.createElement('option'); o.value = i; o.textContent = f(i); sel.appendChild(o); } };
+['sSu','dSu'].forEach(id => fill($(id), 16, i => 'SU' + (i + 1)));
+['sRack','dRack'].forEach(id => fill($(id), 4, i => 'rack ' + RACKS[i]));
+['sTray','dTray'].forEach(id => fill($(id), 18, i => 'tray ' + (i + 1)));
+['sGpu','dGpu'].forEach(id => fill($(id), 4, i => 'GPU ' + (i + 1) + ' · rail ' + (i + 1)));
+const PRESETS = [
+  {n:'Same rack', k:'0 hops', s:[1,0,2,0], d:[1,0,14,2]},
+  {n:'Same SU, same rail', k:'1 hop', s:[1,0,3,1], d:[1,2,10,1]},
+  {n:'Same SU, other rail', k:'1 or 3', s:[1,0,3,0], d:[1,3,8,2]},
+  {n:'Other SU, same pod', k:'3 hops', s:[1,1,5,1], d:[3,2,11,1]},
+  {n:'Other pod', k:'3 hops', s:[1,0,6,3], d:[14,1,12,3]}];
+const pb = $('presets');
+PRESETS.forEach((p, i) => { const b = document.createElement('button'); b.type = 'button'; b.innerHTML = `${p.n} <i>${p.k}</i>`; b.onclick = () => setPreset(i); pb.appendChild(b); });
+function setPreset(i) { const p = PRESETS[i];
+  [['sSu','sRack','sTray','sGpu'], ['dSu','dRack','dTray','dGpu']].forEach((ids, side) => ids.forEach((id, k) => { $(id).value = (side ? p.d : p.s)[k] - (k === 0 ? 1 : 0); }));
+  if (i === 2) $('pxn').checked = false;
+  render(i); }
+const read = pre => ({su:+$(pre + 'Su').value + 1, rack:+$(pre + 'Rack').value, tray:+$(pre + 'Tray').value, gpu:+$(pre + 'Gpu').value});
+['sSu','sRack','sTray','sGpu','dSu','dRack','dTray','dGpu','pxn'].forEach(id => $(id).addEventListener('change', () => render(-1)));
+
+let anim = null;
+function render(presetIdx) {
+  [...pb.children].forEach((b, i) => b.setAttribute('aria-pressed', i === presetIdx ? 'true' : 'false'));
+  const s = read('s'), d = read('d');
+  drawPanels(s.su === d.su ? [s.su] : [s.su, d.su].sort((a, b) => a - b));
+  const r = route(s, d, $('pxn').checked);
+  // highlight nodes
+  for (let i = 1; i <= 36; i++) { spines[i].classList.toggle('dim', r.hops !== 3); spines[i].style.stroke = i === r.spine ? 'var(--hot)' : ''; spines[i].style.strokeWidth = i === r.spine ? 2.4 : ''; }
+  const su = new Set([s.su, d.su]);
+  for (let j = 1; j <= 64; j++) { const on = (r.leaves || []).includes(j); leaves[j].classList.toggle('dim', !on && !su.has(suOfLeaf(j))); leaves[j].style.strokeWidth = on ? 3 : ''; leaves[j].style.fill = on ? RC[railOfLeaf(j) - 1] : ''; }
+  gMesh.style.opacity = r.hops === 3 ? 1 : .35;
+  // paths
+  gPath.innerHTML = ''; gPkt.innerHTML = '';
+  if (r.spine) r.leaves.forEach(j => { for (let i = 1; i <= 36; i += 1) if (i !== r.spine) el('line', {x1:leafX(j), y1:LY, x2:spineX(i), y2:SPY + SPH, class:'fan'}, gPath); });
+  const paths = r.segs.map(sg => { el('path', {d:sg.d, class:'halo', stroke:sg.c}, gPath); return el('path', {d:sg.d, class:'path', stroke:sg.c}, gPath); });
+  (r.ends || []).forEach((e, k) => { el('rect', {x:e[0] - 8, y:e[1] - 7, width:16, height:14, rx:4, fill:'none', stroke:'var(--hot)', 'stroke-width':2}, gPath);
+    el('text', {x:e[0] + 11, y:e[1] + 3.5, class:'s-txt', style:'fill:var(--hot);font-weight:600'}, gPath).textContent = k ? 'to' : 'from'; });
+  // route card
+  const hopsTxt = r.hopsTxt || '';
+  $('route').innerHTML = `<div class="verdict"><span class="kind" style="color:${r.kc || 'var(--muted)'}">${r.kind}</span>
+    <div class="hops"><b>${r.hops}</b><span>${hopsTxt}</span></div></div>
+    <ol class="steps">${r.steps.map((st, i) => `<li><span class="dot" style="background:${st.c}">${i + 1}</span><div><b>${st.t}</b><small>${st.n}</small></div></li>`).join('')}</ol>
+    <div class="why">${r.why}</div>`;
+  // packet animation along the whole route
+  if (anim) cancelAnimationFrame(anim);
+  if (matchMedia('(prefers-reduced-motion: reduce)').matches || !paths.length) return;
+  const lens = paths.map(p => p.getTotalLength()), total = lens.reduce((a, b) => a + b, 0);
+  const pkts = [0, .33, .66].map(() => el('circle', {r:5, class:'pkt'}, gPkt));
+  const t0 = performance.now(), dur = Math.max(1600, total * 2.2);
+  const step = now => {
+    pkts.forEach((c, k) => { let u = (((now - t0) / dur) + k / 3) % 1, at = u * total, i = 0;
+      while (i < lens.length - 1 && at > lens[i]) { at -= lens[i]; i++; }
+      const pt = paths[i].getPointAtLength(Math.min(at, lens[i])); c.setAttribute('cx', pt.x); c.setAttribute('cy', pt.y);
+      c.setAttribute('fill', r.segs[i].c); c.style.color = r.segs[i].c; });
+    anim = requestAnimationFrame(step); };
+  anim = requestAnimationFrame(step);
+}
+setPreset(1);
+if (/^(127\.0\.0\.1|localhost)$/.test(location.hostname)) document.getElementById('back').innerHTML = ' <a href="/">← Back to the dashboard</a>';
+})();
+</script>
+</body>
+</html>

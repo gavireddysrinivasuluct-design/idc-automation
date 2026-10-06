@@ -514,11 +514,15 @@ The command uses `local-inputs/ufm/nscale_Compute.topo` automatically when the f
   | Faint | Empty slot (no design host, nothing seen) |
 
   The four small bars in each tile are the tray's rails 1–4. Click a tray to see its four links, adapter by adapter, with the NetBox cable for each. UFM-only details stay grey so they are clearly distinct from the NetBox cabling record.
+- **NVL72 racks.** Each SU's 72 slots are 4 NVL72 racks of 18 trays: rack 1 is slots 1–18, rack 2 is 19–36, rack 3 is 37–54 and rack 4 is 55–72. UFM's tray names (`<rack>-T<n>`) confirm it: each of the 63 named racks sits in exactly one rack position. In the pod view each SU's tiles are grouped into its 4 racks (3 × 6 tiles each), headed with the rack name and how many of its 18 trays are on the fabric (`d031 · 18/18`; `+18?` counts unnamed adapters). Click a rack header, or search for a rack (`nvl72d031`, `d031`, `su8 rack 1`), to see all 18 trays with their design host, NetBox host and state. The tray inspector names its rack, its position in the rack and its NVLink peers.
+
+  A rack is one NVLink domain: its 72 GPUs talk over NVSwitch and never use InfiniBand. Racks in the same SU reach each other through the SU's four leaves (one switch hop, rail to rail). Racks in different SUs or pods go leaf → spine → leaf. The Incidents tab flags a rack position that holds trays of more than one rack, or a rack whose trays sit in two positions (major), a rack with 9 or more designed trays off the fabric (major), and a rack UFM cannot name (info; today SU8 rack 1, design hosts gpu1760–gpu1777, whose adapters have no node description).
+- **How traffic flows** (button in the header, or `/traffic-paths.html`): an interactive page that animates the path between any two GPUs (same rack over NVLink, same SU and rail through one leaf, other SUs and pods through a spine, and NCCL PXN changing rail over NVLink first). It also works offline: open `assets/traffic-paths.html` in a browser.
 - **Leaves** take their rail colour; documented GPU downlinks are rail-coloured, and UFM-only GPU discoveries are grey.
 - **Miscabled leaf–spine cables** are drawn in **magenta** on the mesh, and both switches get a ◆ marker. The **Miscabling** chip turns the layer on or off.
 - **Cabling vs UFM tab**, in six sections:
   1. Miscabled cables, grouped per leaf. Each one shows the **Current** connection (UFM), the **Expected** connection (design) and the **Master** connection, end to end. It also gives the re-patch instruction, the impact (*port swap · no fabric impact* or *topology change*, see [6.2](#62-incidents)) and whether NetBox agrees with the design.
-  2. GPU trays per scalable unit.
+  2. GPU trays per scalable unit, with each SU's four NVL72 racks (click one to open it).
   3. Trays needing attention.
   4. Links not fully Active, or where NetBox differs from the design.
   5. Adapters without a name.
@@ -714,6 +718,7 @@ Also revoke the NetBox API token in NetBox (**API Tokens → delete**).
 | Method and path | Purpose |
 | --- | --- |
 | `GET /` | Dashboard |
+| `GET /traffic-paths.html` | How traffic flows (rack, rail, SU and pod paths) |
 | `GET /api/live` | Live link state for every designed link in use, plus sync, UFM-fetch and incident summaries (ETag and gzip; `304` when unchanged) |
 | `POST /api/sync` · `GET /api/sync/<run>` | Start a fabric sync (switches, UFM, and NetBox when due), or check its progress and per-phase timings |
 | `POST /api/netbox/refresh` | NetBox inventory only (progress at `GET /api/sync/<run>`) |
@@ -739,6 +744,7 @@ Also revoke the NetBox API token in NetBox (**API Tokens → delete**).
 | `app/incidents.py` | Incident rules: severity, impact and action for each problem found ([6.2](#62-incidents)) |
 | `collector/run_ntp_audit.py` | Read-only collector (local and jump-host fan-out) |
 | `assets/dashboard.html` | Dashboard |
+| `assets/traffic-paths.html` | How traffic flows: interactive rack / rail / SU / pod path explainer (served at `/traffic-paths.html`) |
 | `assets/connections.csv` | NetBox cable export (5,424 cables): the diagram and the NetBox comparison |
 | `assets/devices.csv` | 100 backend switches with site and NetBox role |
 | `assets/read_only_commands.txt` | The only command run on switches |
