@@ -564,6 +564,7 @@ What it cannot see: link errors, congestion and UFM alarms (not collected yet), 
 | --- | --- | --- |
 | `--netbox-url` | *(required)* | `http://127.0.0.1:8444` (the local proxy) |
 | `--device-profile` | — | `~/.config/idc-automation/device-access.ini`. Required for device collection. |
+| `--switch-source auto\|ufm\|ssh` | `auto` | Where Sync fabric reads switch port states: `ufm` = one UFM REST call (needs the UFM web user), `ssh` = log in to every switch. `auto` uses UFM when its web user is set up ([8](#8-how-sync-works)). |
 | `--fanout local\|jump` | `local` | `jump` runs one Teleport session to `jmp0`, which logs in to the switches in parallel. Recommended. Falls back to `local` automatically if it can't be used. |
 | `--device-parallel N` | `10` | Concurrent switch logins (1–25). Raise gradually, for example 15 → 20 → 25, and watch for failures. |
 | `--sync-every-minutes N` | `0` (off) | Background fabric sync (switches and UFM), so the dashboard is already fresh when you open it |
@@ -589,27 +590,27 @@ What it cannot see: link errors, congestion and UFM alarms (not collected yet), 
 ## 8. How sync works
 
 1. **⟳ Sync fabric runs these phases in parallel:**
-   - **Switches.**
-     - Switch management IPs, vendor, model and status come from 2 bulk NetBox queries, or from the 24-hour local cache. If NetBox cannot be reached, the last known IPs are used.
-     - Then `nv show interface --output json` is collected from all 100 switches.
+   - **Switches.** Where the switch port states come from (`--switch-source`):
+     - **UFM (default when the UFM web user from [4.9](#49-optional-let-the-dashboard-fetch-from-ufm) is set up).** One read-only call to UFM REST `GET /ufmRest/resources/ports`, over the same `tsh ssh` session to `jmp0` that the UFM fetch uses. UFM returns about 19,000 port objects; the worker on `jmp0` keeps only the switch ports and a few fields (switch, port, logical and physical state, speed, BER severity), so well under 1 MB crosses Teleport. Each port is turned into the switch's own wording (`Active/LinkUp/800G`), so Live link state works exactly as before. No switch login, password or host key is needed, and it takes seconds instead of about half a minute.
+     - **SSH** (`--switch-source ssh`, or when no UFM web user is set up). Switch management IPs come from NetBox (2 bulk queries, or the 24-hour cache), then `nv show interface --output json` is collected from all 100 switches. Use it to check the switches' own view independently of UFM.
    - **UFM**, when [4.9](#49-optional-let-the-dashboard-fetch-from-ufm) is set up: the same as **Fetch from UFM**.
    - **NetBox**, only on the first sync (no inventory yet), or when `--netbox-every-hours` is set and the inventory is older than that. **Refresh NetBox** runs this phase alone.
      - A full pull reads every backend cable, with pages trimmed to the needed fields; it runs the first time and every `--full-netbox-every-hours` (6).
      - Other runs ask the NetBox **change log** which cables changed since the last refresh, and re-read only those, usually in 1–3 API calls.
      - A NetBox failure never fails a fabric sync; the previous copy stays in use.
    - **Live link state** compares the switch port states with the **design topology**: every designed leaf–spine link, and every designed GPU port in use (seen by UFM now or before, or recorded in NetBox), so empty tray slots are not reported as down. NetBox cable IDs are shown where NetBox has the cable.
-2. **Coverage and replacement.** When the collection finishes, it is checked against the 100 inventory switches and the designed ports of each:
+2. **Coverage and replacement.** When the collection finishes (from UFM or SSH alike), it is checked against the 100 inventory switches and the designed ports of each:
    - Each reached switch's ports **replace** its previous ports entirely, so a port it no longer reports is not kept.
    - Switches not reached keep their last known states only for display; their links count as *not verified*.
    - The result is *verified* (every switch, every designed port) or *partial*, and is shown as such in the status bar, the Sync line and the Incidents tab.
    - The snapshot is saved **atomically** (temporary file, then rename) to `.netbox-live-sync/latest-live.json`, with the coverage, each switch's last-read time and a fingerprint of `connections.csv`, `expected_topology.csv` and `devices.csv`. After a restart it is trusted only if those files are unchanged; otherwise everything shows as not verified until the next sync.
 3. **Strict NetBox validation.** A NetBox cable must have exactly one interface termination on each side, with a device and port. A cable with several terminations, a front/rear port, or a malformed termination is reported as differing, never as matching.
-4. **Jump-host fan-out.** With `--fanout jump`, one `tsh ssh` session starts a small worker on `jmp0`.
+4. **Jump-host fan-out** (SSH source only). With `--fanout jump`, one `tsh ssh` session starts a small worker on `jmp0`.
    - The switch password is passed only on the worker's input. It never appears in a command line, an environment variable or a file.
    - The worker logs in to each switch with strict host-key checking, using your approved `known_hosts`.
-5. **Progressive results.** Each switch's result is shown as soon as it arrives.
+5. **Progressive results** (SSH source). Each switch's result is shown as soon as it arrives.
 
-Typical timings: switches about 34 s for 100 switches at `--device-parallel 15`; UFM live links 3–10 s, in parallel; NetBox about 1 s when incremental (2 API calls).
+Typical timings: switches a few seconds from UFM, or about 34 s for 100 switches over SSH at `--device-parallel 15`; UFM live links 3–10 s, in parallel; NetBox about 1 s when incremental (2 API calls).
 
 ---
 

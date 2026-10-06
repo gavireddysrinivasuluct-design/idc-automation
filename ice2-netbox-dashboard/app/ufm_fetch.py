@@ -49,6 +49,9 @@ MASTER = "opt/ufm/shared_config_files/periodicTopo/master.topo"
 REPORT = "opt/ufm/shared_config_files/reports/TopologyCompare/TopologyCompare.json"
 DESIGN = "/root/nscale_Compute.topo"
 LINKS_PATH = "/ufmRest/resources/links"
+PORTS_PATH = "/ufmRest/resources/ports"
+PORT_FIELDS = ["system_name", "dname", "logical_state", "physical_state", "active_speed", "active_width",
+               "high_ber_severity", "peer_node_name", "peer_port_dname", "severity"]
 BEGIN, END = "__ICE2_UFM_BUNDLE_BEGIN__", "__ICE2_UFM_BUNDLE_END__"
 DESIGN_BEGIN, DESIGN_END = "__ICE2_UFM_DESIGN_BEGIN__", "__ICE2_UFM_DESIGN_END__"
 
@@ -144,6 +147,13 @@ for host in cfg["hosts"]:
         emit({"event": "failed", "host": host, "detail": "not JSON (standby UFM or login page?)"}); continue
     if not isinstance(data, list) or not data:
         emit({"event": "failed", "host": host, "detail": "no links in the answer (standby UFM?)"}); continue
+    if cfg.get("reduce") == "ports":
+        # switch ports only, a few fields each: ~19k UFM port objects shrink from ~30 MB to well under 1 MB
+        keep = cfg["fields"]
+        data = [[q.get(k) for k in keep] for q in data if isinstance(q, dict) and "-swi-" in str(q.get("system_name") or "")]
+        if not data:
+            emit({"event": "failed", "host": host, "detail": "no switch ports in the answer (standby UFM?)"}); continue
+        body = json.dumps(data).encode("utf-8")
     emit({"event": "links", "host": host, "fingerprint": fp, "count": len(data), "data": base64.b64encode(gzip.compress(body)).decode("ascii")}); break
 emit({"event": "done"})
 """
@@ -422,6 +432,55 @@ def fetch_rest(prof: dict, target_dir: Path, progress: dict, timeout: int = 120)
         partial.replace(target)
     return {"host": got["host"], "links": got["count"], "stats": stats, "skipped": errors,
             "files": {"ibdiagnet2.lst.gz": {"bytes": len(text), "ufm_time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}}}
+
+
+LANE_GBPS = {"XDR": 200, "NDR": 100, "HDR": 50, "EDR": 25, "FDR": 14}
+
+
+def port_state(logical: str | None, physical: str | None, speed: str | None, width: str | None) -> str:
+    """A UFM port in the switch's own words (NVOS `nv show interface`): logical/physical/speed,
+    e.g. Active/LinkUp/800G, so the rest of the dashboard treats both sources alike."""
+    logical = {"Init": "Initialize", "Initialized": "Initialize", "Arm": "Armed"}.get(logical or "", logical or "")
+    physical = (physical or "").replace(" ", "")
+    lanes = int(re.sub(r"\D", "", width or "") or 0)
+    gbps = LANE_GBPS.get((speed or "").upper())
+    rate = "%dG" % (gbps * lanes) if gbps and lanes and logical == "Active" else ""
+    return "%s/%s/%s" % (logical, physical, rate)
+
+
+def fetch_ports(profile_path: Path, target_dir: Path, progress: dict, timeout: int = 150) -> dict:
+    """Every switch port's state from UFM REST (/ufmRest/resources/ports): one HTTPS call from the
+    jump host instead of an SSH login to each switch. Read-only (GET)."""
+    prof = read_profile(profile_path)
+    if not prof["has_rest"]:
+        raise RuntimeError("Switch states from UFM need the UFM web (REST) user. Run ./scripts/configure_ufm_access.sh.")
+    if subprocess.run(["tsh", "status"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode:
+        raise RuntimeError("Teleport login expired. Run: tsh login")
+    try:
+        pins = json.loads((target_dir / "tls-pins.json").read_text())
+    except (OSError, ValueError):
+        pins = {}
+    password = keychain_password(prof["rest_service"], prof["rest_account"])
+    payload = {"password": password, "user": prof["rest_user"], "hosts": prof["rest_hosts"], "path": PORTS_PATH,
+               "pins": pins, "timeout": timeout - 30, "reduce": "ports", "fields": PORT_FIELDS}
+    del password
+    events = _run_worker(prof, REST_WORKER, payload, progress, timeout,
+                         {"trying": ("connecting", "UFM REST on %s via " + prof["jump_host"]),
+                          "authenticating": ("reading", "reading switch port states from UFM %s")})
+    got = next((e for e in events if e.get("event") == "links"), None)
+    errors = ["%s: %s" % (e["host"], e.get("detail", "")) for e in events if e.get("event") == "failed"]
+    if not got:
+        raise RuntimeError("No UFM host returned port states. " + " | ".join(errors[-2:]))
+    rows = json.loads(gzip.decompress(base64.b64decode(got["data"], validate=True)))
+    ports = {}
+    for row in rows:
+        item = dict(zip(PORT_FIELDS, row))
+        name, port = item["system_name"], str(item["dname"] or "")
+        if not re.match(r"^(sw\d+p\d+|fnm\d+)$", port, re.I):
+            continue  # per-chip/plane objects; the aggregated swNpM port carries the cable's state
+        ports.setdefault(name, {})[(name, port.lower())] = port_state(item["logical_state"], item["physical_state"],
+                                                                     item["active_speed"], item["active_width"])
+    return {"host": got["host"], "objects": got["count"], "ports": ports, "skipped": errors}
 
 
 def _run_worker(prof: dict, script: str, payload: dict, progress: dict, timeout: int, steps: dict) -> list:

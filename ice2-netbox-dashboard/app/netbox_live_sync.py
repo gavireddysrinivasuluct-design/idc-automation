@@ -211,6 +211,7 @@ class SyncState:
         self.full_every_hours = getattr(opts, "full_netbox_every_hours", 6.0)
         self.device_parallel = getattr(opts, "device_parallel", 10)
         self.fanout = getattr(opts, "fanout", "local")
+        self.switch_source = getattr(opts, "switch_source", None) or "auto"
         self.netbox_every_hours = getattr(opts, "netbox_every_hours", 0.0)
         self.stale_after_minutes = getattr(opts, "stale_after_minutes", 60.0)
         # Evidence freshness: which switches the latest finished collection reached, when each
@@ -809,6 +810,62 @@ class SyncState:
             return False
         return parser.has_section("ufm")
 
+    def ufm_rest_configured(self) -> bool:
+        """A UFM web (REST) user is set up in the profile: switch states can come from UFM."""
+        import configparser
+        parser = configparser.ConfigParser(interpolation=None)
+        try:
+            parser.read(self.device_profile, encoding="utf-8")
+        except (configparser.Error, TypeError):
+            return False
+        return parser.has_section("ufm") and all(parser.get("ufm", k, fallback="") for k in ("rest_user", "rest_keychain_service", "rest_keychain_account"))
+
+    def switches_from_ufm(self) -> bool:
+        if self.switch_source == "ssh":
+            return False
+        return self.switch_source == "ufm" or self.ufm_rest_configured()
+
+    def collect_from_ufm(self, progress: dict) -> dict:
+        """Switch port states for Live link state from UFM REST: one HTTPS call over the jump-host
+        session instead of an SSH login to every switch. Applied exactly like a switch collection
+        (per-switch replacement, coverage, saved snapshot)."""
+        t0 = time.monotonic()
+        _sys.path.insert(0, str(APP_DIR))
+        import ufm_fetch  # noqa: E402
+        got = ufm_fetch.fetch_ports(self.device_profile, self.ufm_scan.parent, progress)
+        by_switch = got["ports"]
+        expected = set(self.expected_switches())
+        if expected:
+            by_switch = {host: ports for host, ports in by_switch.items() if host in expected}
+        if not by_switch:
+            raise RuntimeError("UFM returned no ports for the backend switches in %s." % (self.devices.name if self.devices else "the inventory"))
+        stamp = now_iso()
+        switches = sorted(by_switch)
+        coverage = self.collection_coverage({"output_dir": STATE_DIR / "ufm-ports", "ports_by_switch": by_switch}, switches, stamp)
+        with self.lock:
+            for host, ports in by_switch.items():
+                for key in [k for k in self.live if k[0] == host and k not in ports]:
+                    del self.live[key]
+                self.live.update(ports)
+                self.switch_at[host] = stamp
+            self.collected_at = stamp
+            self.switches = switches
+            self.last_ok = set(switches)
+            self.run_ok = set(switches)
+            self.coverage = coverage
+            self.evidence_note = ""
+            self.source = "UFM %s port states %s (%d of %d switches)" % (got["host"], stamp, len(switches), coverage["expected"])
+            snapshot = {"%s|%s" % key: value for key, value in self.live.items() if "-swi-" in key[0]}
+            self.bump()
+        self.write_json_atomic(LATEST, {"version": 2, "fingerprint": self.evidence_fingerprint(), "collected_at": stamp, "source": "ufm",
+                                        "switches": switches, "last_ok": switches, "switch_at": self.switch_at,
+                                        "coverage": coverage, "ports": snapshot})
+        return {"state": "complete" if coverage["state"] == "verified" else "partial", "source": "ufm", "host": got["host"],
+                "switches": len(switches), "done": len(switches), "total": coverage["expected"], "failed": len(coverage["missing"]),
+                "updated_interfaces": sum(len(p) for p in by_switch.values()), "ufm_objects": got["objects"],
+                "seconds": round(time.monotonic() - t0, 1), "finished_at": stamp,
+                "coverage": {k: coverage[k] for k in ("state", "expected", "reached", "missing", "missing_ports")}}
+
     def ufm_fetch_state(self) -> dict:
         runs = sorted(self.ufm_fetches.values(), key=lambda r: r["started_at"])
         last = {k: v for k, v in runs[-1].items() if k != "thread"} if runs else None
@@ -1155,6 +1212,14 @@ class SyncState:
         def device_phase() -> None:
             start = time.monotonic()
             record["devices"] = {"state": "running"}
+            if self.switches_from_ufm():
+                record["devices"] = {"state": "running", "source": "ufm", "step": "connecting", "detail": "UFM REST"}
+                try:
+                    record["devices"] = self.collect_from_ufm(record["devices"])
+                except Exception as error:
+                    record["devices"] = {"state": "failed", "source": "ufm", "error": "Switch states from UFM: %s" % error}
+                timings["devices_s"] = round(time.monotonic() - start, 1)
+                return
             try:
                 STATE_DIR.mkdir(exist_ok=True)
                 address_file = STATE_DIR / (run_id + "-management-addresses.csv")
@@ -1621,6 +1686,9 @@ def main() -> int:
     parser.add_argument("--ufm-scan", type=Path, default=DEFAULT_UFM_SCAN,
                         help="Local copy of UFM's fabric scan (ibdiagnet2.lst[.gz]) for the cabling check; scripts/fetch_ufm_scan.sh puts it here.")
     tuning = parser.add_argument_group("performance")
+    parser.add_argument("--switch-source", choices=["auto", "ufm", "ssh"], default="auto",
+                        help="Where Sync fabric reads switch port states: ufm = one UFM REST call (needs the UFM web user); "
+                             "ssh = log in to every switch (nv show interface); auto (default) = ufm when the UFM web user is set up.")
     tuning.add_argument("--fanout", choices=["local", "jump"], default="local",
                         help="jump: one Teleport session fans out from the jump host (needs python3 there; falls back to local automatically).")
     tuning.add_argument("--device-parallel", type=int, default=10, help="Concurrent switch sessions (1-25). Raise gradually.")
