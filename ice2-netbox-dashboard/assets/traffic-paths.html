@@ -183,51 +183,8 @@ footer{font-size:12.5px;color:var(--muted);border-top:1px solid var(--line);padd
   </table></div>
 </section>
 
-<section aria-labelledby="r-h">
-  <div style="display:grid;gap:6px"><div class="eyebrow">Why the paths look like this</div><h2 id="r-h">Four wiring rules</h2></div>
-  <div class="grid2">
-    <div class="card"><div class="tag">L1 · LEAF ⟷ SPINE</div><h3>Every leaf reaches every spine twice</h3>
-      <p>Leaf <i>j</i> uses its upper ports for spines; spine <i>i</i> uses one port pair per leaf. Nothing on a spine is rail-specific: BES7 carries rail 1, 2, 3 and 4 traffic from all 4 pods.</p>
-      <div class="formula">BEL<i>j</i> sw(36+<i>i</i>)p1/p2  ⟷  BES<i>i</i> sw<i>j</i>p1/p2</div>
-      <p class="note">Example: BEL5 sw43p1 ⟷ BES7 sw5p1. A leaf has 36 spines × 2 = 72 uplinks; a spine has 64 leaves × 2 = 128 downlinks.</p></div>
-    <div class="card"><div class="tag">G1 · PODS AND SUs</div><h3>An SU is one leaf from each rail block</h3>
-      <p>Each pod owns 16 leaves in four rail blocks of four. SU <i>k</i> of a pod takes the <i>k</i>-th leaf of every block.</p>
-      <div class="formula">leaf = 16·(pod−1) + 4·(rail−1) + SU-in-pod</div>
-      <p class="note">Pod 1: rail 1 = BEL1–4, rail 2 = BEL5–8, rail 3 = BEL9–12, rail 4 = BEL13–16. SU1 = BEL1, 5, 9, 13. SU2 = BEL2, 6, 10, 14.</p></div>
-    <div class="card"><div class="tag">G2 · TRAY SLOTS</div><h3>A tray sits on the same port of its four leaves</h3>
-      <p>Leaf ports sw1–sw36 face GPUs, two trays per cage (p1, p2), so 72 tray slots per SU. A tray's four GPUs land on the same port number of the SU's four leaves.</p>
-      <div class="formula">slot = 2·(N−1) + M   for leaf port swNpM, N ≤ 36</div>
-      <p class="note">Example: tray nvl72d031-T04 (gpu1349) is SU2 slot 22 on BEL2, BEL6, BEL10 and BEL14, port sw11p2.</p></div>
-    <div class="card"><div class="tag">G3 · RAILS</div><h3>GPU <i>r</i> of every tray is rail <i>r</i></h3>
-      <p>Each GPU has its own ConnectX-8 port. Rail <i>r</i> is adapter <code>mlx5_(r−1)</code> (RDMA<i>r</i>), so the four GPUs of a tray never share a leaf.</p>
-      <div class="formula"><span class="r1">mlx5_0 → rail 1</span> · <span class="r2">mlx5_1 → rail 2</span> · <span class="r3">mlx5_2 → rail 3</span> · <span class="r4">mlx5_3 → rail 4</span></div>
-      <p class="note">Leaves: 72 × 800G down and 72 × 800G up, so the fabric is non-blocking (1:1).</p></div>
-  </div>
-</section>
 
-<section aria-labelledby="p-h">
-  <div class="grid2">
-    <div class="card"><div class="eyebrow">The separation that does exist</div><h2 id="p-h" style="font-size:24px">One cable, four planes</h2>
-      <p>A Q3400 switch is four chips. Each 800G cable carries four 200G lanes, and lane <i>m</i> only ever meets chip <i>m</i> at the far end. So the fabric is four identical parallel planes. A flow uses all four, and a lost plane removes a quarter of that cable's bandwidth without breaking the path.</p>
-      <div class="lanes" aria-label="Four planes in one cable">
-        <div class="lane"><span>leaf A1</span><div class="wire"></div><span>spine A1</span></div>
-        <div class="lane"><span>leaf A2</span><div class="wire"></div><span>spine A2</span></div>
-        <div class="lane"><span>leaf A3</span><div class="wire"></div><span>spine A3</span></div>
-        <div class="lane"><span>leaf A4</span><div class="wire"></div><span>spine A4</span></div>
-      </div>
-      <p class="note">That is why UFM reports a cable as "degraded" with 3/4 planes, and why a cable whose planes land on different far ends is flagged as a plane split.</p></div>
-    <div class="card"><div class="eyebrow">What a failure takes away</div><h2 style="font-size:24px">Blast radius</h2>
-      <div class="ladder">
-        <div><b>One leaf–spine cable</b><span>1 of 72 uplinks on that leaf. Adaptive routing uses the other 71.</span></div>
-        <div><b>One spine</b><span>1/36 of every leaf's uplinks, across all rails and pods. Nothing is cut off.</span></div>
-        <div><b>One leaf</b><span>One rail of all 72 trays in its SU. Those GPUs still reach the fabric by NVLink to a tray-mate (PXN), at reduced bandwidth.</span></div>
-        <div><b>One GPU port</b><span>That GPU's direct path. NCCL routes its traffic through a tray-mate over NVLink.</span></div>
-        <div><b>Two swapped cables</b><span>No change: each leaf still has exactly two cables to each spine. Only labels and runbooks are wrong (BEL21, BEL55 today).</span></div>
-      </div></div>
-  </div>
-</section>
 
-<footer>Built from the ICE2 approved design (<code>nscale_Compute.topo</code>) and NetBox, which agree on all 4,608 leaf–spine cables. Each SU's 72 tray slots are 4 NVL72 racks of 18: rack 1 is slots 1–18, rack 2 is 19–36, rack 3 is 37–54 and rack 4 is 55–72. UFM's tray names (for example <code>nvl72d031-T04</code>) confirm it: each of the 63 named racks sits in exactly one rack position. PXN is NCCL's default on NVLink-connected GPUs; a job can turn it off with <code>NCCL_PXN_DISABLE=1</code>.<span id="back"></span></footer>
 </div>
 
 <script>
@@ -413,7 +370,7 @@ function render(presetIdx) {
   anim = requestAnimationFrame(step);
 }
 setPreset(1);
-if (window.top === window && /^(127\.0\.0\.1|localhost)$/.test(location.hostname)) document.getElementById('back').innerHTML = ' <a href="/">← Back to the dashboard</a>';
+if (window.top === window && /^(127\.0\.0\.1|localhost)$/.test(location.hostname)) document.querySelector('.wrap').insertAdjacentHTML('beforeend', '<p style="font-size:13px"><a href="/">← Back to the dashboard</a></p>');
 })();
 </script>
 </body>
