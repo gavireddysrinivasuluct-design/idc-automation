@@ -287,7 +287,6 @@ svg.ufm .lvlayer circle.lbadge{display:none}
   <button class="btn primary" id="sync-btn" type="button" title="Collect switch port states and fetch from UFM">&#x27F3; Sync fabric</button>
 </div>
 <div class="steps" id="sync-steps" hidden></div>
-<div class="incbar" id="incbar" hidden></div>
 
 <div class="rail" id="rail"></div>
 
@@ -1133,7 +1132,7 @@ const SEV = {critical:['Critical','#ff5e78'], major:['Major','#ffb547'], minor:[
 let INC = null, incStamp = null;
 const sevChip = (k, n) => `<span class="sev${n === 0 ? ' zero' : ''}" style="--sc:${SEV[k][1]}">${n === undefined ? '' : n + ' '}${SEV[k][0]}</span>`;
 function renderIncBar() {
-  const bar = document.getElementById('incbar'), x = LIVE.incidents;
+  const bar = document.getElementById('incbar'), x = LIVE.incidents; if (!bar) return;
   if (!SERVICE || !x || !x.counts) { bar.hidden = true; return; }
   const c = x.counts, worst = ['critical', 'major', 'minor', 'info'].find(k => c[k]) || null;
   bar.hidden = false; bar.style.setProperty('--ic', worst && worst !== 'info' ? SEV[worst][1] : CB.ok);
