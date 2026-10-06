@@ -592,7 +592,7 @@ What it cannot see: link errors, congestion and UFM alarms (not collected yet), 
 1. **⟳ Sync fabric runs these phases in parallel:**
    - **Switches.** Where the switch port states come from (`--switch-source`):
      - **UFM (default when the UFM web user from [4.9](#49-optional-let-the-dashboard-fetch-from-ufm) is set up).** One read-only call to UFM REST `GET /ufmRest/resources/ports`, over the same `tsh ssh` session to `jmp0` that the UFM fetch uses. UFM returns about 19,000 port objects; the worker on `jmp0` keeps only the switch ports and a few fields (switch, port, logical and physical state, speed, BER severity), so well under 1 MB crosses Teleport. Each port is turned into the switch's own wording (`Active/LinkUp/800G`), so Live link state works exactly as before. No switch login, password or host key is needed, and it takes seconds instead of about half a minute.
-     - **SSH** (`--switch-source ssh`, or when no UFM web user is set up). Switch management IPs come from NetBox (2 bulk queries, or the 24-hour cache), then `nv show interface --output json` is collected from all 100 switches. Use it to check the switches' own view independently of UFM.
+     - **SSH** (the **Sync with switch SSH** button next to Sync fabric for a single run, `--switch-source ssh` for every run, or automatically when no UFM web user is set up). Switch management IPs come from NetBox (2 bulk queries, or the 24-hour cache), then `nv show interface --output json` is collected from all 100 switches. Use it to check the switches' own view independently of UFM.
    - **UFM**, when [4.9](#49-optional-let-the-dashboard-fetch-from-ufm) is set up: the same as **Fetch from UFM**.
    - **NetBox**, only on the first sync (no inventory yet), or when `--netbox-every-hours` is set and the inventory is older than that. **Refresh NetBox** runs this phase alone.
      - A full pull reads every backend cable, with pages trimmed to the needed fields; it runs the first time and every `--full-netbox-every-hours` (6).
@@ -721,7 +721,7 @@ Also revoke the NetBox API token in NetBox (**API Tokens → delete**).
 | `GET /` | Dashboard |
 | `GET /traffic-paths.html` | How traffic flows (rack, rail, SU and pod paths) |
 | `GET /api/live` | Live link state for every designed link in use, plus sync, UFM-fetch and incident summaries (ETag and gzip; `304` when unchanged) |
-| `POST /api/sync` · `GET /api/sync/<run>` | Start a fabric sync (switches, UFM, and NetBox when due), or check its progress and per-phase timings |
+| `POST /api/sync` · `GET /api/sync/<run>` | Start a fabric sync (switches, UFM, and NetBox when due; `?switches=ssh` logs in to every switch for this run), or check its progress and per-phase timings |
 | `POST /api/netbox/refresh` | NetBox inventory only (progress at `GET /api/sync/<run>`) |
 | `POST /api/refresh` · `GET /api/refresh/<run>` | Device collection only |
 | `GET /api/verify/<cable_id>` | One cable: current NetBox record vs. live state |

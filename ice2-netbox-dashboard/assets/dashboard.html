@@ -284,7 +284,8 @@ svg.ufm .lvlayer circle.lbadge{display:none}
 <div class="sync" id="sync" role="status" aria-live="polite">
   <span id="ldot"></span><strong id="sync-state">Loading live state…</strong><span id="sync-detail"></span><span class="grow"></span>
   <button class="btn" id="nb-btn" type="button" title="NetBox is inventory (IPs, models, cable records): read it again now">Refresh NetBox</button>
-  <button class="btn primary" id="sync-btn" type="button" title="Collect switch port states and fetch from UFM">&#x27F3; Sync fabric</button>
+  <button class="btn" id="ssh-btn" type="button" title="Same as Sync fabric, but read each switch's own port states by logging in to all 100 switches (nv show interface). Use it to check the switches independently of UFM.">Sync with switch SSH</button>
+  <button class="btn primary" id="sync-btn" type="button" title="Switch port states from UFM, plus the UFM live links">&#x27F3; Sync fabric</button>
 </div>
 <div class="steps" id="sync-steps" hidden></div>
 
@@ -705,7 +706,10 @@ const syncBtn = document.getElementById('sync-btn'), steps = document.getElement
 function applyLive(v) { LIVE = v; indexLive(); drawLive(); renderPanels(); if (cur) { const keep = insp.querySelector('.sync-result'); inspect(cur); if (keep) insp.prepend(keep); } }
 let liveEtag = null;
 async function loadLive() { try { const r = await fetch('/api/live', {cache:'no-cache'}); if (!r.ok || !(r.headers.get('content-type') || '').includes('json')) throw Error('HTTP ' + r.status); const tag = r.headers.get('etag'); if (tag && tag === liveEtag) { renderPanels(); return LIVE; } liveEtag = tag; const v = await r.json();
-    applyLive(v); syncBtn.disabled = nbBtn.disabled = !!v.sync_running; return v; }
+    applyLive(v); syncBtn.disabled = nbBtn.disabled = sshBtn.disabled = !!v.sync_running;
+    const ss = v.switch_source || {}; sshBtn.hidden = ss.default === 'ssh';  // Sync fabric already logs in to the switches
+    if (ss.ssh_ready === false) { sshBtn.disabled = true; sshBtn.title = 'Switch logins are not set up on this Mac (device profile and approved known_hosts, README 4.5-4.7).'; }
+    return v; }
   catch (err) { document.getElementById('sync-state').textContent = 'Sync service unreachable · showing last known state'; document.getElementById('sync-state').className = 'bad'; return null; } }
 const fmtS = v => v == null ? '' : v < 60 ? v.toFixed(1) + ' s' : Math.floor(v / 60) + ' min ' + Math.round(v % 60) + ' s';
 const stepHtml = (name, s) => { const st = (s && s.state) || 'pending', c = st === 'complete' ? LS_COL.active : st === 'failed' ? LS_COL.down : st === 'running' || st === 'partial' ? LS_COL.init : 'var(--faint)';
@@ -715,31 +719,32 @@ const stepHtml = (name, s) => { const st = (s && s.state) || 'pending', c = st =
   else if (s && name === 'UFM') det = st === 'running' ? `${esc((typeof UFM_STEP !== 'undefined' && UFM_STEP[s.step]) || s.step || '')} ${esc(s.detail || '')}` : st === 'complete' ? `${s.source === 'rest' ? 'live links' : 'scan file'} from ${esc(s.host || '')} · ${s.swaps && s.miscabled === s.swaps * 2 ? `${s.swaps} crossed pair${s.swaps === 1 ? '' : 's'}` : `${s.miscabled ?? '?'} miscabled`} · ${(s.trays || 0).toLocaleString()} trays` : '';
   else if (s && name === 'NetBox') det = st === 'complete' ? `${s.mode === 'incremental' ? `incremental · ${s.changed} changed in log` : 'full'} · ${s.checked.toLocaleString()} cables · ${s.mismatches} differ · ${s.missing} missing · ${s.requests} API calls` : st === 'running' ? (s.mode === 'incremental' ? `change log · ${s.changed ?? '…'} cables to re-read` : s.pages_total ? `${s.pages_completed}/${s.pages_total} cable pages` : 'reading change log / cable pages…') : '';
   else if (s && (name === 'Devices' || name === 'Switches') && s.source === 'ufm' && st === 'running') det = 'reading every switch port from UFM (one REST call)…';
-  else if (s && (name === 'Devices' || name === 'Switches')) det = (s.source === 'ufm' && st !== 'failed' ? `from UFM ${esc(s.host || '')} · ` : '') + (st === 'running' ? (s.total ? `${s.done || 0}/${s.total} switches${s.failed ? ` · ${s.failed} failed` : ''}${s.fanout ? ' · ' + s.fanout + ' fan-out' : ''}` : `resolving management IPs${s.address_source ? ' · ' + s.address_source : ''}…`)
+  else if (s && (name === 'Devices' || name === 'Switches')) det = (s.source === 'ufm' && st !== 'failed' ? `from UFM ${esc(s.host || '')} · ` : s.source === 'ssh' && st !== 'failed' ? 'switch SSH · ' : '') + (st === 'running' ? (s.total ? `${s.done || 0}/${s.total} switches${s.failed ? ` · ${s.failed} failed` : ''}${s.fanout ? ' · ' + s.fanout + ' fan-out' : ''}` : `resolving management IPs${s.address_source ? ' · ' + s.address_source : ''}…`)
     : (st === 'complete' || st === 'partial') ? `${s.coverage ? `${s.coverage.state === 'verified' ? 'verified · ' : ''}${s.coverage.reached}/${s.coverage.expected} switches${s.coverage.missing.length ? ` (not reached: ${s.coverage.missing.slice(0, 6).map(devId).join(', ')}${s.coverage.missing.length > 6 ? '…' : ''})` : ''}${Object.keys(s.coverage.missing_ports || {}).length ? ` · designed ports not reported on ${Object.keys(s.coverage.missing_ports).map(devId).join(', ')}` : ''}` : (s.switches || '?') + ' switches'} · ${(s.updated_interfaces || 0).toLocaleString()} IB ports${s.failed ? ` · ${s.failed} failed` : ''} · ${fmtS(s.seconds)}${s.address_source ? ' · IPs: ' + s.address_source : ''}${s.fanout_fallback ? ' · fell back to local fan-out: ' + esc(s.fanout_fallback) : ''}` : '');
   return `<span class="step" style="--c:${st === 'skipped' ? 'var(--faint)' : c}"><i class="${st === 'running' ? 'spin' : ''}"></i><b>${name}</b> ${st}${det ? ' · ' + det : ''}</span>`; };
 const timingHtml = t => !t ? '' : [['devices', t.devices_s], ['IPs', t.addresses_s], ['UFM', t.ufm_s], ['NetBox', t.netbox_s]].filter(x => x[1] != null).map(([k, v]) => `${k} ${fmtS(v)}`).join(' ‖ ');
-const nbBtn = document.getElementById('nb-btn');
+const nbBtn = document.getElementById('nb-btn'), sshBtn = document.getElementById('ssh-btn');
 const allSteps = x => stepHtml('Switches', x.devices) + stepHtml('UFM', x.ufm) + stepHtml('NetBox', x.netbox);
 async function runSync(kind) {
   if (!SERVICE) { steps.hidden = false; steps.innerHTML = `<span class="step" style="--c:${LS_COL.init}"><i></i><b>Sync needs the local service.</b> Run <code>python3 app/netbox_live_sync.py</code> and open <code>http://127.0.0.1:8765/</code>; the credentials stay on your Mac.</span>`; return; }
-  const netboxOnly = kind === 'netbox';
-  syncBtn.disabled = nbBtn.disabled = true; steps.hidden = false;
-  steps.innerHTML = netboxOnly ? stepHtml('NetBox', {state:'running'}) : stepHtml('Switches', {state:'running'}) + stepHtml('UFM', {state:'pending'});
-  try { const r = await fetch(netboxOnly ? '/api/netbox/refresh' : '/api/sync', {method:'POST'}), d = await r.json(); if (!r.ok) throw Error(d.error);
+  const netboxOnly = kind === 'netbox', viaSsh = kind === 'ssh';
+  syncBtn.disabled = nbBtn.disabled = sshBtn.disabled = true; steps.hidden = false;
+  steps.innerHTML = netboxOnly ? stepHtml('NetBox', {state:'running'}) : stepHtml('Switches', {state:'running', source: viaSsh ? 'ssh' : undefined}) + stepHtml('UFM', {state:'pending'});
+  try { const r = await fetch(netboxOnly ? '/api/netbox/refresh' : viaSsh ? '/api/sync?switches=ssh' : '/api/sync', {method:'POST'}), d = await r.json(); if (!r.ok) throw Error(d.error);
     let misses = 0;
     const poll = async () => { let x;
       try { const p = await fetch(`/api/sync/${d.run_id}`); x = await p.json(); if (!p.ok) throw Error(x.error || 'HTTP ' + p.status); misses = 0; }
       catch (err) { if (++misses < 6) { steps.insertAdjacentHTML('beforeend', misses === 1 ? `<span class="step" id="sync-retry" style="--c:${LS_COL.init}"><i></i>status unavailable, retrying…</span>` : ''); setTimeout(poll, 2000 * misses); return; }
         steps.insertAdjacentHTML('beforeend', `<span class="step" style="--c:${LS_COL.down}"><i></i><b>Lost contact with the service</b> ${esc(err.message)} · the sync may still finish; the page refreshes when it does</span>`);
-        syncBtn.disabled = nbBtn.disabled = false; return; }
+        syncBtn.disabled = nbBtn.disabled = sshBtn.disabled = false; return; }
       steps.innerHTML = (netboxOnly ? stepHtml('NetBox', x.netbox) : allSteps(x)) + (x.finished_at ? `<span class="step" style="--c:${x.state === 'complete' ? LS_COL.active : LS_COL.init}"><b>${netboxOnly ? 'NetBox refresh' : 'Sync'} ${esc(x.state)} in ${fmtS(x.timings && x.timings.total_s)}</b> ${esc(timingHtml(x.timings))} · ${esc(fmtTime(x.finished_at))}</span>` : '');
       if (x.state === 'running') { loadLive(); setTimeout(poll, 1500); return; }
       await loadLive(); if (x.ufm && x.ufm.state === 'complete') { cabStamp = null; loadCab(); if (typeof loadInc === 'function') loadInc(); }
-      syncBtn.disabled = nbBtn.disabled = false; };
+      syncBtn.disabled = nbBtn.disabled = sshBtn.disabled = false; };
     poll();
-  } catch (err) { steps.innerHTML = `<span class="step" style="--c:${LS_COL.down}"><i></i><b>${netboxOnly ? 'NetBox refresh' : 'Sync'} could not start</b> ${esc(err.message)}</span>`; syncBtn.disabled = nbBtn.disabled = false; } }
+  } catch (err) { steps.innerHTML = `<span class="step" style="--c:${LS_COL.down}"><i></i><b>${netboxOnly ? 'NetBox refresh' : 'Sync'} could not start</b> ${esc(err.message)}</span>`; syncBtn.disabled = nbBtn.disabled = sshBtn.disabled = false; } }
 nbBtn.onclick = () => runSync('netbox');
+sshBtn.onclick = () => runSync('ssh');
 syncBtn.onclick = () => runSync('fabric');
 { const b = document.createElement('button'); b.className = 'chip'; b.style.setProperty('--c', LS_COL.down); b.innerHTML = '<i></i>Live status'; b.setAttribute('aria-pressed', 'true');
   b.onclick = () => { liveOn = !liveOn; b.setAttribute('aria-pressed', liveOn); svg.classList.toggle('nolive', !liveOn); }; document.getElementById('layers').appendChild(b); }

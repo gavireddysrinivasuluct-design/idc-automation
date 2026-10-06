@@ -14,7 +14,8 @@ GET  /api/health          NetBox reachability + live-evidence summary (never fai
 GET  /api/verify/<id>     one cable: current NetBox record vs. live switch state
 POST /api/refresh         start a read-only collection across the 100 backend switches
 GET  /api/refresh/<run>   collection progress
-POST /api/sync            Sync fabric: switch collection + UFM fetch (+ NetBox when its inventory is due)
+POST /api/sync            Sync fabric: switch states + UFM fetch (+ NetBox when its inventory is due);
+                          ?switches=ssh logs in to every switch for this run, ?switches=ufm reads UFM
 POST /api/netbox/refresh  NetBox inventory and cable records only
 GET  /api/sync/<run>      sync progress with per-phase timings
 GET  /api/cabling         design topology vs. what UFM actually sees (NetBox alongside)
@@ -665,6 +666,7 @@ class SyncState:
             "cables": {"total": len(links), **cable_counts},
             "unverified": unverified_rows,
             "freshness": self.freshness(), "code_version": CODE_VERSION,
+            "switch_source": {"default": "ufm" if self.switches_from_ufm() else "ssh", "ssh_ready": self.ssh_ready(), "ufm_ready": self.ufm_rest_configured()},
             "coverage": self.coverage,
             "reference": "design topology" if links and links[0][6] == "design" else "NetBox",
             "exceptions": exceptions,
@@ -1151,8 +1153,19 @@ class SyncState:
             return False
         return age_hours(self.nb_synced_at) >= self.netbox_every_hours
 
-    def start_sync(self, kind: str = "fabric") -> dict:
-        """kind="fabric": switch states + UFM (+ NetBox when due). kind="netbox": NetBox only."""
+    def ssh_ready(self) -> bool:
+        """The inputs a switch login collection needs are in place."""
+        return all(path and Path(path).is_file() for path in (COLLECTOR, self.device_profile, self.devices, self.known_hosts, self.commands))
+
+    def start_sync(self, kind: str = "fabric", switches: str | None = None) -> dict:
+        """kind="fabric": switch states + UFM (+ NetBox when due). kind="netbox": NetBox only.
+        switches: "ufm" or "ssh" for this run only (default: --switch-source)."""
+        if switches not in (None, "ufm", "ssh"):
+            raise RuntimeError("Unknown switch source %r (use ufm or ssh)." % switches)
+        if switches == "ssh" and not self.ssh_ready():
+            raise RuntimeError("Switch logins are not set up (device profile, approved known_hosts). See README 4.5-4.7.")
+        if switches == "ufm" and not self.ufm_rest_configured():
+            raise RuntimeError("The UFM web user is not set up. Run ./scripts/configure_ufm_access.sh.")
         with self.lock:
             if any(item.get("state") == "running" for item in self.syncs.values()):
                 raise RuntimeError("A sync is already running.")
@@ -1164,6 +1177,7 @@ class SyncState:
             skipped = lambda name, why: {"state": "skipped", "reason": why}
             self.syncs[run_id] = {
                 "state": "running", "kind": kind, "started_at": now_iso(), "timings": {},
+                "switch_source": switches or ("ufm" if self.switches_from_ufm() else "ssh"),
                 "devices": {"state": "pending"} if "devices" in phases else skipped("devices", "NetBox-only refresh"),
                 "ufm": {"state": "pending"} if "ufm" in phases else skipped("ufm", "UFM access not set up (scripts/configure_ufm_access.sh)" if kind != "netbox" else "NetBox-only refresh"),
                 "netbox": {"state": "running"} if "netbox" in phases else {"state": "skipped", "reason": ("inventory refreshes every %g h" % self.netbox_every_hours) if self.netbox_every_hours > 0 else "use Refresh NetBox to update the inventory",
@@ -1212,7 +1226,7 @@ class SyncState:
         def device_phase() -> None:
             start = time.monotonic()
             record["devices"] = {"state": "running"}
-            if self.switches_from_ufm():
+            if record.get("switch_source") == "ufm":
                 record["devices"] = {"state": "running", "source": "ufm", "step": "connecting", "detail": "UFM REST"}
                 try:
                     record["devices"] = self.collect_from_ufm(record["devices"])
@@ -1225,16 +1239,16 @@ class SyncState:
                 address_file = STATE_DIR / (run_id + "-management-addresses.csv")
                 count = self.management_addresses(address_file)
                 timings["addresses_s"] = round(time.monotonic() - start, 1)
-                record["devices"] = {"state": "running", "management_addresses": count, "address_source": self.address_source}
+                record["devices"] = {"state": "running", "source": "ssh", "management_addresses": count, "address_source": self.address_source}
             except Exception as error:
                 record["devices"] = {"state": "failed", "error": "Management-IP lookup failed: " + str(error)}
                 return
             try:
                 refresh = self.start_refresh(address_file)
                 while self.refreshes[refresh["run_id"]]["state"] == "running":
-                    record["devices"] = {**self.refresh_status(refresh["run_id"]), "address_source": self.address_source}
+                    record["devices"] = {**self.refresh_status(refresh["run_id"]), "source": "ssh", "address_source": self.address_source}
                     time.sleep(1)
-                record["devices"] = {**self.refresh_status(refresh["run_id"]), "address_source": self.address_source}
+                record["devices"] = {**self.refresh_status(refresh["run_id"]), "source": "ssh", "address_source": self.address_source}
             except Exception as error:
                 record["devices"] = {"state": "failed", "error": str(error)}
             finally:
@@ -1635,7 +1649,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         path = urlparse(self.path).path
-        actions = {"/api/refresh": self.state.start_refresh, "/api/sync": self.state.start_sync, "/api/cabling/fetch": self.state.start_ufm_fetch,
+        query = dict(part.split("=", 1) for part in urlparse(self.path).query.split("&") if "=" in part)
+        actions = {"/api/refresh": self.state.start_refresh, "/api/sync": lambda: self.state.start_sync("fabric", query.get("switches") or None),
+                   "/api/cabling/fetch": self.state.start_ufm_fetch,
                    "/api/netbox/refresh": lambda: self.state.start_sync("netbox")}
         if path not in actions:
             self.respond(HTTPStatus.NOT_FOUND, {"error": "Not found"})
