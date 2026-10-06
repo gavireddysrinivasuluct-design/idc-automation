@@ -331,13 +331,11 @@ svg.ufm .lvlayer circle.lbadge{display:none}
 </div>
 <div class="card tabs-card">
   <div class="tabs" role="tablist" aria-label="Fabric checks">
-    <button type="button" class="tab" role="tab" id="tab-inc" aria-controls="panel-inc" aria-selected="true" data-tab="inc"><span>Incidents</span><em id="tab-inc-n"></em><small>what needs attention, most severe first</small></button>
-    <button type="button" class="tab" role="tab" id="tab-cab" aria-controls="panel-cab" aria-selected="false" tabindex="-1" data-tab="cab"><span>Cabling vs UFM</span><em id="tab-cab-n"></em><small>what is actually plugged in, compared with NetBox</small></button>
+    <button type="button" class="tab" role="tab" id="tab-cab" aria-controls="panel-cab" aria-selected="true" data-tab="cab"><span>Cabling vs UFM</span><em id="tab-cab-n"></em><small>what is actually plugged in, compared with NetBox</small></button>
     <button type="button" class="tab" role="tab" id="tab-live" aria-controls="panel-live" aria-selected="false" tabindex="-1" data-tab="live"><span>Live link state</span><em id="tab-live-n"></em><small>designed links vs. switch interfaces</small></button>
     <button type="button" class="tab" role="tab" id="tab-paths" aria-controls="panel-paths" aria-selected="false" tabindex="-1" data-tab="paths"><span>Traffic paths</span><em></em><small>how GPUs talk: rack, rail, SU, pod</small></button>
   </div>
-  <div class="tabpanel" role="tabpanel" id="panel-inc" aria-labelledby="tab-inc"><div id="inc-body"></div></div>
-  <div class="tabpanel cab" role="tabpanel" id="panel-cab" aria-labelledby="tab-cab" hidden><div class="cabmeta" id="cab-meta"></div><div id="cab-body"></div></div>
+  <div class="tabpanel cab" role="tabpanel" id="panel-cab" aria-labelledby="tab-cab"><div class="cabmeta" id="cab-meta"></div><div id="cab-body"></div></div>
   <div class="tabpanel" role="tabpanel" id="panel-live" aria-labelledby="tab-live" hidden><div id="live-ex"></div></div>
   <div class="tabpanel" role="tabpanel" id="panel-paths" aria-labelledby="tab-paths" hidden style="padding:0"><iframe id="paths-frame" title="How traffic flows" style="display:block;width:100%;height:1400px;border:0;border-radius:0 0 12px 12px;background:#0a1019" loading="lazy"></iframe></div>
 </div>
@@ -1159,16 +1157,15 @@ function renderIncBar() {
   bar.hidden = false; bar.style.setProperty('--ic', worst && worst !== 'info' ? SEV[worst][1] : CB.ok);
   const top = (x.top || []).filter(i => i.severity !== 'info')[0];
   bar.innerHTML = `<b>Fabric incidents</b> ${['critical', 'major', 'minor', 'info'].map(k => sevChip(k, c[k] || 0)).join(' ')}
-    ${top ? `<span>· ${esc(top.title)}</span>` : `<span style="color:${CB.ok}">· nothing that affects the fabric</span>`}<span class="grow"></span>
-    <button class="btn" type="button" id="inc-open">View incidents</button>`; }
+    ${top ? `<span>· ${esc(top.title)}</span>` : `<span style="color:${CB.ok}">· nothing that affects the fabric</span>`}`; }
 async function loadInc() {
-  if (!SERVICE) { document.getElementById('inc-body').innerHTML = '<div class="incnone">Incidents need the local service: open http://127.0.0.1:8765/.</div>'; return; }
+  if (!SERVICE) return;
   try { const r = await fetch('/api/incidents'); INC = await r.json(); if (!r.ok) throw Error(INC.error); }
-  catch (e) { document.getElementById('inc-body').innerHTML = `<div class="incnone" style="color:${CB.err}">Could not load incidents: ${esc(e.message)}</div>`; return; }
+  catch (e) { return; }
   if (INC.counts) { LIVE.incidents = {counts: INC.counts, generated_at: INC.generated_at, top: (INC.incidents || []).slice(0, 3)}; renderIncBar(); const t = document.getElementById('tab-inc-n'); if (t) { const c = INC.counts, n = (c.critical || 0) + (c.major || 0); t.textContent = (n || c.minor || 0) ? (n || c.minor).toLocaleString() : '✓'; t.style.setProperty('--c', c.critical ? SEV.critical[1] : n ? SEV.major[1] : c.minor ? SEV.minor[1] : '#38d9a0'); } }
   renderInc(); }
 function renderInc() {
-  const body = document.getElementById('inc-body'); if (!INC) return;
+  const body = document.getElementById('inc-body'); if (!INC || !body) return;
   const items = INC.incidents || [], c = INC.counts || {};
   const head = `<p class="small" style="margin:0 0 12px">${['critical', 'major', 'minor', 'info'].map(k => sevChip(k, c[k] || 0)).join(' &nbsp; ')} &nbsp;·&nbsp; from the Cabling vs UFM check and the Live link state, checked ${esc(fmtTime(INC.generated_at))}.
     <b>Critical</b> = fabric-wide or many GPUs affected now · <b>Major</b> = hurts jobs or routing · <b>Minor</b> = single links or labels · <b>Info</b> = documentation and data.</p>`;
@@ -1203,7 +1200,7 @@ document.querySelectorAll('a[href="traffic-paths.html"]').forEach(a => a.addEven
   tabs.forEach((t, i) => { t.addEventListener('click', () => show(t.dataset.tab));
     t.addEventListener('keydown', e => { if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') { e.preventDefault(); const n = tabs[(i + (e.key === 'ArrowRight' ? 1 : tabs.length - 1)) % tabs.length]; show(n.dataset.tab, true); } }); });
   let saved = null; try { saved = localStorage.getItem('ice2-check-tab'); } catch (e) {}
-  show(['live', 'cab', 'inc', 'paths'].includes(saved) ? saved : 'inc');
+  show(['live', 'cab', 'paths'].includes(saved) ? saved : 'cab');
   window.showCheckTab = show;
   const badge = (id, n, c, okText) => { const e = document.getElementById(id); if (!e) return; e.textContent = n ? n.toLocaleString() : okText || ''; e.style.setProperty('--c', n ? c : '#38d9a0'); e.title = n ? n + ' to review' : 'nothing to review'; };
   const updBadges = () => {
