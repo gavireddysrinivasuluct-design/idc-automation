@@ -16,19 +16,32 @@ running_here() {  # a service answers and it is this repository's version (it re
   curl --silent --fail --max-time 2 "$url/api/live" 2>/dev/null | grep -q '"freshness"'
 }
 
+stop_port() {
+  local pids; pids=$(lsof -nP -tiTCP:8765 -sTCP:LISTEN 2>/dev/null || true)
+  [ -n "$pids" ] && kill ${(f)pids} 2>/dev/null || true
+  for _ in {1..20}; do curl --silent --max-time 1 -o /dev/null "$url/" 2>/dev/null || break; sleep 0.25; done
+}
+
 if curl --silent --max-time 1 -o /dev/null "$url/" 2>/dev/null; then
   if running_here; then
-    echo "The dashboard from this repository is already running."
-    open "$url/"
-    exit 0
+    want=$(python3 app/netbox_live_sync.py --code-version 2>/dev/null || echo unknown)
+    have=$(curl --silent --max-time 2 "$url/api/live" 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin).get("code_version","none"))' 2>/dev/null || echo none)
+    if [ "$want" = "$have" ]; then
+      echo "The dashboard from this repository is already running (code $have)."
+      open "$url/"
+      exit 0
+    fi
+    echo "The running dashboard is an older version of this repository (code $have, now $want): restarting it."
+    stop_port
   fi
+fi
+if curl --silent --max-time 1 -o /dev/null "$url/" 2>/dev/null; then
   pids=$(lsof -nP -tiTCP:8765 -sTCP:LISTEN 2>/dev/null || true)
   echo "Port 8765 is used by an OLDER dashboard (not this repository):"
   [ -n "$pids" ] && ps -o pid=,command= -p ${(f)pids} 2>/dev/null | sed 's/^/  /'
   if read -q "?Stop it and start this repository's version? [y/N] "; then
     echo
-    [ -n "$pids" ] && kill ${(f)pids} 2>/dev/null || true
-    for _ in {1..20}; do curl --silent --max-time 1 -o /dev/null "$url/" 2>/dev/null || break; sleep 0.25; done
+    stop_port
   else
     echo; echo "Left the older dashboard running. Stop it, then run this again."; exit 1
   fi
@@ -48,5 +61,5 @@ nohup python3 app/netbox_live_sync.py --netbox-url 'http://127.0.0.1:8444' --dev
   --fanout jump --device-parallel 15 ${=ICE2_DASHBOARD_ARGS:-} >>"$log_file" 2>&1 &
 for _ in {1..40}; do running_here && break; sleep 0.25; done
 running_here || { echo "The dashboard did not start. Last log lines:"; tail -n 15 "$log_file"; exit 1; }
-echo "Running from $dashboard_dir ($(git -C "$dashboard_dir" log -1 --format='%h %s' 2>/dev/null || echo 'no git'))."
+echo "Running from $dashboard_dir ($(git -C "$dashboard_dir" log -1 --format='%h %s' 2>/dev/null || echo 'no git')), code $(python3 app/netbox_live_sync.py --code-version 2>/dev/null)."
 open "$url/"

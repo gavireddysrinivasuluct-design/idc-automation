@@ -663,7 +663,7 @@ class SyncState:
             "endpoints": {"compared": sum(counts.values()) - counts["not_collected"] - counts["stale"], **counts},
             "cables": {"total": len(links), **cable_counts},
             "unverified": unverified_rows,
-            "freshness": self.freshness(),
+            "freshness": self.freshness(), "code_version": CODE_VERSION,
             "coverage": self.coverage,
             "reference": "design topology" if links and links[0][6] == "design" else "NetBox",
             "exceptions": exceptions,
@@ -1583,7 +1583,22 @@ class Handler(BaseHTTPRequestHandler):
             self.respond(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": "%s: %s" % (type(error).__name__, error)})
 
 
+def code_version() -> str:
+    """Fingerprint of the code this service runs (app/*.py + assets/*.html), so the launcher
+    can tell a running service from an older checkout and restart it."""
+    digest = hashlib.sha1()
+    for path in sorted(list(APP_DIR.glob("*.py")) + list(ASSETS_DIR.glob("*.html"))):
+        digest.update(path.name.encode() + b"\0" + path.read_bytes())
+    return digest.hexdigest()[:12]
+
+
+CODE_VERSION = code_version()
+
+
 def main() -> int:
+    if _sys.argv[1:] == ["--code-version"]:
+        print(CODE_VERSION)
+        return 0
     parser = argparse.ArgumentParser(description="Serve the ICE2 backend diagram with NetBox/live reconciliation.")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--netbox-url", required=True, help="Approved NetBox URL or local proxy URL.")

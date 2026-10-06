@@ -279,7 +279,7 @@ svg.ufm .lvlayer circle.lbadge{display:none}
     <h1>ICE2 Backend GPU Fabric <span>/ spine · leaf · rail</span></h1>
     <p class="sub">A two-tier rail-optimised fabric: 64 leaves fully meshed to 36 spines, and every GPU tray landing its four RDMA ports on four different leaves. Hover or click a spine, leaf or tray to trace it; every port pair comes from the NetBox cable export, and every link is coloured by its live switch-side state. Press <b>Sync fabric</b> to re-collect the 100 backend switches and fetch what UFM sees; <b>Refresh NetBox</b> updates the NetBox inventory and cable records.</p>
   </div>
-  <div class="meta" style="margin-left:auto">5,424 fabric cables<br>4,608 spine · 816 GPU<br><a class="btn" href="traffic-paths.html" target="_blank" rel="noopener" style="margin-top:8px;display:inline-block" title="How GPUs talk inside a rack, across rails, SUs and pods">How traffic flows ↗</a></div>
+  <div class="meta" style="margin-left:auto">5,424 fabric cables<br>4,608 spine · 816 GPU<br><a class="btn" href="traffic-paths.html" target="_blank" rel="noopener" style="margin-top:8px;display:inline-block" title="How GPUs talk inside a rack, across rails, SUs and pods">How traffic flows ↓</a></div>
 </header>
 
 <div class="sync" id="sync" role="status" aria-live="polite">
@@ -335,10 +335,12 @@ svg.ufm .lvlayer circle.lbadge{display:none}
     <button type="button" class="tab" role="tab" id="tab-inc" aria-controls="panel-inc" aria-selected="true" data-tab="inc"><span>Incidents</span><em id="tab-inc-n"></em><small>what needs attention, most severe first</small></button>
     <button type="button" class="tab" role="tab" id="tab-cab" aria-controls="panel-cab" aria-selected="false" tabindex="-1" data-tab="cab"><span>Cabling vs UFM</span><em id="tab-cab-n"></em><small>what is actually plugged in, compared with NetBox</small></button>
     <button type="button" class="tab" role="tab" id="tab-live" aria-controls="panel-live" aria-selected="false" tabindex="-1" data-tab="live"><span>Live link state</span><em id="tab-live-n"></em><small>designed links vs. switch interfaces</small></button>
+    <button type="button" class="tab" role="tab" id="tab-paths" aria-controls="panel-paths" aria-selected="false" tabindex="-1" data-tab="paths"><span>Traffic paths</span><em></em><small>how GPUs talk: rack, rail, SU, pod</small></button>
   </div>
   <div class="tabpanel" role="tabpanel" id="panel-inc" aria-labelledby="tab-inc"><div id="inc-body"></div></div>
   <div class="tabpanel cab" role="tabpanel" id="panel-cab" aria-labelledby="tab-cab" hidden><div class="cabmeta" id="cab-meta"></div><div id="cab-body"></div></div>
   <div class="tabpanel" role="tabpanel" id="panel-live" aria-labelledby="tab-live" hidden><div id="live-ex"></div></div>
+  <div class="tabpanel" role="tabpanel" id="panel-paths" aria-labelledby="tab-paths" hidden style="padding:0"><iframe id="paths-frame" title="How traffic flows" style="display:block;width:100%;height:1400px;border:0;border-radius:0 0 12px 12px;background:#0a1019" loading="lazy"></iframe></div>
 </div>
 <p class="foot">Leaf colour = rail. Each leaf tile shows two meters: top = spine uplinks used of 72, bottom = GPU downlinks used of 72. Tray tiles show their four RDMA ports in rail colours; dashed trays are not in the device inventory export.</p>
 </div>
@@ -1185,15 +1187,24 @@ document.addEventListener('click', e => {
 const _applyLive3 = applyLive; applyLive = function (v) { _applyLive3(v); renderIncBar(); const st = v.incidents && v.incidents.generated_at + JSON.stringify(v.incidents.counts); if (st !== incStamp) { incStamp = st; loadInc(); } };
 renderIncBar(); loadInc();
 
+// ---- Traffic paths tab: assets/traffic-paths.html, embedded and kept in the dashboard's dark theme ----
+function loadPaths() { const f = document.getElementById('paths-frame'); if (f.dataset.loaded) return; f.dataset.loaded = '1';
+  f.addEventListener('load', () => { try { const d = f.contentDocument; d.documentElement.setAttribute('data-theme', 'dark');
+      const fit = () => { f.style.height = d.documentElement.scrollHeight + 'px'; }; fit(); setTimeout(fit, 400); new ResizeObserver(fit).observe(d.body); }
+    catch (e) { /* opened from a file: the frame keeps its fixed height */ } });
+  f.src = 'traffic-paths.html'; }
+document.querySelectorAll('a[href="traffic-paths.html"]').forEach(a => a.addEventListener('click', e => { e.preventDefault(); document.getElementById('tab-paths').click(); document.getElementById('tab-paths').scrollIntoView({behavior:'smooth', block:'start'}); }));
+
 // ---- check tabs (Cabling vs UFM / Live link state) ----
 { const tabs = [...document.querySelectorAll('.tabs .tab')];
   const show = (name, focus) => { tabs.forEach(t => { const sel = t.dataset.tab === name; t.setAttribute('aria-selected', sel); t.tabIndex = sel ? 0 : -1;
       document.getElementById(t.getAttribute('aria-controls')).hidden = !sel; if (sel && focus) t.focus(); });
+    if (name === 'paths') loadPaths();
     try { localStorage.setItem('ice2-check-tab', name); } catch (e) {} };
   tabs.forEach((t, i) => { t.addEventListener('click', () => show(t.dataset.tab));
     t.addEventListener('keydown', e => { if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') { e.preventDefault(); const n = tabs[(i + (e.key === 'ArrowRight' ? 1 : tabs.length - 1)) % tabs.length]; show(n.dataset.tab, true); } }); });
   let saved = null; try { saved = localStorage.getItem('ice2-check-tab'); } catch (e) {}
-  show(['live', 'cab', 'inc'].includes(saved) ? saved : 'inc');
+  show(['live', 'cab', 'inc', 'paths'].includes(saved) ? saved : 'inc');
   window.showCheckTab = show;
   const badge = (id, n, c, okText) => { const e = document.getElementById(id); if (!e) return; e.textContent = n ? n.toLocaleString() : okText || ''; e.style.setProperty('--c', n ? c : '#38d9a0'); e.title = n ? n + ' to review' : 'nothing to review'; };
   const updBadges = () => {
