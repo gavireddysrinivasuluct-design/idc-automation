@@ -1,0 +1,2 @@
+# Read-only backend fabric evidence. One command is executed per backend switch.
+nv show interface --output json

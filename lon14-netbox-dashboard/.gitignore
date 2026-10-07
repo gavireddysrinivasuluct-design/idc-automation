@@ -1,0 +1,21 @@
+# Operational assets, topology, host keys, and runtime evidence remain local.
+local-inputs/
+app/*.html
+data/
+collector/devices.csv
+collector/management_addresses.csv
+collector/lon14_known_hosts
+collector/commands/
+collector/*.mjs
+.netbox-live-sync/
+collector/output/
+collector/outputs/
+__pycache__/
+*.py[cod]
+.DS_Store
+
+# Credentials and individual access profiles never belong in Git.
+*.token
+*.secret
+device-access.ini
+device-access-*.ini

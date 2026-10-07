@@ -1,0 +1,44 @@
+name: lon14-dashboard
+
+on:
+  push:
+    paths: ["lon14-netbox-dashboard/**", ".github/workflows/lon14-dashboard.yml"]
+  pull_request:
+    paths: ["lon14-netbox-dashboard/**", ".github/workflows/lon14-dashboard.yml"]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: lon14-netbox-dashboard
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Python compiles
+        run: python -m py_compile app/*.py collector/*.py scripts/*.py
+      - name: Unit tests (offline fixtures)
+        run: python -m unittest discover -s tests -v
+      - name: Shell scripts parse
+        run: |
+          sudo apt-get install -y -qq zsh >/dev/null
+          for f in scripts/*.sh; do bash -n "$f"; done
+          zsh -n scripts/open_dashboard.command
+      - name: Dashboard JavaScript parses
+        run: |
+          node -e '
+            const fs = require("fs");
+            for (const page of ["assets/dashboard.html", "assets/traffic-paths.html"]) {
+              const html = fs.readFileSync(page, "utf8");
+              const scripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(m => m[1]);
+              scripts.forEach(code => new Function(code));
+              console.log(page, scripts.length, "script(s) OK");
+            }'

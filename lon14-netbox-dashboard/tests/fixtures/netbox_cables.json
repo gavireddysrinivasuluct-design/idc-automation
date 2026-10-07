@@ -1,0 +1,8 @@
+{"synced_at": "2026-10-07T06:00:00+00:00", "full_at": "2026-10-07T06:00:00+00:00",
+ "cables": {
+  "1001": ["sys1-lon14-p-swi-bel1", "sw37p1", "sys1-lon14-p-swi-bes1", "sw1p1"],
+  "1002": ["sys1-lon14-p-swi-bel1", "sw38p1", "sys1-lon14-p-swi-bes2", "sw1p1"],
+  "1003": ["sys1-lon14-p-swi-bel2", "sw37p1", "sys1-lon14-p-swi-bes1", "sw2p1"],
+  "1004": ["sys1-lon14-p-swi-bes2", "sw2p1", "sys1-lon14-p-swi-bel2", "sw38p1"],
+  "1005": ["sys1-lon14-p-swi-bel1", "sw1p1", "sys1-lon14-p-phy-gpu1256", "RDMA1"],
+  "1006": ["", "", "", "", "A side ends on a dcim.powerport, not an interface"]}}

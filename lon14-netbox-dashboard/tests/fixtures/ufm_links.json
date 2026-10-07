@@ -1,0 +1,50 @@
+[
+ {
+  "source_guid": "aa01",
+  "source_port": "1",
+  "source_port_name": "aa01_1",
+  "source_port_node_description": "sys1-lon14-p-swi-bes1:sw1p1",
+  "destination_guid": "bb01",
+  "destination_port": "75",
+  "destination_port_name": "bb01_75",
+  "destination_port_node_description": "sys1-lon14-p-swi-bel1:sw38p1",
+  "width": "4x",
+  "severity": "Info"
+ },
+ {
+  "source_guid": "aa02",
+  "source_port": "1",
+  "source_port_name": "aa02_1",
+  "source_port_node_description": "sys1-lon14-p-swi-bes2:sw1p1",
+  "destination_guid": "bb01",
+  "destination_port": "73",
+  "destination_port_name": "bb01_73",
+  "destination_port_node_description": "sys1-lon14-p-swi-bel1:sw37p1",
+  "width": "4x",
+  "severity": "Info"
+ },
+ {
+  "source_guid": "aa01",
+  "source_port": "3",
+  "source_port_name": "aa01_3",
+  "source_port_node_description": "sys1-lon14-p-swi-bes1:sw2p1",
+  "destination_guid": "bb02",
+  "destination_port": "73",
+  "destination_port_name": "bb02_73",
+  "destination_port_node_description": "sys1-lon14-p-swi-bel2:sw37p1",
+  "width": "4x",
+  "severity": "Info"
+ },
+ {
+  "source_guid": "aa02",
+  "source_port": "3",
+  "source_port_name": "aa02_3",
+  "source_port_node_description": "sys1-lon14-p-swi-bes2:sw2p1",
+  "destination_guid": "bb02",
+  "destination_port": "75",
+  "destination_port_name": "bb02_75",
+  "destination_port_node_description": "sys1-lon14-p-swi-bel2:sw38p1",
+  "width": "4x",
+  "severity": "Info"
+ }
+]

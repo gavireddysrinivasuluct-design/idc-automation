@@ -1,0 +1,16 @@
+Q3400 sys1-lon14-p-swi-bel1 CFG: main=4x
+    P73 -4x-100G-> Q3400 sys1-lon14-p-swi-bes1 P1
+    P75 -4x-100G-> Q3400 sys1-lon14-p-swi-bes2 P1
+    P1 -4x-100G-> HCA_B_16 gpu1256 mlx5_0/P1
+
+Q3400 sys1-lon14-p-swi-bel2 CFG: main=4x
+    P73 -4x-100G-> Q3400 sys1-lon14-p-swi-bes1 P3
+    P75 -4x-100G-> Q3400 sys1-lon14-p-swi-bes2 P3
+
+Q3400 sys1-lon14-p-swi-bes1 CFG: main=4x
+    P1 -4x-100G-> Q3400 sys1-lon14-p-swi-bel1 P73
+    P3 -4x-100G-> Q3400 sys1-lon14-p-swi-bel2 P73
+
+Q3400 sys1-lon14-p-swi-bes2 CFG: main=4x
+    P1 -4x-100G-> Q3400 sys1-lon14-p-swi-bel1 P75
+    P3 -4x-100G-> Q3400 sys1-lon14-p-swi-bel2 P75
