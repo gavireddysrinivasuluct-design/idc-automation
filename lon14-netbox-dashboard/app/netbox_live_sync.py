@@ -88,6 +88,40 @@ DEVICE_CACHE = STATE_DIR / "netbox-devices.json"
 TRAY_HISTORY = STATE_DIR / "tray-history.json"
 BUNDLE_DIR = STATE_DIR / "bundles"     # immutable comparison results (report + metadata only, never credentials)
 BUNDLE_KEEP = 200
+FABRIC = "sys1"   # "sys2" (Ethernet, SN5610): no UFM, switch states over SSH, its own state folder
+
+
+def set_state_dir(path: Path) -> None:
+    """Point every runtime file at another folder (one per fabric service, so two can run side by side)."""
+    global STATE_DIR, LATEST, ADDRESS_CACHE, CABLE_CACHE, DEVICE_CACHE, TRAY_HISTORY, BUNDLE_DIR
+    STATE_DIR = Path(path)
+    LATEST = STATE_DIR / "latest-live.json"
+    ADDRESS_CACHE = STATE_DIR / "management-addresses.csv"
+    CABLE_CACHE = STATE_DIR / "netbox-cables.json"
+    DEVICE_CACHE = STATE_DIR / "netbox-devices.json"
+    TRAY_HISTORY = STATE_DIR / "tray-history.json"
+    BUNDLE_DIR = STATE_DIR / "bundles"
+
+
+def ethernet_state(info: dict) -> str | None:
+    """A Cumulus/NVUE (SN5610) interface in the same wording as an InfiniBand port:
+    up -> Active/LinkUp/<speed>; admin down -> Down/Disabled/; oper down -> Down/LinkDown/."""
+    link = info.get("link") or {}
+    oper = link.get("oper-status") or link.get("oper_status")
+    if not oper and isinstance(link.get("state"), dict):  # NVUE: "state": {"up": {}}
+        oper = next(iter(link["state"]), None)
+    if not oper and isinstance(link.get("state"), str):
+        oper = link["state"]
+    admin = str(link.get("admin-status") or link.get("admin_status") or "").lower()
+    speed = str(link.get("speed") or "")
+    if oper is None:
+        return None
+    oper = str(oper).lower()
+    if oper == "up":
+        return "Active/LinkUp/%s" % speed
+    if admin == "down":
+        return "Down/Disabled/%s" % speed
+    return "Down/LinkDown/%s" % speed
 DEFAULT_UFM_SCAN = PROJECT_ROOT / "local-inputs" / "ufm" / "ibdiagnet2.lst.gz"
 DEFAULT_EXPECTED = ASSETS_DIR / "expected_topology.csv"
 DEFAULT_UFM_MASTER = PROJECT_ROOT / "local-inputs" / "ufm" / "master.topo.gz"
@@ -469,7 +503,7 @@ class SyncState:
         with output.open("w", newline="", encoding="utf-8") as handle:
             writer = csv.writer(handle)
             writer.writerow(["hostname", "management_address"])
-            writer.writerows((name, addresses[name]) for name in names)
+            writer.writerows((name, addresses.get(name, "")) for name in names)  # blank: the collector resolves it on the jump host
 
     def fetch_management_addresses(self, output: Path) -> int:
         """Build an ephemeral device-IP map; never persist it in Git.
@@ -488,7 +522,7 @@ class SyncState:
         if ADDRESS_CACHE.is_file() and (time.time() - ADDRESS_CACHE.stat().st_mtime) < self.address_cache_hours * 3600:
             with ADDRESS_CACHE.open(newline="", encoding="utf-8") as handle:
                 cached = {r["hostname"]: r["management_address"] for r in csv.DictReader(handle) if r.get("management_address")}
-            if all(name in cached for name in names) and all(name in self.device_info for name in names):
+            if all(name in cached or FABRIC != "sys1" for name in names) and all(name in self.device_info for name in names) and cached:
                 self.write_addresses(output, names, cached)
                 self.address_source = "local cache"
                 return len(names)
@@ -523,7 +557,12 @@ class SyncState:
             self.address_source = "netbox bulk"
         if details:
             self.remember_devices(details, replace=len(details) == len(wanted))
-        names_left = [name for name in names if name not in addresses]
+        # A device the bulk query found but without a primary IP (all of sys2 today) is not looked up again
+        # one by one; the collector resolves its name through DNS on the jump host instead.
+        no_ip = [name for name in names if name not in addresses and name in details]
+        if no_ip:
+            print("[netbox-live-sync] %d device(s) have no primary IP in NetBox; resolving them on the jump host" % len(no_ip))
+        names_left = [name for name in names if name not in addresses and name not in details]
         if not names_left:
             self.write_addresses(output, names, addresses)
             STATE_DIR.mkdir(exist_ok=True)
@@ -836,6 +875,8 @@ class SyncState:
         return result
 
     def ufm_fetch_configured(self) -> bool:
+        if FABRIC != "sys1":  # the Ethernet fabric has no UFM
+            return False
         if not self.device_profile or not self.device_profile.is_file():
             return False
         import configparser
@@ -848,6 +889,8 @@ class SyncState:
 
     def ufm_rest_configured(self) -> bool:
         """A UFM web (REST) user is set up in the profile: switch states can come from UFM."""
+        if FABRIC != "sys1":
+            return False
         import configparser
         parser = configparser.ConfigParser(interpolation=None)
         try:
@@ -1689,10 +1732,15 @@ class SyncState:
         hostname = raw_file.stem
         data: dict[tuple[str, str], str] = {}
         for port, info in interfaces.items():
-            if not isinstance(info, dict) or (info.get("type") != "ib" and not port.startswith("fnm")):
+            if not isinstance(info, dict):
                 continue
-            link = info.get("link") or {}
-            data[(hostname, port)] = "%s/%s/%s" % (link.get("logical-state", ""), link.get("physical-state", ""), link.get("speed", ""))
+            if info.get("type") == "ib" or port.startswith("fnm"):
+                link = info.get("link") or {}
+                data[(hostname, port)] = "%s/%s/%s" % (link.get("logical-state", ""), link.get("physical-state", ""), link.get("speed", ""))
+            elif info.get("type") == "swp" or port.startswith("swp"):  # sys2: Ethernet (SN5610, Cumulus/NVUE)
+                state = ethernet_state(info)
+                if state:
+                    data[(hostname, port)] = state
         return data
 
     def parse_live_directory(self, output_dir: Path) -> tuple[dict[tuple[str, str], str], list[str]]:
@@ -1783,6 +1831,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.respond(HTTPStatus.OK, self.state.evidence())
             elif path == "/api/bundles":
                 self.respond(HTTPStatus.OK, {"bundles": self.state.bundles()})
+            elif path in {"/sys2.html", "/sys2"} and self.diagram.name != "sys2.html":
+                self.respond(HTTPStatus.OK, (ASSETS_DIR / "sys2.html").read_text(encoding="utf-8"), "text/html; charset=utf-8")
             elif path in {"/traffic-paths.html", "/paths"}:
                 self.respond(HTTPStatus.OK, (ASSETS_DIR / "traffic-paths.html").read_text(encoding="utf-8"), "text/html; charset=utf-8")
             elif path == "/api/cabling":
@@ -1893,6 +1943,10 @@ def main() -> int:
         print(CODE_VERSION)
         return 0
     parser = argparse.ArgumentParser(description="Serve the LON14 backend diagram with NetBox/live reconciliation.")
+    parser.add_argument("--fabric", choices=["sys1", "sys2"], default="sys1",
+                        help="sys1 (default): InfiniBand + UFM on port 8766. sys2: the Ethernet backend (SN5610): its own page, "
+                             "inventory, cables and state folder, port 8767, switch states over SSH only.")
+    parser.add_argument("--state-dir", type=Path, default=None, help="Runtime state folder (default .netbox-live-sync, or .netbox-live-sync-sys2).")
     parser.add_argument("--port", type=int, default=8766)
     parser.add_argument("--netbox-url", required=True, help="Approved NetBox URL or local proxy URL.")
     parser.add_argument("--netbox-host-header", help="Host header required by an approved local proxy.")
@@ -1942,6 +1996,25 @@ def main() -> int:
     tuning.add_argument("--ufm-stale-minutes", type=float, default=60.0,
                         help="The evidence shows the UFM links as stale (comparison not current) when they are older than this.")
     args = parser.parse_args()
+    global FABRIC
+    FABRIC = args.fabric
+    if args.fabric == "sys2":  # sys2 defaults, unless given explicitly
+        sys2 = ASSETS_DIR / "sys2"
+        local = PROJECT_ROOT / "local-inputs" / "sys2"
+        for name, sys1_default, value in (("port", 8766, 8767), ("diagram", ASSETS_DIR / "dashboard.html", ASSETS_DIR / "sys2.html"),
+                                          ("connections", ASSETS_DIR / "connections.csv", sys2 / "connections.csv"),
+                                          ("devices", ASSETS_DIR / "devices.csv", sys2 / "devices.csv"),
+                                          ("known_hosts", PROJECT_ROOT / "local-inputs" / "known_hosts", local / "known_hosts"),
+                                          ("expected_topology", DEFAULT_EXPECTED, sys2 / "expected_topology.csv"),
+                                          ("ufm_scan", DEFAULT_UFM_SCAN, local / "no-ufm" / "ibdiagnet2.lst.gz"),
+                                          ("ufm_master", DEFAULT_UFM_MASTER, local / "no-ufm" / "master.topo.gz"),
+                                          ("ufm_report", DEFAULT_UFM_REPORT, local / "no-ufm" / "topology-compare.json.gz"),
+                                          ("switch_source", "auto", "ssh"), ("cabling_reference", "both", "netbox")):
+            if getattr(args, name) == sys1_default:
+                setattr(args, name, value)
+        if args.design_topo is None:
+            args.design_topo = local / "no-ufm" / "nscale_Compute.topo"
+    set_state_dir(args.state_dir or (PROJECT_ROOT / (".netbox-live-sync" if args.fabric == "sys1" else ".netbox-live-sync-sys2")))
     if not 1 <= args.device_parallel <= 25:
         raise SystemExit("--device-parallel must be between 1 and 25")
     if not args.diagram.is_file() or not args.connections.is_file():

@@ -4,6 +4,7 @@
 # service from this repository and refuses to silently reuse an older copy.
 #
 # Extra service options: LON14_DASHBOARD_ARGS="--sync-every-minutes 15" ./scripts/open_dashboard.command
+# It also starts the SYS2 (Ethernet) service on port 8767; its extra options: LON14_SYS2_ARGS="..."
 set -euo pipefail
 
 dashboard_dir=${0:A:h:h}
@@ -22,12 +23,39 @@ stop_port() {
   for _ in {1..20}; do curl --silent --max-time 1 -o /dev/null "$url/" 2>/dev/null || break; sleep 0.25; done
 }
 
+start_sys2() {
+  # The SYS2 tab (Ethernet backend, SN5610) is served by a second service on 8767 from the same code.
+  sys2_url="http://127.0.0.1:8767"
+  sys2_log="$HOME/Library/Logs/lon14-sys2-dashboard.log"
+  local want2 have2 pids2; want2=$(python3 app/netbox_live_sync.py --code-version 2>/dev/null || echo unknown)
+  have2=$(curl --silent --max-time 2 "$sys2_url/api/live" 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin).get("code_version","none"))' 2>/dev/null || echo none)
+  if [ "$have2" != "$want2" ]; then
+    pids2=$(lsof -nP -tiTCP:8767 -sTCP:LISTEN 2>/dev/null || true)
+    if [ -n "$pids2" ]; then
+      if ps -o command= -p ${(f)pids2} 2>/dev/null | grep -q -- "--fabric sys2"; then
+        echo "Restarting the SYS2 service (code $have2, now $want2)."; kill ${(f)pids2} 2>/dev/null || true; sleep 1
+      else
+        echo "Port 8767 is used by another program; the SYS2 tab will show the static NetBox view."; pids2="busy"
+      fi
+    fi
+    if [ "$pids2" != "busy" ]; then
+      echo "Starting the SYS2 service (log: $sys2_log)…"
+      nohup python3 app/netbox_live_sync.py --fabric sys2 --netbox-url 'http://127.0.0.1:8444' --device-profile "$profile" \
+        --fanout jump --device-parallel 20 ${=LON14_SYS2_ARGS:-} >>"$sys2_log" 2>&1 &
+      for _ in {1..40}; do curl --silent --fail --max-time 1 -o /dev/null "$sys2_url/api/health" 2>/dev/null && break; sleep 0.25; done
+      curl --silent --fail --max-time 1 -o /dev/null "$sys2_url/api/health" 2>/dev/null || { echo "The SYS2 service did not start (the SYS1 dashboard is unaffected). Last log lines:"; tail -n 8 "$sys2_log"; }
+    fi
+  fi
+  [ -f local-inputs/sys2/known_hosts ] || echo "SYS2 switch SSH sync needs host keys: ./scripts/configure_known_hosts.sh --fabric sys2 --collect-live (see README section 15)."
+}
+
 if curl --silent --max-time 1 -o /dev/null "$url/" 2>/dev/null; then
   if running_here; then
     want=$(python3 app/netbox_live_sync.py --code-version 2>/dev/null || echo unknown)
     have=$(curl --silent --max-time 2 "$url/api/live" 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin).get("code_version","none"))' 2>/dev/null || echo none)
     if [ "$want" = "$have" ]; then
       echo "The dashboard from this repository is already running (code $have)."
+      start_sys2
       open "$url/"
       exit 0
     fi
@@ -62,4 +90,6 @@ nohup python3 app/netbox_live_sync.py --netbox-url 'http://127.0.0.1:8444' --dev
 for _ in {1..40}; do running_here && break; sleep 0.25; done
 running_here || { echo "The dashboard did not start. Last log lines:"; tail -n 15 "$log_file"; exit 1; }
 echo "Running from $dashboard_dir ($(git -C "$dashboard_dir" log -1 --format='%h %s' 2>/dev/null || echo 'no git')), code $(python3 app/netbox_live_sync.py --code-version 2>/dev/null)."
+
+start_sys2
 open "$url/"

@@ -278,6 +278,17 @@ svg.ufm .lvlayer circle.lbadge{display:none}
 .mastergrid div{border:1px solid var(--line);border-left:3px solid #9aa8bb;border-radius:8px;padding:9px 11px;background:#0b1523;display:flex;flex-direction:column;gap:2px}
 .mastergrid b{font:600 20px var(--display);color:var(--fg)}.mastergrid span{font-size:12.5px}.mastergrid small{font-size:11.5px;color:var(--dim)}
 .ufmfetch{display:inline-flex;flex-wrap:wrap;gap:6px 10px;align-items:center}.ufmfetch .step{font:12px var(--mono)}
+
+/* fabric tabs: sys1 (InfiniBand, this page) and sys2 (Ethernet, framed page) */
+.fabtabs{display:flex;gap:8px;flex-wrap:wrap;border-bottom:1px solid var(--line);padding-bottom:0}
+.fabtab{font:600 13px var(--mono);letter-spacing:.06em;color:var(--dim);background:transparent;border:1px solid var(--line);border-bottom:0;border-radius:10px 10px 0 0;padding:10px 18px 9px;cursor:pointer;display:flex;flex-direction:column;align-items:flex-start;gap:2px;margin-bottom:-1px}
+.fabtab small{font:400 11px var(--body);letter-spacing:0;color:var(--faint)}
+.fabtab[aria-selected=true]{color:var(--fg);background:linear-gradient(180deg,var(--panel2),var(--ink));border-color:var(--line2);box-shadow:inset 0 2px 0 var(--edge)}
+.fabtab:focus-visible{outline:2px solid var(--edge);outline-offset:2px}
+.wrap.show-sys2 > :not(header):not(.fabtabs):not(#fab-sys2){display:none !important}
+.wrap:not(.show-sys2) > #fab-sys2{display:none}
+#fab-sys2 iframe{display:block;width:100%;height:1700px;border:0;background:transparent}
+#fab-sys2 .note{font:12px var(--mono);color:var(--faint);margin:0 0 6px}
 </style>
 
 <div class="wrap">
@@ -288,6 +299,11 @@ svg.ufm .lvlayer circle.lbadge{display:none}
   </div>
   <div class="meta" style="margin-left:auto">9,216 fabric cables<br>4,608 spine · 4,608 GPU<br><a class="btn" href="traffic-paths.html" target="_blank" rel="noopener" style="margin-top:8px;display:inline-block" title="How GPUs talk inside a rack, across rails, SUs and pods">How traffic flows ↓</a></div>
 </header>
+<div class="fabtabs" role="tablist" aria-label="LON14 backend fabric">
+  <button type="button" class="fabtab" role="tab" id="ft-sys1" aria-selected="true" data-fab="sys1">SYS1 · INFINIBAND<small>64 BEL · 36 BES · Q3400 · UFM · 1,152 GB300 trays</small></button>
+  <button type="button" class="fabtab" role="tab" id="ft-sys2" aria-selected="false" data-fab="sys2">SYS2 · ETHERNET<small>256 BEL · 72 BES · SN5610 · 2 planes · 1,152 hosts</small></button>
+</div>
+<div id="fab-sys2" role="tabpanel" aria-labelledby="ft-sys2"><p class="note" id="sys2-note"></p><iframe id="sys2-frame" title="LON14 sys2 Ethernet backend" loading="lazy"></iframe></div>
 
 <div class="sync" id="sync" role="status" aria-live="polite">
   <span id="ldot"></span><strong id="sync-state">Loading live state…</strong><span id="sync-detail"></span><span class="grow"></span>
@@ -1299,5 +1315,26 @@ if (!SERVICE) { const o = document.getElementById('offline'); o.hidden = false;
   updBadges(); }
 
 inspect(null);
+
+// ---- fabric tabs: sys2 is its own page (assets/sys2.html), live when its service runs on 8767 ----
+{ const wrap = document.querySelector('.wrap'), frame = document.getElementById('sys2-frame'), note = document.getElementById('sys2-note');
+  let loaded = false;
+  async function loadSys2() {
+    if (loaded) return; loaded = true;
+    let live = false;
+    if (location.protocol.startsWith('http')) { try { await fetch('http://127.0.0.1:8767/api/health', {mode:'no-cors', cache:'no-store'}); live = true; } catch (e) {} }
+    frame.src = live ? 'http://127.0.0.1:8767/' : 'sys2.html';
+    note.textContent = live ? 'Live: served by the sys2 service on 127.0.0.1:8767 (switch SSH sync, NetBox refresh).' : 'Static NetBox view. For live link state start the dashboards with ./scripts/open_dashboard.command (it also starts the sys2 service on port 8767).';
+  }
+  const eb = document.querySelector('header .eb'), ebTxt = eb.textContent, meta = document.querySelector('header .meta');
+  function show(fab, save = true) { const two = fab === 'sys2'; wrap.classList.toggle('show-sys2', two);
+    eb.textContent = two ? 'LON14 · London14 · sys2-lon14 backend RDMA fabric (Ethernet, Spectrum-X SN5610)' : ebTxt; if (meta) meta.style.visibility = two ? 'hidden' : '';
+    document.querySelectorAll('.fabtab').forEach(b => { const on = b.dataset.fab === fab; b.setAttribute('aria-selected', on); b.tabIndex = on ? 0 : -1; });
+    if (two) loadSys2(); if (save) { try { localStorage.setItem('lon14-fabric', fab); } catch (e) {} history.replaceState(null, '', two ? '#sys2' : location.pathname + location.search); } }
+  document.querySelectorAll('.fabtab').forEach(b => { b.addEventListener('click', () => show(b.dataset.fab));
+    b.addEventListener('keydown', e => { if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') { e.preventDefault(); const o = document.querySelector(`.fabtab:not([data-fab="${b.dataset.fab}"])`); o.focus(); show(o.dataset.fab); } }); });
+  window.addEventListener('message', e => { if (e.source === frame.contentWindow && e.data && e.data.sys2Height) frame.style.height = Math.max(900, +e.data.sys2Height + 20) + 'px'; });
+  let first = location.hash === '#sys2' ? 'sys2' : 'sys1'; if (location.hash !== '#sys2') { try { first = localStorage.getItem('lon14-fabric') || 'sys1'; } catch (e) {} }
+  show(first, false); }
 </script>
 </body></html>

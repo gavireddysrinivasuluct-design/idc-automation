@@ -305,5 +305,63 @@ class Lon14Rules(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
 
+class Sys2Ethernet(unittest.TestCase):
+    """LON14 sys2: the Ethernet backend (SN5610), its rules and its switch output."""
+
+    def test_netbox_cables_follow_the_sys2_rules(self):
+        import csv
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("build_sys2_data", HERE.parent / "scripts" / "build_sys2_data.py")
+        rules = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(rules)
+        num = lambda n: int(n.rsplit("bel", 1)[-1].rsplit("bes", 1)[-1].rsplit("gpu", 1)[-1])
+        with (HERE.parent / "assets" / "sys2" / "connections.csv").open(encoding="utf-8") as handle:
+            rows = list(csv.DictReader(handle))
+        self.assertEqual(sum(r["connection_type"] == "leaf-spine" for r in rows), 9216)
+        self.assertEqual(sum(r["connection_type"] == "leaf-gpu-rdma" for r in rows), 9216)
+        for r in rows:
+            leaf = num(r["endpoint_a_device"])
+            if r["connection_type"] == "leaf-spine":
+                self.assertEqual(rules.expected_spine(leaf, r["endpoint_a_port"]), (num(r["endpoint_b_device"]), r["endpoint_b_port"]), r)
+            else:
+                self.assertEqual(rules.expected_leaf(num(r["endpoint_b_device"]), r["endpoint_b_port"]), (leaf, r["endpoint_a_port"]), r)
+        # planes never mix
+        self.assertTrue(all((num(r["endpoint_a_device"]) <= 128) == (num(r["endpoint_b_device"]) <= 36)
+                            for r in rows if r["connection_type"] == "leaf-spine"))
+
+    def test_ethernet_interface_states(self):
+        sys.path.insert(0, str(APP))
+        import netbox_live_sync as service
+        self.assertEqual(service.ethernet_state({"link": {"oper-status": "up", "admin-status": "up", "speed": "400G"}}), "Active/LinkUp/400G")
+        self.assertEqual(service.ethernet_state({"link": {"oper-status": "down", "admin-status": "down", "speed": "400G"}}), "Down/Disabled/400G")
+        self.assertEqual(service.ethernet_state({"link": {"state": {"down": {}}, "speed": "400G"}}), "Down/LinkDown/400G")
+        self.assertIsNone(service.ethernet_state({"link": {}}))
+        raw = Path(tempfile.mkdtemp(prefix="lon14-test-")) / "sys2-lon14-p-swi-bel1.txt"
+        try:
+            raw.write_text("__ICE2_COMMAND_001_START__\n" + json.dumps({
+                "swp1s0": {"type": "swp", "link": {"oper-status": "up", "admin-status": "up", "speed": "400G"}},
+                "swp47s1": {"type": "swp", "link": {"oper-status": "down", "admin-status": "up", "speed": "400G"}},
+                "eth0": {"type": "eth", "link": {"oper-status": "up"}},
+                "sw1p1": {"type": "ib", "link": {"logical-state": "Active", "physical-state": "LinkUp", "speed": "800G"}}}) + "\n__ICE2_COMMAND_001_END__\n")
+            parsed = service.SyncState.parse_raw_file(None, raw)
+            self.assertEqual(parsed[("sys2-lon14-p-swi-bel1", "swp1s0")], "Active/LinkUp/400G")
+            self.assertEqual(parsed[("sys2-lon14-p-swi-bel1", "swp47s1")], "Down/LinkDown/400G")
+            self.assertEqual(parsed[("sys2-lon14-p-swi-bel1", "sw1p1")], "Active/LinkUp/800G")
+            self.assertNotIn(("sys2-lon14-p-swi-bel1", "eth0"), parsed)
+        finally:
+            shutil.rmtree(raw.parent, ignore_errors=True)
+
+    def test_state_folder_is_per_fabric(self):
+        sys.path.insert(0, str(APP))
+        import netbox_live_sync as service
+        before = service.STATE_DIR
+        try:
+            service.set_state_dir(Path("/tmp/x-sys2"))
+            self.assertEqual(service.LATEST, Path("/tmp/x-sys2/latest-live.json"))
+            self.assertEqual(service.BUNDLE_DIR, Path("/tmp/x-sys2/bundles"))
+        finally:
+            service.set_state_dir(before)
+
+
 if __name__ == "__main__":
     unittest.main()

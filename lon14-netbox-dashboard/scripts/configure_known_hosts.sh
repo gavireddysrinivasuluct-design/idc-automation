@@ -4,6 +4,11 @@
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "$0")" && pwd)"
+# --fabric sys2 (before or after --collect-live): the Ethernet backend's switches, kept in local-inputs/sys2/known_hosts
+fabric="sys1"
+args=()
+for a in "$@"; do case "$a" in --fabric=sys2|sys2) fabric="sys2" ;; --fabric) ;; *) args+=("$a") ;; esac; done
+set -- "${args[@]+"${args[@]}"}"
 
 if [[ "${1:-}" == "--collect-live" ]]; then
   read -r -p "Approved Teleport jump host [lon14deploy1]: " jump_host
@@ -14,7 +19,7 @@ if [[ "${1:-}" == "--collect-live" ]]; then
     exit 1
   fi
   echo "This collects current host keys from devices reached through $jump_host. Verify fingerprints independently before accepting a changed key."
-  python3 "$script_dir/collect_known_hosts.py" --jump-host "$jump_host" --jump-user "$jump_user" --accept-live-keys
+  python3 "$script_dir/collect_known_hosts.py" --fabric "$fabric" --jump-host "$jump_host" --jump-user "$jump_user" --accept-live-keys
   exit 0
 fi
 
@@ -38,6 +43,7 @@ fi
 
 project_root="$(cd "$script_dir/.." && pwd)"
 target_dir="$project_root/local-inputs"
+[ "$fabric" = "sys2" ] && target_dir="$project_root/local-inputs/sys2"
 target_file="$target_dir/known_hosts"
 mkdir -p "$target_dir"
 umask 077

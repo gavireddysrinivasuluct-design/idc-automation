@@ -19,3 +19,4 @@ __pycache__/
 *.secret
 device-access.ini
 device-access-*.ini
+.netbox-live-sync-sys2/

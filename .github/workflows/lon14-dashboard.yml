@@ -36,7 +36,7 @@ jobs:
         run: |
           node -e '
             const fs = require("fs");
-            for (const page of ["assets/dashboard.html", "assets/traffic-paths.html"]) {
+            for (const page of ["assets/dashboard.html", "assets/traffic-paths.html", "assets/sys2.html"]) {
               const html = fs.readFileSync(page, "utf8");
               const scripts = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].map(m => m[1]);
               scripts.forEach(code => new Function(code));

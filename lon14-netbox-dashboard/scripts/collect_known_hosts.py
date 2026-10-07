@@ -42,9 +42,23 @@ def device_names(path: Path) -> list[str]:
     return names
 
 
-def management_ips(names: list[str], netbox_url: str) -> list[str]:
+def resolve_on_jump_host(names: list[str], jump_host: str, jump_user: str) -> dict[str, str]:
+    """Names NetBox has no IP for (LON14 sys2): resolve them with the jump host's DNS."""
+    import shlex
+    script = ("import json,socket,sys\nout={}\nfor n in json.load(sys.stdin):\n"
+              " try: out[n]=socket.gethostbyname(n)\n except OSError: pass\nprint(json.dumps(out))")
+    done = subprocess.run(["tsh", "ssh", "--login", jump_user, jump_host, "python3 -c %s" % shlex.quote(script)],
+                          input=json.dumps(names), text=True, capture_output=True, check=False, timeout=120)
+    if done.returncode:
+        raise RuntimeError("DNS lookup on %s failed: %s" % (jump_host, done.stderr.strip()[-200:]))
+    answer = json.loads(done.stdout.strip().splitlines()[-1])
+    return {n: str(ipaddress.ip_address(a)) for n, a in answer.items() if n in names}
+
+
+def management_ips(names: list[str], netbox_url: str, jump: tuple[str, str] | None = None) -> list[str]:
     headers = {"Authorization": "Token " + token(), "Accept": "application/json"}
     ips: list[str] = []
+    no_ip: list[str] = []
     for name in names:
         request = Request(netbox_url.rstrip("/") + "/api/dcim/devices/?limit=2&name=" + quote(name, safe=""), headers=headers)
         with urlopen(request, timeout=20) as response:
@@ -54,10 +68,20 @@ def management_ips(names: list[str], netbox_url: str) -> list[str]:
             raise RuntimeError("NetBox returned %d devices for %s." % (len(matches), name))
         primary = matches[0].get("primary_ip4") or matches[0].get("primary_ip") or {}
         address = (primary.get("address") or "").split("/", 1)[0]
+        if not address and jump:
+            no_ip.append(name)
+            continue
         try:
             ips.append(str(ipaddress.ip_address(address)))
         except ValueError as error:
             raise RuntimeError("NetBox has no valid primary IP for %s." % name) from error
+    if no_ip:
+        resolved = resolve_on_jump_host(no_ip, *jump)
+        unresolved = [n for n in no_ip if n not in resolved]
+        if unresolved:
+            raise RuntimeError("No NetBox IP and no DNS answer on %s for %d device(s), including: %s" % (jump[0], len(unresolved), ", ".join(unresolved[:5])))
+        print("Resolved %d device(s) without a NetBox IP through DNS on %s." % (len(resolved), jump[0]))
+        ips.extend(resolved[n] for n in no_ip)
     if len(ips) != len(set(ips)):
         raise RuntimeError("NetBox returned duplicate management IPs; resolve this before collecting host keys.")
     return ips
@@ -91,13 +115,17 @@ def main() -> int:
     parser.add_argument("--jump-host", required=True)
     parser.add_argument("--jump-user", required=True)
     parser.add_argument("--netbox-url", default=DEFAULT_NETBOX_URL)
-    parser.add_argument("--devices", type=Path, default=PROJECT_ROOT / "assets" / "devices.csv")
-    parser.add_argument("--output", type=Path, default=PROJECT_ROOT / "local-inputs" / "known_hosts")
+    parser.add_argument("--fabric", choices=["sys1", "sys2"], default="sys1", help="sys2: the Ethernet backend's 328 switches (assets/sys2/devices.csv -> local-inputs/sys2/known_hosts)")
+    parser.add_argument("--devices", type=Path, default=None)
+    parser.add_argument("--output", type=Path, default=None)
     parser.add_argument("--accept-live-keys", action="store_true", help="Required acknowledgement that live keys need independent approval.")
     args = parser.parse_args()
     if not args.accept_live_keys:
         raise RuntimeError("Refusing to install live-collected keys without --accept-live-keys.")
-    ips = management_ips(device_names(args.devices), args.netbox_url)
+    sys2 = args.fabric == "sys2"
+    args.devices = args.devices or PROJECT_ROOT / "assets" / ("sys2/devices.csv" if sys2 else "devices.csv")
+    args.output = args.output or PROJECT_ROOT / "local-inputs" / ("sys2/known_hosts" if sys2 else "known_hosts")
+    ips = management_ips(device_names(args.devices), args.netbox_url, (args.jump_host, args.jump_user))
     entries = collect(ips, args.jump_host, args.jump_user)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     candidate = args.output.with_name(args.output.name + ".candidate")

@@ -11,7 +11,7 @@
 > | Jump host | `lon14deploy1` (Teleport node) | `jmp0` |
 > | Design file | optional (`design_path`, default `/root/nscale_Compute.topo`; `none` = inferred rules) | required |
 >
-> Not included: the Ethernet fabric at the same site (`sys2-lon14`, SN5610). Known NetBox anomaly: gpu1153 is recorded in gpu118's slot (SU2 slot 46, `sw23p2` on BEL5–8) and gpu118 has no backend cables.
+> **Two fabrics, two tabs.** LON14 has two separate GPU backends: **SYS1** (`sys1-lon14`, InfiniBand, this page) and **SYS2** (`sys2-lon14`, Ethernet, Spectrum-X SN5610: 256 BEL + 72 BES, 1,152 hosts). The **SYS2 · ETHERNET** tab at the top shows SYS2; see [15](#15-sys2-tab-ethernet-backend). Known NetBox anomaly (SYS1): gpu1153 is recorded in gpu118's slot (SU2 slot 46, `sw23p2` on BEL5–8) and gpu118 has no backend cables.
 >
 > **Refreshing the NetBox-derived files** (`assets/devices.csv`, `assets/connections.csv` and the data embedded in `assets/dashboard.html`): with the NetBox proxy running, run `python3 scripts/lon14_discover.py` (switches and every switch cable at site lon14) and optionally `python3 scripts/lon14_inventory.py` (racks, U, serials), then `python3 scripts/build_site_data.py`. All three are read-only and write only to `local-inputs/netbox/` (not tracked). The live service also re-reads NetBox itself (**Refresh NetBox**).
 
@@ -62,6 +62,7 @@ This guide is written for a **new user setting up from nothing**. Follow section
 12. [Remove everything](#12-remove-everything)
 13. [HTTP API and repository contents](#13-reference)
 14. [Tests and CI](#14-tests-and-ci)
+15. [SYS2 tab: Ethernet backend](#15-sys2-tab-ethernet-backend)
 
 ---
 
@@ -867,3 +868,44 @@ python3 -m unittest discover -s tests -v
 ```
 
 GitHub Actions (`.github/workflows/lon14-dashboard.yml`) runs them on every push and pull request that touches the dashboard, and also checks that every Python file compiles, the shell scripts parse (`bash -n`, `zsh -n`), and the JavaScript in both pages parses.
+
+---
+
+## 15. SYS2 tab: Ethernet backend
+
+LON14's second GPU backend, `sys2-lon14`, is an Ethernet fabric (NVIDIA Spectrum-X SN5610, Cumulus/NVUE). It has no UFM, so the tab is NetBox + switch SSH only.
+
+| | SYS2 |
+| --- | --- |
+| Switches | 256 leaves BEL1–256, 72 spines BES1–72 (SN5610) |
+| Hosts | gpu1–1152 (`sys2-lon14-p-phy-gpu*`), 8 backend ports each, plus eth0/eth1 (FEL), BF MGMT and iDRAC (OBL) |
+| NetBox | 9,216 leaf–spine + 9,216 host cables; **no management IPs recorded for any SYS2 switch** |
+
+**Wiring rules** (`scripts/build_sys2_data.py`; all 18,432 NetBox cables follow them, and the tab re-checks on every build):
+
+| Rule | Expected connection |
+| --- | --- |
+| P1 | Two planes, never joined: plane A = BEL1–128 + BES1–36, plane B = BEL129–256 + BES37–72 |
+| L1 | Leaf uplinks swp47s0 … swp64s1 (index *u* = 0–35). Leaf *j* uplink *u* → spine 36*p*+36−*u*, on spine port index *j*−1−128*p* (swp1s0, swp1s1, swp2s0 …) |
+| G1 | Host port swp*r*s*p* = rail *r* (1–4), plane *p* (s0 = A, s1 = B). Pod *b* = 144 hosts on 16 leaves per plane; SU *k* (36 hosts) takes the *k*-th leaf of each 4-leaf rail block: gpu1–36 → BEL1/5/9/13 and BEL129/133/137/141. Host *i* of an SU uses leaf port swp(⌊*i*/2⌋+1)s(*i* mod 2) |
+
+**How it runs.** The tab frames `assets/sys2.html`. `scripts/open_dashboard.command` also starts a second service from the same code, `app/netbox_live_sync.py --fabric sys2`, on **127.0.0.1:8767**. It has its own inventory and cables (`assets/sys2/`), its own state folder (`.netbox-live-sync-sys2/`) and host keys (`local-inputs/sys2/known_hosts`), never touches UFM, and reads switch states only over SSH (`nv show interface --output json`, read-only). When that service is not running the tab shows the static NetBox view.
+
+**One-time setup for SYS2 live state:**
+
+1. **Host keys.** NetBox has no IPs for the SYS2 switches, so names are resolved with DNS on the jump host (`lon14deploy1`):
+
+   ```bash
+   ./scripts/configure_known_hosts.sh --fabric sys2 --collect-live
+   ```
+
+   (or install an approved file: `./scripts/configure_known_hosts.sh --fabric sys2`). Verify fingerprints as for SYS1.
+2. **Login.** By default SYS2 uses the same profile as SYS1 (`device-access-lon14.ini`). If the SYS2 switches use a different account, make a second profile and pass it: `LON14_SYS2_ARGS="--device-profile ~/.config/idc-automation/device-access-lon14-sys2.ini" ./scripts/open_dashboard.command`.
+3. Open the dashboard, choose **SYS2 · ETHERNET**, press **Sync with switch SSH**.
+
+Live link states use the same wording as SYS1: an Ethernet port that is up shows as `Active/LinkUp/<speed>`, admin-down as `Down/Disabled/`, otherwise `Down/LinkDown/`. Host-side ports are not collected.
+
+**Refreshing SYS2 data from NetBox:** `python3 scripts/lon14_discover.py`, then `python3 scripts/build_sys2_data.py`.
+
+**Known gaps:** the switch login for SYS2 is not confirmed (Cumulus switches often use a different account); DNS names for the SYS2 switches must resolve on the jump host until NetBox has their IPs.
+

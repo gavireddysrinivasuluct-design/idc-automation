@@ -12,6 +12,7 @@ import configparser
 import csv
 import getpass
 import ipaddress
+import json
 import os
 import pty
 import select
@@ -127,7 +128,31 @@ def resolve_management_ips(names: List[str]) -> Dict[str, str]:
     return resolved
 
 
-def load_devices(device_file: Path, address_file: Path, allow_missing: bool, resolve_missing: bool) -> List[Device]:
+def resolve_on_jump_host(names: List[str], jump_host: str, jump_user: Optional[str]) -> Dict[str, str]:
+    """Resolve switch names with the jump host's DNS (one Teleport session). Used when NetBox has
+    no management IP (LON14 sys2). Only IPv4 answers that parse as addresses are accepted."""
+    if not names or not jump_host or not shutil.which("tsh"):
+        return {}
+    script = ("import json,socket,sys\nout={}\nfor n in json.load(sys.stdin):\n"
+              " try: out[n]=socket.gethostbyname(n)\n except OSError: pass\nprint(json.dumps(out))")
+    command = ["tsh", "ssh"] + (["--login", jump_user] if jump_user else []) + [jump_host, "python3 -c %s" % shlex.quote(script)]
+    try:
+        done = subprocess.run(command, input=json.dumps(names), text=True, capture_output=True, timeout=120)
+        answer = json.loads((done.stdout or "{}").strip().splitlines()[-1] or "{}") if done.returncode == 0 else {}
+    except (subprocess.SubprocessError, ValueError, IndexError):
+        return {}
+    resolved = {}
+    for name, address in answer.items():
+        try:
+            if name in names and ipaddress.ip_address(address).version == 4:
+                resolved[name] = address
+        except ValueError:
+            continue
+    return resolved
+
+
+def load_devices(device_file: Path, address_file: Path, allow_missing: bool, resolve_missing: bool,
+                 jump_host: Optional[str] = None, jump_user: Optional[str] = None) -> List[Device]:
     names = [row["hostname"] for row in rows(device_file, "hostname") if row["hostname"]]
     if len(names) != len(set(names)):
         raise ValueError("devices.csv contains duplicate hostnames")
@@ -148,11 +173,17 @@ def load_devices(device_file: Path, address_file: Path, allow_missing: bool, res
     if duplicate_ips:
         raise ValueError("Duplicate management IPs: %s" % ", ".join(duplicate_ips))
     missing = [name for name in names if name not in mapping]
-    if missing and resolve_missing:
+    if missing and resolve_missing and not jump_host:  # with a jump host, its DNS is used below
         resolved = resolve_management_ips(missing)
         mapping.update(resolved)
         if resolved:
             print("Resolved %d missing management IP(s) from jumpbox DNS." % len(resolved), file=sys.stderr)
+        missing = [name for name in names if name not in mapping]
+    if missing and resolve_missing and jump_host:
+        resolved = resolve_on_jump_host(missing, jump_host, jump_user)
+        mapping.update(resolved)
+        if resolved:
+            print("Resolved %d missing management IP(s) with DNS on %s." % (len(resolved), jump_host), file=sys.stderr)
         missing = [name for name in names if name not in mapping]
     if missing and not allow_missing:
         preview = ", ".join(missing[:10]) + (" …" if len(missing) > 10 else "")
@@ -488,7 +519,7 @@ def main() -> int:
         raise ValueError("--fanout jump requires --jump-host (or a profile with jump_host)")
     if args.jump_host and not shutil.which("tsh"):
         raise RuntimeError("Teleport CLI (tsh) is required with --jump-host")
-    devices = load_devices(args.devices, args.addresses, args.allow_missing, not args.no_resolve_missing)
+    devices = load_devices(args.devices, args.addresses, args.allow_missing, not args.no_resolve_missing, args.jump_host, args.jump_user)
     if not devices:
         raise ValueError("No usable device/IP mappings")
     if args.dry_run:
