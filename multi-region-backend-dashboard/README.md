@@ -61,7 +61,11 @@ For cabling and topology, also start the site dashboards: ICE2 on 8765
 - **All regions** (`/`): one card per site with status (*Healthy*, *Issues*, *Critical*,
   *No telemetry*), switches answering ping, ports not Active, ports with link-downs and
   errors in the last 15 min, UFM servers up, open incidents, and a dot per data source.
-- **A region** (`/r/sta1`): live issues ranked critical → major → minor, each with the
+- **A region with its own fabric dashboard** (ICE2, LON14) opens that dashboard first,
+  full size and unchanged: the same topology, cabling check, Sync fabric, Refresh NetBox
+  and inspector as running `netbox_live_sync.py` on its own (ICE2 on 8765, LON14 on 8766).
+  **Live issues (nsr)** is the second tab; the tab shows how many issues there are.
+- **Live issues** (the only view for OSL1, STA1, GLO1; `#issues` for ICE2/LON14): ranked critical → major → minor, each with the
   affected switches/ports and what to do; UFM event log and syslog lines; open PagerDuty
   incidents; the data sources at that site and whether they answered; every check with
   its PromQL; links to that site's Grafana dashboards and cabling dashboard.

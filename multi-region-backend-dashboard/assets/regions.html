@@ -65,6 +65,9 @@ td.num{text-align:right;font-variant-numeric:tabular-nums}
 .log div{padding:2px 0;border-bottom:1px solid #131d2e}.log time{color:var(--faint);margin-right:8px}
 .loading{color:var(--muted);font-style:italic}
 .src td:first-child{white-space:nowrap}
+.views{margin:-4px 0 16px}.views a{font-size:13px;padding:7px 14px}
+code.cmd{display:block;white-space:pre;background:#0b1220;border:1px solid var(--line);border-radius:8px;padding:10px;margin:10px 0;color:var(--text)}
+iframe.topo.native{height:calc(100vh - 230px);min-height:720px;margin-top:0}
 iframe.topo{width:100%;height:78vh;border:1px solid var(--line);border-radius:10px;background:#08101b;margin-top:10px}
 ul.notes{margin:0;padding-left:18px;color:var(--muted);font-size:12.5px}ul.notes li{margin:4px 0}
 details.q summary{cursor:pointer;color:var(--faint);font-size:11.5px;margin-top:6px}details.q code{display:block;white-space:pre-wrap;color:var(--muted);margin-top:4px}
@@ -167,32 +170,53 @@ function regionPage(site, force, quiet){
     <div class="title"><div><h2>${esc(r.name)} <span class="muted" style="font-size:16px;font-weight:500">${esc(r.location || "")}</span></h2>
       <div class="sub">${esc(r.fabric || "")} · clusters ${esc(r.clusters || "")} · cloud_region ${r.cloud_regions.map(c => `<code>${esc(c)}</code>`).join(", ")}</div></div>
       <div class="links" id="links"></div></div>
+    <div class="tabs views" id="views"></div>
+    <div id="v-fabric" hidden></div>
+    <div id="v-issues" hidden>
     <div class="kpis" id="kpis"></div>
     <div class="layout"><div>
       <section class="panel"><h3>Live issues</h3><div class="desc">Everything the site's live sources report as wrong right now, most severe first.</div><div id="issues" class="loading">Querying via nsr…</div></section>
-      <div id="topo"></div>
       <section class="panel"><h3>UFM and switch events</h3><div class="desc">From Loki: the UFM event log and backend switch syslog.</div><div id="events" class="loading">Querying Loki via nsr…</div></section>
       <section class="panel"><h3>All checks</h3><div class="desc">Every query run for this site, with its result. Expand one to see the PromQL.</div><div id="checks" class="loading">Querying via nsr…</div></section>
     </div><aside>
       <section class="panel"><h3>PagerDuty</h3><div class="desc">Open BackEnd Network incidents naming ${esc(r.name)}.</div><div id="incidents" class="loading">Reading PagerDuty via nsr…</div></section>
       <section class="panel"><h3>Data sources at ${esc(r.name)}</h3><div class="desc">What is collected here, and whether it answered just now.</div><div id="sources" class="loading">Checking…</div></section>
       <section class="panel"><h3>Notes</h3><ul class="notes">${(r.notes || []).map(n => `<li>${esc(n)}</li>`).join("")}</ul></section>
-    </aside></div>`;
+    </aside></div></div>`;
     links(r);
+    views(r);
   }
   loadRegion(r, force);
 }
 
 function links(r){
   const g = (r.grafana_dashboards || []).map(([t, p]) => `<a class="btn" target="_blank" rel="noopener" href="${esc(CONFIG.grafana_url + p)}">${esc(t)} ↗</a>`).join("");
-  $("#links").innerHTML = g;
-  if(r.topology_dashboard){
+  const native = r.topology_dashboard ? `<a class="btn" target="_blank" rel="noopener" href="${esc(r.topology_dashboard)}">Open ${esc(r.name)} fabric dashboard separately ↗</a>` : "";
+  $("#links").innerHTML = native + g;
+}
+
+/* Regions with a native NetBox + UFM dashboard (ICE2, LON14) open it first, full size,
+   exactly as before: same topology, data model and controls. Live issues (nsr) is the
+   second view. Regions without one open on Live issues. */
+function views(r){
+  const has = !!r.topology_dashboard;
+  const want = location.hash.slice(1) || (has ? "fabric" : "issues");
+  const view = has && want === "fabric" ? "fabric" : "issues";
+  $("#views").innerHTML = (has ? `<a href="#fabric" data-view="fabric" class="${view === "fabric" ? "on" : ""}">Fabric dashboard (topology, cabling, sync)</a>` : "") +
+    `<a href="#issues" data-view="issues" class="${view === "issues" ? "on" : ""}">Live issues (nsr)<span id="issue-count"></span></a>`;
+  $("#views").onclick = e => { const a = e.target.closest("[data-view]"); if(!a) return; e.preventDefault(); history.replaceState({}, "", "#" + a.dataset.view); views(r); };
+  $("#v-issues").hidden = view !== "issues";
+  $("#v-fabric").hidden = view !== "fabric";
+  if(view === "fabric" && !$("#v-fabric").dataset.loaded){
+    $("#v-fabric").dataset.loaded = "1";
+    $("#v-fabric").innerHTML = `<p class="loading">Connecting to the ${esc(r.name)} fabric dashboard…</p>`;
     getJSON("/api/topology/" + r.site).then(t => {
       if(current !== r.site) return;
-      $("#topo").innerHTML = `<section class="panel"><h3>Cabling and topology</h3><div class="desc">${t.running ? `The ${esc(r.name)} NetBox + UFM dashboard is running: miscabling, live link state, incidents and the fabric diagram.` : `The ${esc(r.name)} NetBox + UFM dashboard is not running. Start it from <code>${esc(r.site)}-netbox-dashboard</code> with <code>scripts/open_dashboard.command</code>.`}</div>
-        <div class="links"><a class="btn" target="_blank" rel="noopener" href="${esc(t.url)}">Open ${esc(r.name)} cabling dashboard ↗</a>${t.running ? `<button id="embed">Show it here</button>` : ""}</div><div id="frame"></div></section>`;
-      const b = $("#embed"); if(b) b.onclick = () => { $("#frame").innerHTML = `<iframe class="topo" src="${esc(t.url)}" title="${esc(r.name)} cabling dashboard"></iframe>`; b.remove(); };
-    }).catch(() => {});
+      $("#v-fabric").innerHTML = t.running
+        ? `<iframe class="topo native" src="${esc(t.url)}" title="${esc(r.name)} fabric dashboard"></iframe>`
+        : `<div class="notice">The ${esc(r.name)} fabric dashboard (${esc(t.url)}) is not running. Start it in a terminal, then reload this page:<code class="cmd">cd ~/Downloads/Tools/idc-automation/${esc(r.site)}-netbox-dashboard\n./scripts/open_dashboard.command</code>Live issues from nsr are in the other tab.</div>`;
+      if(!t.running) delete $("#v-fabric").dataset.loaded;
+    }).catch(e => { $("#v-fabric").innerHTML = `<div class="notice err">${esc(e.message)}</div>`; delete $("#v-fabric").dataset.loaded; });
   }
 }
 
@@ -242,6 +266,7 @@ function render(r, results){
     }
     if(errs.length) html += `<div class="notice err" style="margin-top:10px">${errs.length} check(s) failed: ${esc(errs[0].error)} <span class="muted">${esc(errs[0].hint || "")}</span></div>`;
     $("#issues").className = ""; $("#issues").innerHTML = html;
+    const n = issues.length + (crit ? 1 : 0); const ic = $("#issue-count"); if(ic) ic.textContent = n ? ` · ${n}` : " · none";
   }
   // Checks
   if(["fabric", "switches", "reach"].some(s => results[s])){
