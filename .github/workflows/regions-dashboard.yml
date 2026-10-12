@@ -1,0 +1,39 @@
+name: regions-dashboard
+
+on:
+  push:
+    paths: ["multi-region-backend-dashboard/**", ".github/workflows/regions-dashboard.yml"]
+  pull_request:
+    paths: ["multi-region-backend-dashboard/**", ".github/workflows/regions-dashboard.yml"]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: multi-region-backend-dashboard
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Python compiles
+        run: python -m py_compile *.py tests/*.py
+      - name: Unit tests (fake nsr, offline)
+        run: python -m unittest discover -s tests -v
+      - name: Launcher parses
+        run: |
+          sudo apt-get install -y -qq zsh >/dev/null
+          zsh -n scripts/open_regions.command
+      - name: Page JavaScript parses
+        run: |
+          node -e '
+            const html = require("fs").readFileSync("assets/regions.html", "utf8");
+            [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].forEach(m => new Function(m[1]));
+            console.log("regions.html OK")'

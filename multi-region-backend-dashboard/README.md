@@ -1,0 +1,120 @@
+# Backend regions dashboard (all sites, live issues via nsr)
+
+Pick a region, see what is wrong in its backend fabric right now. One small local service
+covers every backend site (ICE2, LON14, OSL1, STA1, GLO1) using the observability stack
+that already exists, read through [`nsr`](https://github.com/nscaledev/netops-misc/tree/main/nsr):
+
+| Source (through nsr) | What the dashboard shows |
+| --- | --- |
+| **UFM telemetry** (Grafana: infra-mimir, LON14 VictoriaMetrics) | Ports not Active per switch, link-down events, symbol/receive errors, discards, congestion |
+| **gNMI** (ICE2, LON14) | PSUs and fans not ACTIVE, PSUs without input, hot optics, ASIC temperature, switch-side link-downs |
+| **Blackbox ping** | Switches not answering on management |
+| **SNMP** | SNMP targets not answering |
+| **UFM server monitoring** | UFM appliances up/down, CPU and memory, HA role where command-exporter runs |
+| **Loki** | UFM event log (critical, errors, switch/node down) and backend switch syslog |
+| **PagerDuty** (BackEnd Network, PK6NAFF) | Open incidents that name the site |
+
+The ICE2 and LON14 NetBox + UFM dashboards (cabling, miscabling, diagram) stay as they
+are; each region page links to them and can show them inline when they are running.
+
+- **Read-only.** Only three nsr verbs are allowed: `grafana query`, `grafana loki` and
+  `pd incidents`. Nothing logs in to a switch, UFM or NetBox.
+- **No secrets here.** nsr owns Teleport mTLS and the PagerDuty token.
+- **Light on Grafana.** The all-regions page is 18 grouped queries (`by (cloud_region)`),
+  not one per site; every query aggregates or returns only offenders; answers are cached
+  60 s; at most 6 nsr processes run at once.
+- **Absent is not zero.** When a source has no data for a site, the page shows “—” or
+  “no data”, never a healthy 0.
+
+```
+Browser ─► 127.0.0.1:8780  multi_region_dashboard.py ─► nsr ─► Teleport ─► Grafana (Mimir · VictoriaMetrics · Loki)
+                                                          └──────────────► PagerDuty
+```
+
+## Run it
+
+Once:
+
+```bash
+brew install uv teleport
+uv tool install "git+ssh://git@github.com/nscaledev/netops-misc.git#subdirectory=nsr"
+tsh login --proxy=nscale.teleport.sh --auth=google
+nsr doctor                 # Grafana must be reachable; PagerDuty optional (nsr setup pd)
+```
+
+Every day: double-click **`scripts/open_regions.command`**, or
+
+```bash
+cd idc-automation/multi-region-backend-dashboard
+python3 multi_region_dashboard.py          # http://127.0.0.1:8780/
+```
+
+Options: `--nsr PATH`, `--port N`, `--cache-seconds N` (default 60), `--max-parallel N`
+(default 6), `--warm` (load the overview at start). Try it without any access:
+`python3 multi_region_dashboard.py --nsr tests/fake_nsr.py` serves invented demo data.
+
+For cabling and topology, also start the site dashboards: ICE2 on 8765
+(`ice2-netbox-dashboard/scripts/open_dashboard.command`) and LON14 on 8766.
+
+## Using it
+
+- **All regions** (`/`): one card per site with status (*Healthy*, *Issues*, *Critical*,
+  *No telemetry*), switches answering ping, ports not Active, ports with link-downs and
+  errors in the last 15 min, UFM servers up, open incidents, and a dot per data source.
+- **A region** (`/r/sta1`): live issues ranked critical → major → minor, each with the
+  affected switches/ports and what to do; UFM event log and syslog lines; open PagerDuty
+  incidents; the data sources at that site and whether they answered; every check with
+  its PromQL; links to that site's Grafana dashboards and cabling dashboard.
+- **⟳ Refresh** asks nsr again (bypasses the cache). Auto-refresh runs every 60 s.
+
+## What each site has (checked 2026-10-08, netops-misc observability compendium)
+
+| Site | gNMI | UFM telemetry | SNMP | Ping | UFM servers | Logs (Loki) |
+| --- | --- | --- | --- | --- | --- | --- |
+| ICE2 | ✓ 100 | ✓ alert-primary-hf (Mimir) | ✓ | ✓ | ✓ + HA role | UFM event log |
+| LON14 | ✓ 100 | ✓ **lon14-victoriametrics only** | ✓ | ✓ | ✓ + HA role | UFM event log |
+| OSL1 | ✗ | ✓ alert-primary-hf, 48 switches | ✓ mlnx_health 48/48 | ✓ 48/48 | ufm0 up, ufm1 down | UFM event log, switch syslog |
+| STA1 | ✗ | ✓ **job `ufm-mgmt`** (cset `nscale`), 96 switches, no BER/temp | Nokia sys1 only; QM9700 pending (PR #1041) | ✓ 96 | down since 24 Sep (ITSM-3588) | UFM event log, switch syslog (by mgmt IP) |
+| GLO1 | ✗ | ✗ | ✗ | ✗ | ✗ | — (OBS-681) |
+
+So for **STA1 and OSL1** the live sources beyond gNMI are: UFM telemetry, blackbox ping,
+UFM server monitoring, the UFM event log and switch syslog in Loki, SNMP (OSL1 fully,
+STA1 Nokia only) and PagerDuty. STA1's UFM job uses different labels from the other sites,
+so its selector is the one most likely to need adjusting. Check it with:
+
+```bash
+python3 discover.py sta1        # or osl1, or --all
+```
+
+`discover.py` asks every Prometheus store (infra-mimir, promxy, europe-west and LON14
+VictoriaMetrics) which jobs, UFM metric families and labels exist for the site, samples
+its Loki streams, runs the dashboard's own checks, and saves the report to
+`discovery/<site>-<time>.txt` (git-ignored). If a source has series but a check says
+*no data*, fix that site's `selector` in `regions.json`.
+
+## Adding or changing a site
+
+Everything site-specific is in `regions.json`: `cloud_regions` (all aliases), the label
+selector for each source (`ufm`, `gnmi`, `snmp`, `ping`, `ufm_server`), the LogQL for
+`ufm_events` and `syslog`, the Grafana dashboards to link, the cabling dashboard URL and
+notes. A source that is left out is shown as *not collected*. Restart the service after
+editing.
+
+## Files
+
+| Path | Purpose |
+| --- | --- |
+| `multi_region_dashboard.py` | Local service and HTTP API |
+| `checks.py` | Every query, and how answers become issues |
+| `nsr_client.py` | Runs the allowed nsr verbs, parses `--json`, limits concurrency |
+| `discover.py` | Read-only data-source discovery per site |
+| `regions.json` | Sites, selectors, links, notes (no secrets) |
+| `assets/regions.html` | The page |
+| `scripts/open_regions.command` | One-click start |
+| `tests/` | Offline tests and `fake_nsr.py` (invented data) |
+
+HTTP API (127.0.0.1 only): `GET /api/config`, `GET /api/overview`,
+`GET /api/region/<site>/<fabric|switches|reach|events|incidents>`, `GET /api/topology/<site>`;
+add `?refresh=1` to bypass the cache.
+
+Tests: `python3 -m unittest discover -s tests -v`.

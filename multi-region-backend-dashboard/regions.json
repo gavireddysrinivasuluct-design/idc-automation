@@ -1,0 +1,148 @@
+{
+  "_comment": "Non-secret registry of backend regions. Selectors and facts come from nscaledev/netops-misc (Grafana backups and the observability compendium ledger, 2026-10-08). Run `python3 discover.py <site>` to re-check a site after a telemetry change.",
+  "grafana_url": "https://observability-grafana.nscale.teleport.sh",
+  "pagerduty_service": "PK6NAFF",
+  "datasources": {
+    "mimir": "infra-mimir",
+    "lon14_vm": "bfssob4wsbchsb",
+    "loki": "infra-loki"
+  },
+  "regions": [
+    {
+      "site": "ice2",
+      "name": "ICE2",
+      "location": "Keflavik",
+      "fabric": "InfiniBand XDR · Q3400",
+      "clusters": "sys1-ice2",
+      "cloud_regions": ["is-sys1-ice2"],
+      "switches_expected": 100,
+      "match": ["ice2"],
+      "sources": {
+        "ufm": {"datasource": "mimir", "selector": "job=\"ufm-mgmt-alert-primary-hf\",cloud_region=\"is-sys1-ice2\",device_type=\"switch\",source=\"\",port_id!=\"\""},
+        "gnmi": {"netbox_site": "ice2"},
+        "snmp": {"selector": "cloud_region=\"is-sys1-ice2\",job=~\"snmp.*\",role=~\"be-(leaf|spine)-switch\""},
+        "ping": {"selector": "cloud_region=\"is-sys1-ice2\",job=\"blackbox-mgmt-ping\",role=~\"be-(leaf|spine)-switch\""},
+        "ufm_server": {"datasource": "mimir", "selector": "job=\"ufm-system-monitoring\",cloud_region=\"is-sys1-ice2\""},
+        "ufm_events": {"logql": "{host_name=~\"sys1-ice2-p-phy-ufm[0-9]+\"}"}
+      },
+      "topology_dashboard": "http://127.0.0.1:8765/",
+      "grafana_dashboards": [
+        ["Site observability status", "/d/site-obs-status-ice2"],
+        ["IB backend actionable", "/d/ib-backend-actionable-sys1-ice2"],
+        ["IB health (UFM alert jobs)", "/d/ib-health-diagnostics-site-alert-jobs?var-site=sys1-ice2-p-swi-be%5Bls%5D%5B0-9%5D%2B"]
+      ],
+      "notes": [
+        "Full coverage: gNMI on all 100 switches, UFM telemetry (alert-primary-hf), SNMP, blackbox ping and UFM event log in Loki.",
+        "Cabling and topology checks live in the ICE2 NetBox dashboard (port 8765)."
+      ]
+    },
+    {
+      "site": "lon14",
+      "name": "LON14",
+      "location": "London",
+      "fabric": "InfiniBand NDR · sys1 (sys2 is Ethernet SN5610)",
+      "clusters": "sys1-lon14",
+      "cloud_regions": ["gb-sys1-lon14"],
+      "switches_expected": 100,
+      "match": ["lon14"],
+      "sources": {
+        "ufm": {"datasource": "lon14_vm", "selector": "job=\"ufm-mgmt-alert-primary-hf\",cloud_region=\"gb-sys1-lon14\",device_type=\"switch\",source=\"\",port_id!=\"\""},
+        "gnmi": {"netbox_site": "lon14"},
+        "snmp": {"selector": "cloud_region=\"gb-sys1-lon14\",job=~\"snmp.*\",role=~\"be-(leaf|spine)-switch\""},
+        "ping": {"selector": "cloud_region=\"gb-sys1-lon14\",job=\"blackbox-mgmt-ping\",role=~\"be-(leaf|spine)-switch\""},
+        "ufm_server": {"datasource": "lon14_vm", "selector": "job=\"ufm-system-monitoring\",cloud_region=\"gb-sys1-lon14\""},
+        "ufm_events": {"logql": "{host_name=~\".*lon14.*ufm.*\"}"}
+      },
+      "topology_dashboard": "http://127.0.0.1:8766/",
+      "grafana_dashboards": [
+        ["Site observability status", "/d/site-obs-status-lon14"],
+        ["IB backend site overview", "/d/ib-backend-site?var-site=lon14"]
+      ],
+      "notes": [
+        "LON14 UFM telemetry is only in the lon14-victoriametrics datasource (uid bfssob4wsbchsb), not in infra-mimir; gNMI is in infra-mimir.",
+        "Cabling and topology checks live in the LON14 NetBox dashboard (port 8766)."
+      ]
+    },
+    {
+      "site": "osl1",
+      "name": "OSL1",
+      "location": "Oslo",
+      "fabric": "InfiniBand NDR · QM9700",
+      "clusters": "sys2-osl1",
+      "cloud_regions": ["no-sys2-osl1", "no-sys1-osl1", "no-osl1"],
+      "switches_expected": 48,
+      "match": ["osl1"],
+      "sources": {
+        "ufm": {"datasource": "mimir", "selector": "job=\"ufm-mgmt-alert-primary-hf\",cloud_region=\"no-sys2-osl1\",device_type=\"switch\",source=\"\",port_id!=\"\""},
+        "snmp": {"selector": "cloud_region=~\"no-sys2-osl1|no-sys1-osl1|no-osl1\",job=~\"snmp.*\",role=~\"be-(leaf|spine)-switch\""},
+        "ping": {"selector": "cloud_region=~\"no-sys2-osl1|no-sys1-osl1|no-osl1\",job=\"blackbox-mgmt-ping\",role=~\"be-(leaf|spine)-switch\""},
+        "ufm_server": {"datasource": "mimir", "selector": "job=\"ufm-system-monitoring\",cloud_region=\"no-sys2-osl1\""},
+        "ufm_events": {"logql": "{host_name=~\"sys2-osl1-p-phy-ufm[0-9]+\"}"},
+        "syslog": {"logql": "{cloud_region=\"no-sys2-osl1\", nscale_log_source=\"infra-collector-syslog\"}"}
+      },
+      "topology_dashboard": null,
+      "grafana_dashboards": [
+        ["Site observability status", "/d/site-obs-status-osl1"],
+        ["IB health (UFM alert jobs)", "/d/ib-health-diagnostics-site-alert-jobs?var-site=sys2-osl1-p-ifs-%28bel%28%5B0-9%5D%7C%5B12%5D%5B0-9%5D%7C3%5B01%5D%29%7Cbes%28%5B0-9%5D%7C1%5B0-5%5D%29%29"]
+      ],
+      "notes": [
+        "No gNMI: the gnmi NetBox tag is not applied at OSL1 (one leftover gnmic target, bes0, stuck in TRANSIENT_FAILURE).",
+        "UFM telemetry: 38 targets on VIP 10.50.40.9 (alert-primary-hf 16, secondary-lf 22). UFM server monitoring: ufm0 up, ufm1 down.",
+        "SNMP mlnx_health: 48 of 48 switches (about 139 series per switch). Blackbox ping: 48 of 48.",
+        "Backend switch syslog arrives in Loki (nscale_log_source=infra-collector-syslog) but no alert rule reads it.",
+        "Command-exporter (UFM HA role, CLI probes) is not rolled out to OSL1 yet (ANO-860 covers ICE2 and LON14 only)."
+      ]
+    },
+    {
+      "site": "sta1",
+      "name": "STA1",
+      "location": "Stavanger",
+      "fabric": "InfiniBand NDR · QM9700 (sys2) + Nokia (sys1)",
+      "clusters": "sys2-sta1, sys1-sta1",
+      "cloud_regions": ["no-sys2-sta1", "no-sta1"],
+      "switches_expected": 96,
+      "match": ["sta1", "stavanger"],
+      "sources": {
+        "ufm": {"datasource": "mimir", "selector": "job=\"ufm-mgmt\",cloud_region=\"no-sys2-sta1\",port_id!=\"\""},
+        "snmp": {"selector": "cloud_region=~\"no-sta1|no-sys2-sta1\",job=~\"snmp.*|netboxSnmp.*\",role=~\"be-(leaf|spine)-switch\""},
+        "ping": {"selector": "cloud_region=\"no-sys2-sta1\",job=\"blackbox-mgmt-ping\",role=~\"be-(leaf|spine)-switch\""},
+        "ufm_server": {"datasource": "mimir", "selector": "job=\"ufm-system-monitoring\",cloud_region=\"no-sys2-sta1\""},
+        "ufm_events": {"logql": "{host_name=~\"sys2-sta1-p-phy-ufm[0-9]+\"}"},
+        "syslog": {"logql": "{cloud_region=\"no-sys2-sta1\", service_name=\"syslog\"}"}
+      },
+      "topology_dashboard": null,
+      "grafana_dashboards": [
+        ["IB health (UFM alert jobs)", "/d/ib-health-diagnostics-site-alert-jobs?var-site=ifs%2834%5B6-9%5D%7C3%5B5-9%5D%5B0-9%5D%7C4%5B0-3%5D%5B0-9%5D%7C44%5B0-1%5D%29"]
+      ],
+      "notes": [
+        "No gNMI at STA1 (gnmi tag not applied).",
+        "UFM telemetry comes from a different job than other sites: job=ufm-mgmt (cset 'nscale' on the VIP 10.40.40.54:8080), 96 switches; counters and port state only, no BER or temperature (LF) families. Label names are unverified: run `python3 discover.py sta1`.",
+        "UFM server monitoring (ufm-system-monitoring) has been down since 2026-09-24 16:53 UTC, after the UFM password change (ITSM-3588).",
+        "Blackbox ping covers all 96 QM9700 switches (64 leaf, 32 spine), scraped from the GLO1 collector.",
+        "QM9700 SNMP is not live yet (PR #1041 / #242 open); SNMP if_mib exists only for the 16 Nokia sys1-sta1 leaves (cloud_region no-sta1).",
+        "MLNX-OS syslog from the QM9700s reaches Loki as an unlabelled stream {cloud_region=no-sys2-sta1, service_name=syslog}; the switch is identified only by management IP.",
+        "UFM event-log alerts (ufm-ev-*) do fire for STA1 and page BackEnd Network (e.g. BENETOPS-25, BENETOPS-50)."
+      ]
+    },
+    {
+      "site": "glo1",
+      "name": "GLO1",
+      "location": "Glomfjord",
+      "fabric": "InfiniBand · sys4-glo1 (128 leaf, 72 spine)",
+      "clusters": "sys4-glo1",
+      "cloud_regions": ["no-glo1"],
+      "switches_expected": 200,
+      "match": ["glo1", "glomfjord"],
+      "sources": {
+        "ping": {"selector": "cloud_region=\"no-glo1\",job=\"blackbox-mgmt-ping\",role=~\"be-(leaf|spine)-switch\""},
+        "ufm_server": {"datasource": "mimir", "selector": "job=\"ufm-system-monitoring\",cloud_region=\"no-glo1\""}
+      },
+      "topology_dashboard": null,
+      "grafana_dashboards": [],
+      "notes": [
+        "No backend telemetry of any kind today: no gNMI, UFM, SNMP or ping. NetBox records for sys4-glo1 have no primary or OOB IP and no telemetry tags (Linear OBS-681).",
+        "The probes stay on so the page turns live as soon as data appears."
+      ]
+    }
+  ]
+}

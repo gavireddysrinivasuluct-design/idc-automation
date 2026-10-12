@@ -1,0 +1,321 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Backend regions</title>
+<style>
+:root{color-scheme:dark;--bg:#0a0f18;--panel:#111827;--panel2:#162032;--line:#243149;--text:#e6ecf5;--muted:#93a3ba;--faint:#64748b;
+--accent:#6e8cff;--ok:#4ade80;--okbg:#0f2e1f;--warn:#fbbf24;--warnbg:#33260b;--bad:#f87171;--badbg:#3a1616;--info:#7dd3fc;--infobg:#0c2a3a;--off:#475569}
+*{box-sizing:border-box}html,body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif}
+a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}
+code,.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}
+header{display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:space-between;padding:16px 24px;border-bottom:1px solid var(--line);background:#0d1421;position:sticky;top:0;z-index:5}
+header h1{font-size:18px;margin:0;letter-spacing:.2px}header h1 span{color:var(--muted);font-weight:500}
+.bar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;color:var(--muted);font-size:12.5px}
+button,.btn{background:var(--panel2);color:var(--text);border:1px solid var(--line);border-radius:8px;padding:6px 11px;font:inherit;font-size:12.5px;cursor:pointer;display:inline-flex;gap:6px;align-items:center}
+button:hover,.btn:hover{border-color:var(--accent);text-decoration:none}
+label.toggle{display:inline-flex;gap:6px;align-items:center;cursor:pointer}
+main{max-width:1440px;margin:0 auto;padding:22px 24px 60px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:16px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px 18px;cursor:pointer;transition:border-color .15s,transform .15s;text-align:left;color:inherit;font:inherit;display:block;width:100%}
+.card:hover{border-color:var(--accent);transform:translateY(-1px)}
+.card h2{margin:0;font-size:20px}.card .sub{color:var(--muted);font-size:12.5px;margin-top:2px}
+.row{display:flex;justify-content:space-between;align-items:baseline;gap:10px;padding:5px 0;border-bottom:1px dashed #1e293b;font-size:13px}
+.row:last-of-type{border-bottom:0}.row b{font-variant-numeric:tabular-nums}
+.pill{display:inline-flex;align-items:center;gap:6px;padding:3px 9px;border-radius:999px;font-size:11.5px;font-weight:700;letter-spacing:.3px;white-space:nowrap}
+.pill.healthy{background:var(--okbg);color:var(--ok)}.pill.issues{background:var(--warnbg);color:var(--warn)}.pill.critical{background:var(--badbg);color:var(--bad)}
+.pill.no-telemetry,.pill.unknown{background:#1e293b;color:var(--muted)}
+.head{display:flex;justify-content:space-between;gap:10px;align-items:flex-start;margin-bottom:10px}
+.chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:12px}
+.chip{display:inline-flex;align-items:center;gap:5px;font-size:11.5px;color:var(--muted);background:#0d1421;border:1px solid var(--line);border-radius:999px;padding:2px 8px}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--off);display:inline-block;flex:none}
+.dot.live{background:var(--ok)}.dot.down,.dot.error{background:var(--bad)}.dot.no-data{background:var(--warn)}.dot.off{background:#334155}
+.bad{color:var(--bad)}.warn{color:var(--warn)}.ok{color:var(--ok)}.muted{color:var(--muted)}.faint{color:var(--faint)}
+.notice{background:var(--panel);border:1px solid var(--line);border-left-width:1px;border-radius:10px;padding:12px 14px;margin:0 0 16px;color:var(--muted)}
+.notice.err{border-color:#5b2323;background:#1d1010;color:#fecaca}
+.crumbs{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:14px}
+.tabs{display:flex;gap:6px;flex-wrap:wrap}.tabs a{padding:5px 11px;border-radius:999px;border:1px solid var(--line);color:var(--muted);font-size:12.5px}
+.tabs a.on{background:var(--accent);border-color:var(--accent);color:#fff}
+.title{display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap;align-items:flex-end;margin:4px 0 18px}
+.title h2{font-size:28px;margin:0}.title .sub{color:var(--muted)}
+.links{display:flex;gap:8px;flex-wrap:wrap}
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-bottom:18px}
+.kpi{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px 14px}
+.kpi .v{font-size:26px;font-weight:750;font-variant-numeric:tabular-nums}.kpi .l{color:var(--muted);font-size:12px}
+.layout{display:grid;grid-template-columns:minmax(0,1fr) 360px;gap:18px}
+@media(max-width:1100px){.layout{grid-template-columns:1fr}}
+section.panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px 18px;margin-bottom:18px}
+section.panel h3{margin:0 0 4px;font-size:15px}section.panel .desc{color:var(--muted);font-size:12.5px;margin-bottom:12px}
+.issue{border:1px solid var(--line);border-radius:10px;margin-bottom:10px;background:#0e1626}
+.issue summary{list-style:none;cursor:pointer;padding:10px 12px;display:flex;gap:10px;align-items:center}
+.issue summary::-webkit-details-marker{display:none}
+.sev{font-size:10.5px;font-weight:800;letter-spacing:.5px;padding:2px 7px;border-radius:5px;text-transform:uppercase;flex:none}
+.sev.critical{background:var(--badbg);color:var(--bad)}.sev.major{background:var(--warnbg);color:var(--warn)}.sev.minor{background:var(--infobg);color:var(--info)}.sev.info{background:#1e293b;color:var(--muted)}
+.issue .count{margin-left:auto;font-weight:700;font-variant-numeric:tabular-nums}
+.issue .body{padding:0 12px 12px}
+.action{color:var(--muted);font-size:12.5px;margin:0 0 8px}
+table{width:100%;border-collapse:collapse;font-size:12.5px}
+th,td{text-align:left;padding:5px 8px;border-bottom:1px solid #1e293b;vertical-align:top}th{color:var(--muted);font-weight:600}
+td.num{text-align:right;font-variant-numeric:tabular-nums}
+.scroll{max-height:320px;overflow:auto}
+.check{display:flex;justify-content:space-between;gap:10px;padding:6px 0;border-bottom:1px dashed #1e293b;font-size:13px}
+.check:last-child{border-bottom:0}
+.log{font-family:ui-monospace,Menlo,monospace;font-size:11.5px;white-space:pre-wrap;word-break:break-word;background:#0b1220;border:1px solid var(--line);border-radius:8px;padding:8px 10px;max-height:300px;overflow:auto}
+.log div{padding:2px 0;border-bottom:1px solid #131d2e}.log time{color:var(--faint);margin-right:8px}
+.loading{color:var(--muted);font-style:italic}
+.src td:first-child{white-space:nowrap}
+iframe.topo{width:100%;height:78vh;border:1px solid var(--line);border-radius:10px;background:#08101b;margin-top:10px}
+ul.notes{margin:0;padding-left:18px;color:var(--muted);font-size:12.5px}ul.notes li{margin:4px 0}
+details.q summary{cursor:pointer;color:var(--faint);font-size:11.5px;margin-top:6px}details.q code{display:block;white-space:pre-wrap;color:var(--muted);margin-top:4px}
+</style>
+</head>
+<body>
+<header>
+  <h1>Backend regions <span>· live fabric issues</span></h1>
+  <div class="bar">
+    <span id="stamp">Loading…</span>
+    <label class="toggle"><input type="checkbox" id="auto" checked> auto-refresh 60 s</label>
+    <button id="refresh" title="Ask nsr again, bypassing the 60 s cache">⟳ Refresh</button>
+  </div>
+</header>
+<main id="main"><p class="loading">Loading regions…</p></main>
+<script>
+"use strict";
+const $ = s => document.querySelector(s);
+const esc = v => String(v ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const fmt = v => v === null || v === undefined ? "—" : (Math.abs(v) >= 1000 ? Math.round(v).toLocaleString() : (Number.isInteger(v) ? String(v) : (Math.abs(v) < 0.01 && v !== 0 ? v.toExponential(1) : (+v.toFixed(2)).toString())));
+const STATUS = {healthy:"Healthy", issues:"Issues", critical:"Critical", "no-telemetry":"No telemetry"};
+const SRC = {
+  ufm:{label:"UFM telemetry", what:"Port state, link-down, symbol/receive errors, discards, congestion per switch port"},
+  gnmi:{label:"gNMI (switches)", what:"PSU, fan, optics and ASIC temperature, switch-side link-down counters"},
+  snmp:{label:"SNMP", what:"Switch availability through snmp_exporter (mlnx_health, if_mib)"},
+  ping:{label:"Blackbox ping", what:"Management reachability of every backend switch"},
+  ufm_server:{label:"UFM servers", what:"UFM appliance up/down, CPU and memory"},
+  ufm_events:{label:"UFM event log (Loki)", what:"Critical, error and switch/node down events from UFM"},
+  syslog:{label:"Switch syslog (Loki)", what:"Backend switch syslog lines"}
+};
+let CONFIG = null, timer = null, current = null;
+
+async function getJSON(url){
+  const r = await fetch(url, {cache:"no-store"});
+  const body = await r.json().catch(() => ({error:"HTTP " + r.status}));
+  if(!r.ok) throw new Error(body.error || ("HTTP " + r.status));
+  return body;
+}
+function go(path){ history.pushState({}, "", path); route(); }
+window.addEventListener("popstate", route);
+document.addEventListener("click", e => {
+  const a = e.target.closest("[data-go]");
+  if(a){ e.preventDefault(); go(a.dataset.go); }
+});
+$("#refresh").onclick = () => route(true);
+$("#auto").onchange = schedule;
+function schedule(){ clearInterval(timer); if($("#auto").checked) timer = setInterval(() => route(false, true), 60000); }
+function stamp(t, extra){ $("#stamp").textContent = "via nsr · updated " + new Date((t||Date.now()/1000)*1000).toLocaleTimeString() + (extra ? " · " + extra : ""); }
+
+async function route(force=false, quiet=false){
+  if(!CONFIG){ try{ CONFIG = await getJSON("/api/config"); }catch(e){ $("#main").innerHTML = `<div class="notice err">Cannot load the region list: ${esc(e.message)}</div>`; return; } }
+  const m = location.pathname.match(/^\/r\/([a-z0-9-]+)/i);
+  if(m && CONFIG.regions.some(r => r.site === m[1].toLowerCase())) regionPage(m[1].toLowerCase(), force, quiet);
+  else overviewPage(force, quiet);
+  schedule();
+}
+
+/* ---------------- all regions ---------------- */
+async function overviewPage(force, quiet){
+  current = null; document.title = "Backend regions";
+  if(!quiet) $("#main").innerHTML = `<div class="grid">${CONFIG.regions.map(r => skeletonCard(r)).join("")}</div>`;
+  let data;
+  try{ data = await getJSON("/api/overview" + (force ? "?refresh=1" : "")); }
+  catch(e){ $("#main").insertAdjacentHTML("afterbegin", `<div class="notice err">Live data unavailable: ${esc(e.message)}</div>`); return; }
+  if(current !== null) return;
+  stamp(data.collected_at, `${data.queries} grouped queries`);
+  const errs = data.errors.length ? `<div class="notice err"><b>${data.errors.length} query group(s) failed</b> — ${esc(data.errors[0].error)}<br><span class="muted">${esc(data.errors[0].hint || "")}</span></div>` : "";
+  const pd = data.incidents_state && data.incidents_state.state === "error" ? `<div class="notice">PagerDuty not read: ${esc(data.incidents_state.error)} <span class="faint">${esc(data.incidents_state.hint || "")}</span></div>` : "";
+  $("#main").innerHTML = errs + pd + `<div class="grid">${data.regions.map(card).join("")}</div>
+    <p class="faint" style="margin-top:18px">Pick a region for its live issues, data sources and links. Counts are from UFM telemetry, blackbox ping, SNMP and gNMI through Grafana; “—” means that source returns no data for the site, not zero.</p>`;
+}
+function skeletonCard(r){
+  return `<button class="card" data-go="/r/${esc(r.site)}"><div class="head"><div><h2>${esc(r.name)}</h2><div class="sub">${esc(r.location || "")} · ${esc(r.fabric || "")}</div></div><span class="pill unknown">…</span></div><div class="loading">Querying via nsr…</div></button>`;
+}
+function card(r){
+  const m = r.metrics, i = r.issues;
+  const ping = m.ping_total ? `<b class="${m.ping_up < m.ping_total ? "bad" : "ok"}">${fmt(m.ping_up)} / ${fmt(m.ping_total)}</b>` : `<b class="faint">—</b>`;
+  const cell = (v, cls) => v === null || v === undefined ? `<b class="faint">—</b>` : `<b class="${v > 0 ? cls : ""}">${fmt(v)}</b>`;
+  const srv = m.ufm_server_total ? `<b class="${m.ufm_server_up < m.ufm_server_total ? "warn" : "ok"}">${fmt(m.ufm_server_up)} / ${fmt(m.ufm_server_total)}</b>` : `<b class="faint">—</b>`;
+  const chips = Object.entries(r.coverage).map(([k, v]) => `<span class="chip" title="${esc(SRC[k].label)}: ${esc(v)}"><span class="dot ${esc(v)}"></span>${esc(SRC[k].label.replace(" telemetry",""))}</span>`).join("");
+  const inc = r.incidents.length ? `<div class="row"><span>Open PagerDuty incidents</span><b class="bad">${r.incidents.length}</b></div>` : "";
+  return `<button class="card" data-go="/r/${esc(r.site)}">
+    <div class="head"><div><h2>${esc(r.name)}</h2><div class="sub">${esc(r.location || "")} · ${esc(r.fabric || "")}</div></div><span class="pill ${esc(r.status)}">${esc(STATUS[r.status] || r.status)}</span></div>
+    <div class="row"><span>Switches answering ping</span>${ping}</div>
+    <div class="row"><span>Ports not Active (UFM)</span>${cell(m.ufm_nonactive, "warn")}</div>
+    <div class="row"><span>Ports with link-down, 15 min</span>${cell(m.ufm_linkdown_ports, "warn")}</div>
+    <div class="row"><span>Ports with errors, 15 min</span>${cell(m.ufm_error_ports, "warn")}</div>
+    <div class="row"><span>UFM servers up</span>${srv}</div>${inc}
+    <div class="chips">${chips}</div></button>`;
+}
+
+/* ---------------- one region ---------------- */
+function regionPage(site, force, quiet){
+  const r = CONFIG.regions.find(x => x.site === site);
+  const fresh = current !== site;
+  current = site; document.title = r.name + " · backend";
+  if(fresh || !quiet){
+    $("#main").innerHTML = `
+    <div class="crumbs"><a href="/" data-go="/">← All regions</a><div class="tabs">${CONFIG.regions.map(x => `<a href="/r/${esc(x.site)}" data-go="/r/${esc(x.site)}" class="${x.site === site ? "on" : ""}">${esc(x.name)}</a>`).join("")}</div></div>
+    <div class="title"><div><h2>${esc(r.name)} <span class="muted" style="font-size:16px;font-weight:500">${esc(r.location || "")}</span></h2>
+      <div class="sub">${esc(r.fabric || "")} · clusters ${esc(r.clusters || "")} · cloud_region ${r.cloud_regions.map(c => `<code>${esc(c)}</code>`).join(", ")}</div></div>
+      <div class="links" id="links"></div></div>
+    <div class="kpis" id="kpis"></div>
+    <div class="layout"><div>
+      <section class="panel"><h3>Live issues</h3><div class="desc">Everything the site's live sources report as wrong right now, most severe first.</div><div id="issues" class="loading">Querying via nsr…</div></section>
+      <div id="topo"></div>
+      <section class="panel"><h3>UFM and switch events</h3><div class="desc">From Loki: the UFM event log and backend switch syslog.</div><div id="events" class="loading">Querying Loki via nsr…</div></section>
+      <section class="panel"><h3>All checks</h3><div class="desc">Every query run for this site, with its result. Expand one to see the PromQL.</div><div id="checks" class="loading">Querying via nsr…</div></section>
+    </div><aside>
+      <section class="panel"><h3>PagerDuty</h3><div class="desc">Open BackEnd Network incidents naming ${esc(r.name)}.</div><div id="incidents" class="loading">Reading PagerDuty via nsr…</div></section>
+      <section class="panel"><h3>Data sources at ${esc(r.name)}</h3><div class="desc">What is collected here, and whether it answered just now.</div><div id="sources" class="loading">Checking…</div></section>
+      <section class="panel"><h3>Notes</h3><ul class="notes">${(r.notes || []).map(n => `<li>${esc(n)}</li>`).join("")}</ul></section>
+    </aside></div>`;
+    links(r);
+  }
+  loadRegion(r, force);
+}
+
+function links(r){
+  const g = (r.grafana_dashboards || []).map(([t, p]) => `<a class="btn" target="_blank" rel="noopener" href="${esc(CONFIG.grafana_url + p)}">${esc(t)} ↗</a>`).join("");
+  $("#links").innerHTML = g;
+  if(r.topology_dashboard){
+    getJSON("/api/topology/" + r.site).then(t => {
+      if(current !== r.site) return;
+      $("#topo").innerHTML = `<section class="panel"><h3>Cabling and topology</h3><div class="desc">${t.running ? `The ${esc(r.name)} NetBox + UFM dashboard is running: miscabling, live link state, incidents and the fabric diagram.` : `The ${esc(r.name)} NetBox + UFM dashboard is not running. Start it from <code>${esc(r.site)}-netbox-dashboard</code> with <code>scripts/open_dashboard.command</code>.`}</div>
+        <div class="links"><a class="btn" target="_blank" rel="noopener" href="${esc(t.url)}">Open ${esc(r.name)} cabling dashboard ↗</a>${t.running ? `<button id="embed">Show it here</button>` : ""}</div><div id="frame"></div></section>`;
+      const b = $("#embed"); if(b) b.onclick = () => { $("#frame").innerHTML = `<iframe class="topo" src="${esc(t.url)}" title="${esc(r.name)} cabling dashboard"></iframe>`; b.remove(); };
+    }).catch(() => {});
+  }
+}
+
+async function loadRegion(r, force){
+  const q = force ? "?refresh=1" : "";
+  const want = ["fabric", "switches", "reach", "events", "incidents"];
+  const results = {};
+  const jobs = want.map(s => getJSON(`/api/region/${r.site}/${s}${q}`).then(d => results[s] = d).catch(e => results[s] = {error: e.message}).then(() => { if(current === r.site) render(r, results); }));
+  await Promise.all(jobs);
+  if(current === r.site) stamp(Math.max(...Object.values(results).map(x => x.collected_at || 0)) || null);
+}
+
+function allChecks(results){ return ["fabric", "switches", "reach"].flatMap(s => (results[s] && results[s].checks) || []); }
+function val(results, id){ const c = allChecks(results).find(x => x.id === id); return c ? (c.kind === "value" ? c.value : c) : undefined; }
+
+function render(r, results){
+  const checks = allChecks(results);
+  // KPIs
+  const ping = [val(results, "ping_up"), val(results, "ping_total")];
+  const live = id => { const c = val(results, id); return c && c.state === "ok" ? c.rows : null; };
+  const ld = live("ufm_linkdown");
+  const na = live("ufm_nonactive");
+  const srv = (val(results, "ufm_servers") || {}).rows;
+  const inc = results.incidents && results.incidents.incidents;
+  const k = (v, l, cls="") => `<div class="kpi"><div class="v ${cls}">${v}</div><div class="l">${l}</div></div>`;
+  const pend = x => x === undefined ? `<span class="faint">…</span>` : x;
+  $("#kpis").innerHTML = [
+    k(ping[1] == null ? (ping[1] === undefined ? pend() : "—") : `${fmt(ping[0])}<span class="muted" style="font-size:16px"> / ${fmt(ping[1])}</span>`, "switches answering ping" + (r.switches_expected ? ` (design ${r.switches_expected})` : ""), ping[1] && ping[0] < ping[1] ? "bad" : ""),
+    k(val(results, "ufm_switches") === undefined ? (results.fabric ? "—" : pend()) : fmt(val(results, "ufm_switches")), "switches reporting to UFM"),
+    k(na ? fmt(na.reduce((a, x) => a + (x.value || 0), 0)) : (results.fabric ? "—" : pend()), "ports not Active (UFM)", na && na.length ? "warn" : ""),
+    k(ld ? fmt(ld.length) : (results.fabric ? "—" : pend()), "ports with link-down, 15 min", ld && ld.length ? "warn" : ""),
+    k(srv ? `${srv.filter(x => x.value === 1).length}<span class="muted" style="font-size:16px"> / ${srv.length}</span>` : (results.reach ? "—" : pend()), "UFM servers up", srv && srv.some(x => x.value === 0) ? "warn" : ""),
+    k(inc ? inc.length : (results.incidents ? "—" : pend()), "open PagerDuty incidents", inc && inc.length ? "bad" : "")
+  ].join("");
+
+  // Live issues
+  if(["fabric", "switches", "reach"].every(s => results[s])){
+    const order = {critical:0, major:1, minor:2, info:3};
+    const issues = checks.filter(c => c.kind === "rows" && c.issues > 0 && c.severity !== "info").sort((a, b) => order[a.severity] - order[b.severity] || b.issues - a.issues);
+    const errs = checks.filter(c => c.state === "error");
+    const crit = (results.events && results.events.streams || []).find(s => s.id === "ufm_events" && s.lines && s.lines.length);
+    let html = issues.map(issueBlock).join("");
+    if(crit) html += `<details class="issue"><summary><span class="sev major">major</span><span>UFM event log reported ${crit.lines.length} critical / error / down event(s) in the last hour</span><span class="count">${crit.lines.length}</span></summary><div class="body"><p class="action">See “UFM and switch events” below.</p></div></details>`;
+    if(!html){
+      const live = checks.some(c => c.state === "ok" && (c.kind === "rows" ? c.rows.length : c.value != null));
+      html = live ? `<p class="ok">No live issues found in the sources this site has.</p>` : `<p class="muted">No live data from this site's sources, so health cannot be judged. See “Data sources”.</p>`;
+    }
+    if(errs.length) html += `<div class="notice err" style="margin-top:10px">${errs.length} check(s) failed: ${esc(errs[0].error)} <span class="muted">${esc(errs[0].hint || "")}</span></div>`;
+    $("#issues").className = ""; $("#issues").innerHTML = html;
+  }
+  // Checks
+  if(["fabric", "switches", "reach"].some(s => results[s])){
+    $("#checks").className = "";
+    $("#checks").innerHTML = ["fabric", "switches", "reach"].map(s => {
+      const d = results[s];
+      const name = {fabric:"Fabric ports (UFM telemetry)", switches:"Switch hardware (gNMI)", reach:"Reachability and UFM servers"}[s];
+      if(!d) return `<p class="loading">${name}: querying…</p>`;
+      if(d.error) return `<p class="bad">${name}: ${esc(d.error)}</p>`;
+      if(!d.configured) return `<p class="faint">${name}: not collected at this site.</p>`;
+      return `<h4 style="margin:12px 0 4px">${name}</h4>` + d.checks.map(checkRow).join("");
+    }).join("");
+  }
+  // Events
+  if(results.events){
+    const e = results.events;
+    $("#events").className = "";
+    $("#events").innerHTML = e.error ? `<p class="bad">${esc(e.error)}</p>` : (!e.configured ? `<p class="faint">No UFM event log or syslog stream is mapped for this site.</p>` :
+      e.streams.map(s => `<h4 style="margin:10px 0 6px">${esc(s.title)}</h4>` + (s.state === "error" ? `<p class="bad">${esc(s.error)} <span class="muted">${esc(s.hint || "")}</span></p>` :
+        (s.lines.length ? `<div class="log">${s.lines.map(l => `<div><time>${esc(new Date(l.ts * 1000).toISOString().slice(5, 19).replace("T", " "))}</time>${esc(l.labels.host_name || l.labels.hostname || "")} ${esc(l.line)}</div>`).join("")}</div>` : `<p class="muted">Nothing in the last ${esc(s.since)}.</p>`)) +
+        `<details class="q"><summary>LogQL</summary><code>${esc(s.logql)}</code></details>`).join(""));
+  }
+  // Incidents
+  if(results.incidents){
+    const p = results.incidents;
+    $("#incidents").className = "";
+    $("#incidents").innerHTML = p.state === "error" ? `<p class="muted">Not read: ${esc(p.error)}</p><p class="faint">${esc(p.hint || "")}</p>` :
+      (p.incidents.length ? `<table><tr><th>#</th><th>Incident</th><th>Status</th></tr>${p.incidents.map(i => `<tr><td>${i.url ? `<a target="_blank" rel="noopener" href="${esc(i.url)}">${esc(i.number)}</a>` : esc(i.number)}</td><td>${esc(i.title)}<div class="faint">${esc((i.created_at || "").replace("T", " ").slice(0, 16))} UTC</div></td><td class="${i.status === "triggered" ? "bad" : "warn"}">${esc(i.status)}</td></tr>`).join("")}</table>` : `<p class="ok">No open incidents name ${esc(r.name)}.</p>`) +
+      (p.other_sites ? `<p class="faint">${p.other_sites} other open backend incident(s) name other sites. A grouped incident's title names only its first site.</p>` : "");
+  }
+  // Data sources
+  const status = key => {
+    const map = {ufm:["fabric", "ufm_ports"], gnmi:["switches", "gnmi_targets"], snmp:["reach", "snmp_total"], ping:["reach", "ping_total"], ufm_server:["reach", "ufm_servers"]};
+    if(key === "ufm_events" || key === "syslog"){
+      const s = results.events && (results.events.streams || []).find(x => x.id === key);
+      if(!results.events) return ["…", ""];
+      if(!s) return ["not collected", "off"];
+      return s.state === "error" ? ["error", "error"] : (s.state === "ok" ? ["live", "live"] : ["quiet in window", "no-data"]);
+    }
+    const [sec, id] = map[key];
+    if(!results[sec]) return ["…", ""];
+    const c = ((results[sec].checks) || []).find(x => x.id === id);
+    if(!c) return ["not collected", "off"];
+    if(c.state === "error") return ["error", "error"];
+    const has = c.kind === "rows" ? c.rows.length : c.value;
+    if(key === "ufm_server" && c.rows && c.rows.length) return [`${c.rows.filter(x => x.value === 1).length}/${c.rows.length} up`, c.rows.some(x => x.value === 1) ? "live" : "down"];
+    return has ? ["live", "live"] : ["no data", "no-data"];
+  };
+  $("#sources").className = "";
+  $("#sources").innerHTML = `<table class="src">${Object.keys(SRC).map(key => { const [t, cls] = r.sources.includes(key) ? status(key) : ["not collected", "off"]; return `<tr><td><span class="dot ${cls}"></span> ${esc(SRC[key].label)}</td><td>${esc(t)}<div class="faint">${esc(SRC[key].what)}</div></td></tr>`; }).join("")}</table>`;
+}
+
+function rowsTable(c){
+  const cols = c.columns || ["name", "value:"];
+  const head = cols.map(x => x.startsWith("value:") ? `<th style="text-align:right">${esc(x.slice(6) || "value")}</th>` : `<th>${esc(x.replace("_", " "))}</th>`).join("");
+  const body = c.rows.map(row => `<tr>${cols.map(x => x.startsWith("value:") ? `<td class="num">${fmt(row.value)}</td>` : `<td class="mono">${esc(row.labels[x] ?? row.labels.name ?? "")}</td>`).join("")}</tr>`).join("");
+  return `<div class="scroll"><table><tr>${head}</tr>${body}</table></div>` + (c.truncated ? `<p class="faint">${c.truncated} more not shown.</p>` : "");
+}
+function issueBlock(c){
+  return `<details class="issue" ${c.severity === "critical" ? "open" : ""}><summary><span class="sev ${esc(c.severity)}">${esc(c.severity)}</span><span>${esc(c.title)}</span><span class="count">${c.issues}</span></summary>
+    <div class="body">${c.action ? `<p class="action">${esc(c.action)}</p>` : ""}${rowsTable(c.bad_when ? {...c, rows: c.rows.filter(x => x.value === 0)} : c)}</div></details>`;
+}
+function checkRow(c){
+  let res;
+  if(c.state === "error") res = `<span class="bad">error</span>`;
+  else if(c.kind === "value") res = c.value === null ? `<span class="faint">no data</span>` : `<b>${fmt(c.value)}</b>`;
+  else if(c.state === "no-data") res = `<span class="faint">no data</span>`;
+  else res = c.rows.length ? `<b class="${c.issues ? (c.severity === "critical" ? "bad" : "warn") : ""}">${c.rows.length} row(s)</b>` : `<span class="ok">none</span>`;
+  const extra = c.kind === "rows" && c.rows.length && (c.severity === "info" || !c.issues) ? rowsTable(c) : "";
+  return `<div><div class="check"><span>${esc(c.title)}</span><span>${res} <span class="faint">${c.ms} ms</span></span></div>${extra}
+    <details class="q"><summary>PromQL · ${esc(c.datasource)}</summary><code>${esc(c.promql)}</code>${c.state === "error" ? `<p class="bad">${esc(c.error)}</p><p class="faint">${esc(c.hint || "")}</p>` : ""}</details></div>`;
+}
+
+route();
+</script>
+</body>
+</html>
