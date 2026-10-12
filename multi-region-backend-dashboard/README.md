@@ -71,6 +71,35 @@ For cabling and topology, also start the site dashboards: ICE2 on 8765
   its PromQL; links to that site's Grafana dashboards and cabling dashboard.
 - **⟳ Refresh** asks nsr again (bypasses the cache). Auto-refresh runs every 60 s.
 
+## The spine · leaf · rail view for every InfiniBand region
+
+ICE2 and LON14 keep their own NetBox + UFM dashboards. Every other InfiniBand region
+(OSL1, STA1, GLO1, and any site added to `regions.json` with a `fabric_view`) gets the
+same design at `/f/<site>` (also the **Fabric dashboard** tab of its region page):
+header and status line, stat strip, *How the rail groups are wired* (one GPU node end to
+end, rail × SU matrix), the spine/leaf/SU canvas with live status, the inspector, the
+scalable units and design checks.
+
+It is built only from nsr, so a new site needs no jump host, switch login or UFM password:
+
+- **Topology from NetBox** (`nsr netbox devices` + `nsr netbox connections`, read-only):
+  press **Refresh NetBox** (or *Read <site> from NetBox* the first time). The snapshot is
+  saved under `cache/` (git-ignored) and reused until the next refresh.
+- **Structure is inferred**: rails are the GPU NIC names used across the fabric
+  (`ib0..ib7`, `mlx5_0..3`); a leaf's rail is where most of its GPU cables arrive; an SU is
+  the GPU nodes that share the same leaves. UFM servers and other hosts are listed apart.
+- **Live state from UFM telemetry** (port state, link-downs, errors) and blackbox ping,
+  matched to each cable's leaf port by number (`swNpM` → 2·(N−1)+M, `IB1/N/M`, or `N`).
+  The status line shows how many cables matched; if few do, set
+  `"port_names": "swNpM" | "cage/split" | "auto"` in that site's `fabric_view`.
+- **Design checks**: full leaf–spine mesh and cables per pair, leaf-to-leaf cables, GPU
+  nodes missing rails, NICs on a leaf of another rail, uneven port use, NetBox cable states,
+  switches without UFM telemetry or ping.
+
+`fabric_view` per site: `{"netbox_site": "osl1", "cluster": "sys2-osl1"}`; add
+`"fiber_graph": true` for shuffle-cabled sites (GSO1-style) whose cables live in the
+NetBox datacenter plugin.
+
 ## What each site has (checked 2026-10-08, netops-misc observability compendium)
 
 | Site | gNMI | UFM telemetry | SNMP | Ping | UFM servers | Logs (Loki) |
@@ -115,7 +144,9 @@ editing.
 | `nsr_client.py` | Runs the allowed nsr verbs, parses `--json`, limits concurrency |
 | `discover.py` | Read-only data-source discovery per site |
 | `regions.json` | Sites, selectors, links, notes (no secrets) |
-| `assets/regions.html` | The page |
+| `assets/regions.html` | Region picker and region pages |
+| `assets/fabric.html` | Spine · leaf · rail view for regions without their own dashboard |
+| `fabric.py` | NetBox snapshot, inferred rails/SUs, design checks, UFM live overlay |
 | `scripts/open_regions.command` | One-click start |
 | `tests/` | Offline tests and `fake_nsr.py` (invented data) |
 

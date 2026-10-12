@@ -7,6 +7,8 @@ only runs a fixed allow-list of read verbs and parses their `--json` output:
     nsr --json -q grafana query <promql> --datasource <uid>
     nsr --json -q grafana loki  <logql>  --since 1h --limit N [--datasource <uid>]
     nsr --json -q pd incidents --status triggered --status acknowledged [--service ID]
+    nsr --json -q netbox devices --site S --role R          (fabric snapshot, on request)
+    nsr --json -q netbox connections --site S --role R ...  (fabric snapshot, on request)
 
 Every call has a timeout, and at most `max_parallel` nsr processes run at once so a page
 load never fans out into dozens of simultaneous Grafana queries.
@@ -22,7 +24,8 @@ import time
 from pathlib import Path
 
 # The only nsr verbs this dashboard may run. Anything else is a programming error.
-ALLOWED = {("grafana", "query"), ("grafana", "loki"), ("pd", "incidents")}
+ALLOWED = {("grafana", "query"), ("grafana", "loki"), ("pd", "incidents"),
+           ("netbox", "devices"), ("netbox", "connections")}
 
 
 class NsrError(RuntimeError):
@@ -63,7 +66,7 @@ class Nsr:
         self.lock = threading.Lock()
 
     # -- low level --------------------------------------------------------
-    def run(self, verb: tuple[str, str], *args: str) -> object:
+    def run(self, verb: tuple[str, str], *args: str, timeout: int | None = None) -> object:
         if verb not in ALLOWED:
             raise ValueError("nsr verb %r is not allowed (read-only allow-list)" % (verb,))
         argv = [self.binary, "--json", "-q", *verb, *args]
@@ -72,13 +75,13 @@ class Nsr:
                 self.calls += 1
             try:
                 done = subprocess.run(argv, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                      stdin=subprocess.DEVNULL, timeout=self.timeout, check=False)
+                                      stdin=subprocess.DEVNULL, timeout=timeout or self.timeout, check=False)
             except FileNotFoundError as error:
                 raise NsrError("nsr is not installed or not on PATH (%s)" % self.binary,
                                'Install it: uv tool install "git+ssh://git@github.com/nscaledev/'
                                'netops-misc.git#subdirectory=nsr", or pass --nsr /path/to/nsr') from error
             except subprocess.TimeoutExpired as error:
-                raise NsrError("nsr timed out after %ss" % self.timeout,
+                raise NsrError("nsr timed out after %ss" % (timeout or self.timeout),
                                "Grafana is slow or unreachable; try again or run `nsr doctor`.") from error
         if done.returncode:
             lines = [line for line in done.stderr.strip().splitlines() if line.strip()]

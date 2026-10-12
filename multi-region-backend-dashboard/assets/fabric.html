@@ -1,0 +1,344 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Backend GPU fabric</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap">
+<style>
+/* Same visual language as the ICE2 / LON14 NetBox dashboards, generated for any site from NetBox (via nsr) + UFM telemetry. */
+:root{
+  --ink:#08101b; --panel:#101c2d; --panel2:#142339; --line:#223550; --line2:#2d4566;
+  --fg:#e7eef7; --dim:#8b9db6; --faint:#5b6d86;
+  --spine:#a98bff; --leaf:#39c6e3; --amber:#f6a93b; --red:#ff5e78; --green:#38d9a0; --gold:#ffcf6e;
+  --display:"Chakra Petch","Arial Narrow",system-ui,sans-serif;
+  --body:"IBM Plex Sans",system-ui,-apple-system,"Segoe UI",sans-serif;
+  --mono:"JetBrains Mono",ui-monospace,Menlo,Consolas,monospace;
+  color-scheme:dark;
+}
+*{box-sizing:border-box}
+html{background:var(--ink)}
+body{margin:0;color:var(--fg);font:15px/1.5 var(--body);background:
+  radial-gradient(1200px 600px at 20% -10%,rgba(57,198,227,.10),transparent 60%),
+  radial-gradient(900px 500px at 90% 0%,rgba(246,169,59,.08),transparent 60%),var(--ink);min-height:100%}
+a{color:var(--leaf)}
+.wrap{max-width:1680px;margin:0 auto;padding:26px 20px 60px;display:flex;flex-direction:column;gap:20px}
+header{display:flex;flex-wrap:wrap;gap:16px;justify-content:space-between;align-items:flex-end}
+.eb{font:500 11px/1 var(--mono);letter-spacing:.2em;text-transform:uppercase;color:var(--leaf);display:flex;gap:10px;align-items:center}
+.eb::before{content:"";width:8px;height:8px;border-radius:50%;background:var(--green);box-shadow:0 0 0 3px rgba(56,217,160,.18),0 0 12px var(--green)}
+h1{font:700 44px/1.02 var(--display);margin:10px 0 0;letter-spacing:.01em}
+h1 span{color:var(--dim);font-weight:500}
+.meta{font:12px/1.6 var(--mono);color:var(--faint);text-align:right}
+.meta a{display:inline-block;margin-top:6px;font:500 12.5px var(--body);color:var(--fg);border:1px solid var(--line2);border-radius:6px;padding:5px 12px;text-decoration:underline;background:var(--panel)}
+.status{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px 16px;display:flex;flex-direction:column;gap:8px}
+.status .l1{font:600 12.5px var(--mono);letter-spacing:.06em;display:flex;gap:10px;align-items:center;text-transform:uppercase}
+.status .l1 i{width:10px;height:10px;border-radius:50%;background:var(--faint)}
+.status .l2{font:12.5px var(--mono);color:var(--dim)}.status .l2 b{color:var(--fg);font-weight:500}
+.btn{font:500 12.5px var(--body);color:var(--fg);background:var(--panel2);border:1px solid var(--line2);border-radius:6px;padding:6px 12px;cursor:pointer}
+.btn.go{border-color:var(--green);background:color-mix(in srgb,var(--green) 12%,var(--panel2))}
+.btn:disabled{opacity:.5;cursor:wait}
+.rail{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:1px;background:var(--line);border:1px solid var(--line);border-radius:10px;overflow:hidden}
+.rail div{background:linear-gradient(180deg,var(--panel2),var(--panel));padding:12px 16px}
+.rail b{display:block;font:600 26px/1.1 var(--display);font-variant-numeric:tabular-nums}
+.rail span{font-size:12.5px;color:var(--dim)}
+.c-s b{color:var(--spine)}.c-l b{color:var(--leaf)}.c-v b{color:#c4b5fd}.c-a b{color:var(--amber)}.c-g b{color:var(--gold)}.c-r b{color:var(--red)}.c-ok b{color:var(--green)}
+.controls{display:flex;flex-wrap:wrap;gap:8px;align-items:center;justify-content:space-between}
+.chips{display:flex;flex-wrap:wrap;gap:6px}
+.chip{font:500 12.5px var(--body);color:var(--dim);background:var(--panel);border:1px solid var(--line);border-radius:999px;padding:6px 12px 6px 10px;display:inline-flex;gap:8px;align-items:center;cursor:pointer}
+.chip i{width:18px;height:0;border-top:3px solid var(--c);border-radius:2px}
+.chip[aria-pressed="true"]{color:var(--fg);border-color:var(--c);background:color-mix(in srgb,var(--c) 12%,var(--panel))}
+.search{display:flex;gap:6px}.search input{width:330px;max-width:60vw;background:var(--panel);border:1px solid var(--line2);border-radius:6px;color:var(--fg);font:13px var(--mono);padding:6px 10px}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px 20px}
+.panel h2{font:600 19px var(--display);margin:0 0 14px;letter-spacing:.02em}
+.two{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+@media(max-width:1100px){.two{grid-template-columns:1fr}.stage{grid-template-columns:1fr!important}}
+.card{border:1px solid var(--line);border-radius:10px;background:#0c1726;padding:12px 14px}
+.card .cap{font-size:12.5px;color:var(--dim);margin-bottom:8px}
+.matrix{display:grid;gap:4px;font:12px var(--mono)}
+.matrix .h{color:var(--dim);text-align:center;font-size:11px;letter-spacing:.08em}
+.matrix .su{color:var(--dim);font-size:11.5px;letter-spacing:.08em;align-self:center}
+.cell{border:2px solid var(--c);border-radius:6px;padding:6px;text-align:center;cursor:pointer;background:color-mix(in srgb,var(--c) 6%,#0c1726)}
+.cell b{display:block;color:var(--fg);font:600 12.5px var(--mono)}.cell span{color:var(--dim);font-size:11px}
+.cell.empty{border-style:dashed;border-color:color-mix(in srgb,var(--c) 45%,transparent);opacity:.7}
+.cell.bad{box-shadow:0 0 0 2px var(--red) inset}
+.stage{display:grid;grid-template-columns:minmax(0,1fr) 380px;gap:18px}
+.canvas{background:#0b1524;border:1px solid var(--line);border-radius:12px;padding:10px;overflow:auto}
+svg text{font-family:var(--mono)}
+.inspector{position:sticky;top:12px;align-self:start;max-height:calc(100vh - 24px);overflow:auto}
+.inspector .k{font:500 11px var(--mono);letter-spacing:.18em;color:var(--leaf);text-transform:uppercase}
+.inspector h3{font:700 24px var(--display);margin:6px 0 4px}
+.kv{display:grid;grid-template-columns:110px 1fr;gap:4px 10px;font-size:13px;margin:10px 0}.kv dt{color:var(--dim)}.kv dd{margin:0;font-family:var(--mono);font-size:12.5px}
+table{width:100%;border-collapse:collapse;font-size:12px}th,td{text-align:left;padding:4px 6px;border-bottom:1px solid #1b2a40}th{color:var(--dim);font-weight:500}
+td.m{font-family:var(--mono)}
+.st{font:600 11px var(--mono);padding:1px 6px;border-radius:4px}
+.st.ok{color:var(--green);background:rgba(56,217,160,.1)}.st.bad{color:var(--red);background:rgba(255,94,120,.12)}.st.warn{color:var(--amber);background:rgba(246,169,59,.12)}.st.na{color:var(--faint);background:#121e30}
+.checks{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:10px}
+.checks li{display:flex;gap:10px;font-size:14px}.checks li i{flex:none;width:18px;height:18px;border-radius:50%;margin-top:2px;display:grid;place-items:center;font:700 11px var(--body);color:#08101b}
+.checks .ok i{background:var(--green)}.checks .warn i,.checks .info i{background:var(--amber)}.checks .bad i{background:var(--red)}
+.sus{display:flex;flex-direction:column;gap:8px;font-size:13.5px}.sus div{border-bottom:1px solid #1b2a40;padding-bottom:8px}.sus b{font-family:var(--mono)}
+.empty-state{padding:40px;text-align:center;color:var(--dim)}
+.muted{color:var(--dim)}.faint{color:var(--faint)}
+.notice{border:1px solid #5b2323;background:#1d1010;color:#fecaca;border-radius:8px;padding:8px 12px;font-size:13px}
+.legend{font-size:12px;color:var(--faint);margin-top:6px}
+</style>
+</head>
+<body>
+<div class="wrap" id="app"><p class="muted">Loading fabric…</p></div>
+<script>
+"use strict";
+const $ = s => document.querySelector(s);
+const esc = v => String(v ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const num = v => v == null ? "—" : Number(v).toLocaleString();
+const RAIL = ["#39c6e3","#7ee081","#f6c35b","#ff6fae","#a98bff","#ff8f4d","#2dd4bf","#ff5e78"];
+const rc = r => r ? RAIL[(r - 1) % RAIL.length] : "#5b6d86";
+const site = (location.pathname.match(/^\/f\/([a-z0-9-]+)/i) || [])[1];
+let D = null, sel = null, layers = {mesh:true, rails:true, live:true}, poll = null;
+
+function ago(t){ if(!t) return "never"; const m = Math.round((Date.now()/1000 - t)/60); return m < 1 ? "just now" : m < 120 ? m + " min ago" : Math.round(m/60) + " h ago"; }
+function when(t){ return t ? new Date(t*1000).toLocaleString([], {day:"2-digit", month:"short", hour:"2-digit", minute:"2-digit"}) : "—"; }
+
+async function load(force){
+  const r = await fetch(`/api/fabric/${site}` + (force ? "?refresh=1" : ""), {cache:"no-store"});
+  D = await r.json();
+  if(!r.ok){ $("#app").innerHTML = `<div class="notice">${esc(D.error || r.status)}</div>`; return; }
+  render();
+}
+async function refreshNetbox(){
+  const b = $("#nb"); b.disabled = true;
+  await fetch(`/api/fabric/${site}/netbox`, {method:"POST", headers:{"X-Requested-With":"fabric"}});
+  clearInterval(poll);
+  poll = setInterval(async () => {
+    const j = await (await fetch(`/api/fabric/${site}/netbox`, {cache:"no-store"})).json();
+    $("#job").textContent = j.state === "running" ? "· " + j.step + "…" : (j.state === "error" ? "· NetBox refresh failed: " + j.error : "· " + (j.step || ""));
+    if(j.state !== "running"){ clearInterval(poll); load(false); }
+  }, 1500);
+}
+
+/* ---------- live state helpers ---------- */
+function portLive(sw, p){ if(!D.live || p == null) return null; return D.live.ports[sw + "|" + p] || null; }
+function linkState(sw, p){
+  const x = portLive(sw, p);
+  if(!x) return {cls:"na", text: D.live && D.live.ufm ? "not in UFM" : "no live data"};
+  if(x.state != null && x.state !== 4) return {cls:"bad", text:"not Active"};
+  if(x.linkdown) return {cls:"warn", text:`flapped ×${x.linkdown}`};
+  if(x.errors) return {cls:"warn", text:`errors ${num(x.errors)}`};
+  return {cls:"ok", text:"Active"};
+}
+function swLive(name){ return (D.live && D.live.switches[name]) || null; }
+
+/* ---------- page ---------- */
+function render(){
+  const T = D.topology;
+  document.title = `${D.name} backend GPU fabric`;
+  const head = `<header><div><div class="eb">${esc(D.name)} · ${esc(D.location || "")} · backend RDMA fabric${D.cluster ? " · " + esc(D.cluster) : ""}</div>
+    <h1>${esc(D.name)} Backend GPU Fabric <span>/ spine · leaf · rail</span></h1></div>
+    <div class="meta">${T ? `${num(T.uplinks.length + T.nodes.reduce((a,n)=>a+n.links.length,0))} fabric cables<br>${num(T.uplinks.length)} spine · ${num(T.nodes.reduce((a,n)=>a+n.links.length,0))} GPU<br>` : ""}
+    <a href="/r/${esc(site)}#issues" target="_top">Live issues ↗</a> <a href="/" target="_top">All regions</a></div></header>`;
+  if(!T){
+    const j = D.job;
+    $("#app").innerHTML = head + `<div class="panel empty-state"><h2>No NetBox snapshot for ${esc(D.name)} yet</h2>
+      <p>The fabric is drawn from NetBox cabling (read through nsr) with live UFM state on top. Take the first snapshot; it reads every backend leaf's cables and takes a minute or two.</p>
+      <button class="btn go" id="nb">Read ${esc(D.name)} from NetBox</button> <span id="job" class="muted">${j && j.state === "error" ? "· last attempt failed: " + esc(j.error) : ""}</span></div>`;
+    $("#nb").onclick = refreshNetbox;
+    if(j && j.state === "running") refreshNetbox();
+    return;
+  }
+  const L = D.live || {switches:{}, ports:{}, errors:[], coverage:{cables:0, matched:0}};
+  const sws = [...T.spines, ...T.leaves];
+  const reporting = sws.filter(s => L.switches[s.name] && L.switches[s.name].ports).length;
+  const pinged = sws.filter(s => L.switches[s.name] && L.switches[s.name].ping != null);
+  const pingUp = pinged.filter(s => L.switches[s.name].ping === 1).length;
+  const allLinks = [...T.uplinks.map(u => [u.leaf, u.leaf_portnum]), ...T.nodes.flatMap(n => n.links.map(l => [l.leaf, l.leaf_portnum]))];
+  const st = allLinks.map(([s, p]) => linkState(s, p).cls);
+  const active = st.filter(x => x === "ok" || x === "warn").length, down = st.filter(x => x === "bad").length, flap = st.filter(x => x === "warn").length;
+  const perPair = T.spines.length && T.leaves.length ? T.uplinks.length / (T.spines.length * T.leaves.length) : 0;
+  const fresh = L.collected_at && (Date.now()/1000 - L.collected_at) < 600;
+  const status = !L.ufm ? ["NO LIVE UFM DATA", "#5b6d86"] : (down ? ["LIVE · " + down + " designed links not Active", "#ff5e78"] : ["LIVE · " + reporting + "/" + sws.length + " switches in UFM", "#38d9a0"]);
+  const R = T.rails;
+
+  $("#app").innerHTML = head + `
+  <section class="status"><div class="l1"><i style="background:${status[1]};box-shadow:0 0 10px ${status[1]}"></i><span style="color:${status[1]}">${esc(status[0])}</span></div>
+    <div class="l2">NetBox snapshot: <b>${when(T.netbox_collected_at)}</b> · ${ago(T.netbox_collected_at)} · UFM telemetry: <b>${when(L.collected_at)}</b> · ${ago(L.collected_at)} · cables matched to UFM ports: <b>${num(L.coverage.matched)}/${num(L.coverage.cables)}</b>${L.errors.length ? ` · <span style="color:var(--red)">${L.errors.length} live query error(s): ${esc(L.errors[0].error)}</span>` : ""}</div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center"><button class="btn" id="nb">Refresh NetBox</button><button class="btn go" id="lv">⟳ Refresh live</button><span id="job" class="muted"></span></div></section>
+  <section class="rail">
+    <div class="c-s"><b>${T.spines.length}</b><span>spine switches</span></div>
+    <div class="c-l"><b>${T.leaves.length}</b><span>leaf switches</span></div>
+    <div class="c-v"><b>${num(T.uplinks.length)}</b><span>spine–leaf cables${perPair ? " · " + (Number.isInteger(perPair) ? perPair : perPair.toFixed(2)) + " per pair" : ""}</span></div>
+    <div class="c-a"><b>${num(T.nodes.length)}</b><span>GPU nodes cabled (NetBox)</span></div>
+    <div class="c-l"><b>${num(T.nodes.reduce((a,n)=>a+n.links.length,0))}</b><span>GPU links · ${R} rails</span></div>
+    <div class="c-g"><b>${T.sus.length}</b><span>scalable units (same leaf set)</span></div>
+    <div class="${reporting === sws.length ? "c-ok" : "c-a"}"><b>${reporting} / ${sws.length}</b><span>switches reporting to UFM</span></div>
+    <div class="${pinged.length && pingUp < pinged.length ? "c-r" : "c-ok"}"><b>${pinged.length ? pingUp + " / " + pinged.length : "—"}</b><span>switches answering ping</span></div>
+    <div class="${down ? "c-r" : "c-ok"}"><b>${L.coverage.matched ? num(active) + " / " + num(L.coverage.matched) : "—"}</b><span>matched links Active${down ? " · " + down + " down" : ""}${flap ? " · " + flap + " flapping/errors" : ""}</span></div>
+  </section>
+  <div class="controls"><div class="chips">
+    <button class="chip" data-l="mesh" style="--c:var(--spine)" aria-pressed="${layers.mesh}"><i></i>Spine mesh</button>
+    <button class="chip" data-l="rails" style="--c:var(--leaf)" aria-pressed="${layers.rails}"><i></i>GPU rails</button>
+    <button class="chip" data-l="live" style="--c:var(--red)" aria-pressed="${layers.live}"><i></i>Live status</button></div>
+    <div class="search"><input id="q" placeholder="Search: leaf, spine, GPU node, IP" list="names"><datalist id="names">${sws.concat(T.nodes).map(x => `<option value="${esc(x.name)}">`).join("")}</datalist><button class="btn" id="clear">Clear</button></div></div>
+  <section class="panel"><h2>How the rail groups are wired</h2><div class="two">
+    <div class="card"><div class="cap">One GPU node, end to end — click any node on the canvas below to load it here</div><div id="e2e"></div></div>
+    <div class="card"><div class="cap">Rail × scalable-unit matrix — every cell is the leaf switch(es) of one rail in one SU; click to trace it</div><div id="matrix"></div></div></div>
+    <ul class="legend" style="padding-left:18px;margin:12px 0 0">
+      <li><b>Rails</b> are inferred from NetBox: the GPU NIC names used across the fabric (for example ib0–ib7), in order, are rails 1–${R}; a leaf's rail is the rail most of its GPU cables arrive on.</li>
+      <li><b>Scalable units</b> group GPU nodes that use the same leaves (a node with one NIC missing or misplaced stays in its SU and is flagged below).</li>
+      <li><b>Live</b> state is UFM telemetry for the leaf end of each cable (port matched by number).</li></ul></section>
+  <div class="stage"><div class="canvas" id="canvas"></div><aside class="panel inspector" id="insp"></aside></div>
+  <div class="two"><section class="panel"><h2>Scalable units</h2><div class="sus">${T.sus.map(su => `<div><b>${su.name}</b> · ${su.nodes.length} nodes · ${su.nodes.length * R} RDMA cables · leaves ${su.leaves.map(l => esc(short(l))).join(" / ")}</div>`).join("") || "<span class='muted'>No GPU nodes cabled in NetBox.</span>"}</div></section>
+    <section class="panel"><h2>Design checks</h2><ul class="checks">${checks(T, L).map(c => `<li class="${c.level}"><i>${c.level === "ok" ? "✓" : "!"}</i><span>${esc(c.text)}</span></li>`).join("")}</ul></section></div>`;
+
+  $("#nb").onclick = refreshNetbox;
+  $("#lv").onclick = () => { $("#lv").disabled = true; load(true); };
+  document.querySelectorAll(".chip").forEach(c => c.onclick = () => { layers[c.dataset.l] = !layers[c.dataset.l]; render(); });
+  $("#q").onchange = e => pick(e.target.value.trim());
+  $("#clear").onclick = () => { sel = null; render(); };
+  matrix(T); canvas(T); inspector(); e2e(T);
+}
+const leafRail = n => (D.topology.leaves.find(l => l.name === n) || {}).rail;
+const short = n => (D.topology.spines.concat(D.topology.leaves).find(s => s.name === n) || {}).short || n;
+
+function checks(T, L){
+  const out = [...T.checks];
+  if(L.ufm){
+    const missing = [...T.spines, ...T.leaves].filter(s => !(L.switches[s.name] && L.switches[s.name].ports)).map(s => s.short);
+    out.push(missing.length ? {level:"warn", text:`${missing.length} switch(es) in NetBox send no UFM telemetry: ${missing.slice(0,10).join(", ")}${missing.length > 10 ? " …" : ""}`} : {level:"ok", text:"Every NetBox spine and leaf reports to UFM."});
+    const cov = L.coverage.cables ? L.coverage.matched / L.coverage.cables : 0;
+    if(cov < 0.9) out.push({level:"info", text:`Only ${Math.round(cov*100)}% of NetBox cables matched a UFM port by number, so per-cable live state is partial. Set "port_names" for this fabric in regions.json if interface names use another convention.`});
+  } else out.push({level:"info", text:"No UFM telemetry for this fabric right now: the drawing shows NetBox cabling only."});
+  const down = [...T.spines, ...T.leaves].filter(s => L.switches[s.name] && L.switches[s.name].ping === 0).map(s => s.short);
+  if(down.length) out.push({level:"bad", text:`Not answering management ping: ${down.join(", ")}`});
+  return out;
+}
+
+/* ---------- rail × SU matrix ---------- */
+function matrix(T){
+  const R = T.rails;
+  if(!R){ $("#matrix").innerHTML = "<p class='muted'>No GPU cabling in NetBox, so no rails to show.</p>"; return; }
+  let h = `<div class="matrix" style="grid-template-columns:90px repeat(${R},1fr)"><div></div>`;
+  for(let r = 1; r <= R; r++) h += `<div class="h" style="color:${rc(r)}">RAIL ${r}<br><span class="faint">NIC ${r}</span></div>`;
+  for(const su of T.sus){
+    h += `<div class="su">${su.name}<br>${su.nodes.length} NODES</div>`;
+    for(let r = 1; r <= R; r++){
+      const ls = su.rail_leaves[r] || [];
+      const bad = ls.some(l => { const s = swLive(l); return s && (s.nonactive || s.ping === 0); });
+      h += ls.length ? `<div class="cell ${bad && layers.live ? "bad" : ""}" style="--c:${rc(r)}" data-pick="${esc(ls[0])}"><b>${ls.map(l => esc(short(l))).join(" ")}</b><span>${su.nodes.length} links</span></div>` : `<div class="cell empty" style="--c:${rc(r)}"><b>—</b><span>no leaf</span></div>`;
+    }
+  }
+  const idle = T.leaves.filter(l => !l.downlinks);
+  if(idle.length) h += `<div class="su">NO NODES</div><div class="cell empty" style="grid-column:span ${R};--c:#5b6d86"><b>${idle.map(l => esc(l.short)).join(" ")}</b><span>uplinks only</span></div>`;
+  $("#matrix").innerHTML = h + "</div>";
+  $("#matrix").onclick = e => { const c = e.target.closest("[data-pick]"); if(c) pick(c.dataset.pick); };
+}
+
+/* ---------- main canvas ---------- */
+function canvas(T){
+  const W = 1300, R = T.rails, L = D.live || {switches:{}};
+  const leaves = [...T.leaves].sort((a, b) => (a.su || 99) - (b.su || 99) || (a.rail || 99) - (b.rail || 99));
+  const sp = T.spines, pad = 30;
+  const sw = Math.min(34, (W - 2*pad) / Math.max(sp.length, 1) - 4), lw = Math.min(34, (W - 2*pad) / Math.max(leaves.length, 1) - 4);
+  const sx = i => pad + (i + .5) * (W - 2*pad) / sp.length, lx = i => pad + (i + .5) * (W - 2*pad) / leaves.length;
+  const SY = 40, LY = 330, BY = 460;
+  const pos = {};
+  sp.forEach((s, i) => pos[s.name] = [sx(i), SY]); leaves.forEach((l, i) => pos[l.name] = [lx(i), LY]);
+  // SU blocks
+  const cols = Math.min(4, Math.max(1, T.sus.length)), gap = 14, bw = (W - 2*pad - gap*(cols-1)) / cols;
+  const tw = 30, th = 20, per = Math.max(1, Math.floor((bw - 20) / (tw + 3)));
+  const blocks = []; let y = BY, rowH = 0;
+  T.sus.forEach((su, i) => {
+    const c = i % cols; if(c === 0 && i){ y += rowH + gap; rowH = 0; }
+    const rows = Math.ceil(su.nodes.length / per), h = 44 + rows * (th + 3) + 10;
+    blocks.push({su, x: pad + c * (bw + gap), y, w: bw, h}); rowH = Math.max(rowH, h);
+  });
+  const H = Math.max(BY + 60, y + rowH + 20);
+  let s = `<svg viewBox="0 0 ${W} ${H}" width="100%" style="min-width:900px">`;
+  // mesh
+  if(layers.mesh) s += `<g stroke="#a98bff" stroke-opacity=".10" stroke-width=".6">${T.uplinks.filter(u => pos[u.spine]).map(u => `<line x1="${pos[u.leaf][0]}" y1="${LY-14}" x2="${pos[u.spine][0]}" y2="${SY+14}"/>`).join("")}</g>`;
+  if(layers.live) s += `<g stroke="#ff5e78" stroke-width="1.6" stroke-dasharray="4 3">${T.uplinks.filter(u => pos[u.spine] && linkState(u.leaf, u.leaf_portnum).cls === "bad").map(u => `<line x1="${pos[u.leaf][0]}" y1="${LY-14}" x2="${pos[u.spine][0]}" y2="${SY+14}"/>`).join("")}</g>`;
+  s += `<text x="${pad}" y="18" fill="#8b9db6" font-size="11" letter-spacing="2">SPINES · ${sp.length}</text><text x="${pad}" y="${LY-34}" fill="#8b9db6" font-size="11" letter-spacing="2">LEAVES · ${leaves.length} · ${R} RAILS</text>`;
+  const dot = n => { const x = L.switches[n]; if(!x) return "#5b6d86"; if(x.ping === 0) return "#ff5e78"; if(x.nonactive) return "#f6a93b"; return x.ports ? "#38d9a0" : "#5b6d86"; };
+  sp.forEach(t => { const [x] = pos[t.name]; s += `<g class="sw" data-pick="${esc(t.name)}" style="cursor:pointer"><rect x="${x-sw/2}" y="${SY-14}" width="${sw}" height="28" rx="4" fill="#1a1736" stroke="${sel === t.name ? "#fff" : "#a98bff"}" stroke-width="${sel === t.name ? 2 : 1}"/><text x="${x}" y="${SY+4}" fill="#e7eef7" font-size="${sw < 22 ? 7 : 9}" text-anchor="middle">${esc(t.short.replace(/^\D+/, ""))}</text>${layers.live ? `<circle cx="${x+sw/2-3}" cy="${SY-12}" r="3" fill="${dot(t.name)}"/>` : ""}</g>`; });
+  leaves.forEach(t => { const [x] = pos[t.name]; s += `<g data-pick="${esc(t.name)}" style="cursor:pointer"><rect x="${x-lw/2}" y="${LY-14}" width="${lw}" height="28" rx="4" fill="#0f2130" stroke="${sel === t.name ? "#fff" : rc(t.rail)}" stroke-width="${sel === t.name ? 2 : 1.2}" ${t.downlinks ? "" : 'stroke-dasharray="3 2"'}/><text x="${x}" y="${LY+4}" fill="#e7eef7" font-size="${lw < 22 ? 7 : 9}" text-anchor="middle">${esc(t.short.replace(/^\D+/, ""))}</text>${layers.live ? `<circle cx="${x+lw/2-3}" cy="${LY-12}" r="3" fill="${dot(t.name)}"/>` : ""}</g>`; });
+  // rail bundles leaf -> SU block
+  if(layers.rails) for(const b of blocks) for(const leaf of b.su.leaves){
+    const l = T.leaves.find(x => x.name === leaf); if(!pos[leaf]) continue;
+    const [x1] = pos[leaf], x2 = b.x + b.w/2, w = Math.max(1, Math.min(6, b.su.nodes.length / 12));
+    s += `<path d="M${x1} ${LY+14} C${x1} ${LY+70},${x2} ${b.y-50},${x2} ${b.y}" fill="none" stroke="${rc(l && l.rail)}" stroke-opacity=".55" stroke-width="${w}"/>`;
+  }
+  // SU blocks with node tiles
+  for(const b of blocks){
+    s += `<rect x="${b.x}" y="${b.y}" width="${b.w}" height="${b.h}" rx="8" fill="#0d1a2b" stroke="#223550"/><text x="${b.x+12}" y="${b.y+20}" fill="#e7eef7" font-size="13" font-weight="600">${b.su.name}</text><text x="${b.x+60}" y="${b.y+20}" fill="#8b9db6" font-size="10">${b.su.nodes.length} nodes · ${b.su.leaves.map(short).join(" ")}</text>`;
+    b.su.nodes.forEach((n, i) => {
+      const node = T.nodes.find(x => x.name === n), cx = b.x + 10 + (i % per) * (tw + 3), cy = b.y + 32 + Math.floor(i / per) * (th + 3);
+      const states = node.links.map(l => linkState(l.leaf, l.leaf_portnum).cls);
+      const misrailed = node.links.some(l => leafRail(l.leaf) && leafRail(l.leaf) !== l.rail);
+      const border = misrailed ? "#ff5e78" : !layers.live ? "#2d4566" : states.includes("bad") ? "#ff5e78" : states.includes("warn") ? "#f6a93b" : node.links.length < R ? "#f6a93b" : "#2d4566";
+      s += `<g data-pick="${esc(n)}" style="cursor:pointer"><rect x="${cx}" y="${cy}" width="${tw}" height="${th}" rx="2" fill="#132238" stroke="${sel === n ? "#fff" : border}" stroke-width="${sel === n ? 1.8 : 1}"/>`;
+      const bwid = (tw - 4) / Math.max(R, 1);
+      for(let r = 1; r <= R; r++){ const has = node.links.some(l => l.rail === r); s += `<rect x="${cx + 2 + (r-1)*bwid}" y="${cy + th - 6}" width="${Math.max(1, bwid - .8)}" height="4" fill="${has ? rc(r) : "#2a3850"}"/>`; }
+      s += `<text x="${cx + tw/2}" y="${cy + 10}" fill="#8b9db6" font-size="8" text-anchor="middle">${esc((n.match(/(\d+)\D*$/) || ["", ""])[1].slice(-3))}</text></g>`;
+    });
+  }
+  if(T.others.length) s += `<text x="${pad}" y="${H-6}" fill="#5b6d86" font-size="10">Other endpoints on leaves: ${esc(T.others.map(o => o.name).join(", ").slice(0, 180))}</text>`;
+  $("#canvas").innerHTML = s + "</svg>";
+  $("#canvas").onclick = e => { const g = e.target.closest("[data-pick]"); if(g) pick(g.dataset.pick); };
+}
+
+/* ---------- selection ---------- */
+function pick(name){
+  const T = D.topology, q = (name || "").toLowerCase();
+  const all = [...T.spines, ...T.leaves, ...T.nodes];
+  const hit = all.find(x => x.name.toLowerCase() === q) || all.find(x => (x.short || "").toLowerCase() === q) || all.find(x => (x.ip || "") === q) || all.find(x => x.name.toLowerCase().includes(q));
+  if(hit){ sel = hit.name; render(); }
+}
+function inspector(){
+  const T = D.topology, el = $("#insp");
+  if(!sel){ el.innerHTML = `<div class="k">Inspector</div><h3>Select a switch or GPU node</h3><p class="muted" style="font-size:13px">Click any spine, leaf or node tile. Spines show their leaf cables, leaves their uplinks and GPU links, nodes their ${T.rails} RDMA links, all with NetBox cable IDs and the live UFM state of the leaf port.</p>
+    <dl class="kv"><dt>Spines</dt><dd>${esc(T.spines.map(s => s.short).slice(0,3).join(", "))}${T.spines.length > 3 ? " …" : ""}</dd><dt>Leaves</dt><dd>${esc(T.leaves.map(s => s.short).slice(0,3).join(", "))}${T.leaves.length > 3 ? " …" : ""}</dd><dt>GPU nodes</dt><dd>${T.nodes.length}</dd></dl>
+    <div class="legend">${Array.from({length:T.rails}, (_, i) => `<span style="color:${rc(i+1)}">■</span> rail ${i+1} `).join("")}</div>`; return; }
+  const sw = [...T.spines, ...T.leaves].find(x => x.name === sel), node = T.nodes.find(x => x.name === sel);
+  const row = (a, b, c, d, cls, txt) => `<tr><td class="m">${esc(a)}</td><td class="m">${esc(b)}</td><td class="m">${esc(c)}</td><td class="m">${esc(d ?? "—")}</td><td><span class="st ${cls}">${esc(txt)}</span></td></tr>`;
+  if(sw){
+    const lv = swLive(sw.name) || {};
+    const isSpine = T.spines.includes(sw);
+    const links = isSpine ? T.uplinks.filter(u => u.spine === sw.name).map(u => [u.spine_port, short(u.leaf), u.leaf_port, u.cable, linkState(u.leaf, u.leaf_portnum)])
+      : [...T.uplinks.filter(u => u.leaf === sw.name).map(u => [u.leaf_port, short(u.spine), u.spine_port, u.cable, linkState(u.leaf, u.leaf_portnum)]),
+         ...T.nodes.flatMap(n => n.links.filter(l => l.leaf === sw.name).map(l => [l.leaf_port, n.short, l.iface, l.cable, linkState(l.leaf, l.leaf_portnum)]))];
+    links.sort((a, b) => (a[4].cls === "ok") - (b[4].cls === "ok"));
+    el.innerHTML = `<div class="k">${isSpine ? "Spine" : "Leaf · rail " + (sw.rail || "—") + (sw.su ? " · SU" + sw.su : "")}</div><h3>${esc(sw.short)}</h3>
+      <dl class="kv"><dt>NetBox name</dt><dd>${esc(sw.name)}</dd><dt>Model</dt><dd>${esc(sw.model || "—")}</dd><dt>Mgmt IP</dt><dd>${esc(sw.ip || "—")}</dd><dt>Status / rack</dt><dd>${esc(sw.status || "—")} · ${esc(sw.rack || "—")}</dd>
+      <dt>UFM</dt><dd>${lv.ports ? `${lv.ports} ports · <span style="color:${lv.nonactive ? "var(--red)" : "var(--green)"}">${lv.nonactive} not Active</span> · ${lv.linkdown} flapped · ${lv.errors} with errors (15 min)` : "no telemetry"}</dd>
+      <dt>Ping</dt><dd>${lv.ping == null ? "—" : lv.ping ? "answering" : "<span style='color:var(--red)'>NOT answering</span>"}</dd>
+      ${isSpine ? `<dt>Leaf cables</dt><dd>${sw.leaves}</dd>` : `<dt>Cables</dt><dd>${sw.uplinks} up (${sw.spines} spines) · ${sw.downlinks} GPU</dd>`}</dl>
+      <table><tr><th>Port</th><th>Far end</th><th>Far port</th><th>Cable</th><th>Live</th></tr>${links.map(x => row(x[0], x[1], x[2], x[3], x[4].cls, x[4].text)).join("")}</table>`;
+    return;
+  }
+  if(node){
+    el.innerHTML = `<div class="k">GPU node${node.su ? " · SU" + node.su : ""}</div><h3>${esc(node.name)}</h3>
+      <dl class="kv"><dt>RDMA links</dt><dd>${node.links.length} of ${T.rails} rails</dd></dl>
+      <table><tr><th>Rail · NIC</th><th>Leaf</th><th>Leaf port</th><th>Cable</th><th>Live</th></tr>${node.links.map(l => { const s = linkState(l.leaf, l.leaf_portnum), lr = leafRail(l.leaf), wrong = lr && lr !== l.rail; return `<tr><td class="m"><span style="color:${rc(l.rail)}">■</span> ${l.rail} · ${esc(l.iface)}</td><td class="m">${esc(short(l.leaf))}${wrong ? ` <span class="st bad">rail ${lr} leaf</span>` : ""}</td><td class="m">${esc(l.leaf_port)}</td><td class="m">${esc(l.cable ?? "—")}</td><td><span class="st ${s.cls}">${esc(s.text)}</span></td></tr>`; }).join("")}</table>`;
+  }
+}
+function e2e(T){
+  const node = T.nodes.find(n => n.name === sel) || T.nodes[0];
+  if(!node){ $("#e2e").innerHTML = "<p class='muted'>No GPU nodes cabled in NetBox.</p>"; return; }
+  const n = node.links.length, H = Math.max(200, 50 * n + 30), y = i => 30 + i * (H - 40) / Math.max(n, 1) + 10;
+  let s = `<svg viewBox="0 0 640 ${H}" width="100%"><rect x="10" y="${H/2-60}" width="170" height="120" rx="8" fill="#101c2d" stroke="#2d4566"/><text x="24" y="${H/2-34}" fill="#e7eef7" font-size="15" font-weight="700">${esc(node.short.slice(-14))}</text><text x="24" y="${H/2-16}" fill="#8b9db6" font-size="10">${node.su ? "SU" + node.su : ""} · ${n} RDMA</text>`;
+  node.links.forEach((l, i) => {
+    const yy = H/2 - 4 + (i - (n-1)/2) * Math.min(12, 70 / n), st = linkState(l.leaf, l.leaf_portnum);
+    s += `<rect x="150" y="${yy-4}" width="18" height="8" rx="2" fill="${rc(l.rail)}"/>`;
+    s += `<path d="M168 ${yy} C260 ${yy},260 ${y(i)},340 ${y(i)}" fill="none" stroke="${rc(l.rail)}" stroke-width="2" ${st.cls === "bad" && layers.live ? 'stroke-dasharray="5 4"' : ""}/>`;
+    s += `<text x="230" y="${(yy + y(i))/2 - 4}" fill="#8b9db6" font-size="9">${esc(l.leaf_port)}</text>`;
+    s += `<rect x="340" y="${y(i)-15}" width="140" height="30" rx="6" fill="#0f2130" stroke="${rc(l.rail)}"/><text x="350" y="${y(i)-1}" fill="#e7eef7" font-size="12" font-weight="600">${esc(short(l.leaf))}</text><text x="350" y="${y(i)+11}" fill="#8b9db6" font-size="9">rail ${l.rail} · ${esc(st.text)}</text>`;
+    s += `<path d="M480 ${y(i)} C520 ${y(i)},520 ${H/2},540 ${H/2}" stroke="#a98bff" stroke-opacity=".5" fill="none"/>`;
+  });
+  s += `<rect x="540" y="${H/2-40}" width="90" height="80" rx="8" fill="#1a1736" stroke="#a98bff"/><text x="585" y="${H/2+4}" fill="#a98bff" font-size="14" font-weight="700" text-anchor="middle">${T.spines.length} SPINES</text></svg>`;
+  $("#e2e").innerHTML = s;
+}
+
+if(!site) $("#app").innerHTML = `<div class="notice">Open /f/&lt;site&gt;</div>`; else load(false);
+setInterval(() => { if(D && D.topology && !document.hidden) load(false); }, 60000);
+</script>
+</body>
+</html>

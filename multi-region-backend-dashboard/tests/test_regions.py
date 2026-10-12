@@ -23,6 +23,7 @@ ROOT = HERE.parent
 sys.path.insert(0, str(ROOT))
 
 import checks  # noqa: E402
+import fabric  # noqa: E402
 import multi_region_dashboard as dash  # noqa: E402
 from nsr_client import Nsr, NsrError  # noqa: E402
 
@@ -159,9 +160,53 @@ class Sections(unittest.TestCase):
         self.assertFalse(checks.run_events(Nsr(FAKE), region("glo1"), CONFIG)["configured"])
 
 
+class FabricModel(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.snap = fabric.pull_netbox(Nsr(FAKE), region("osl1")["fabric_view"])
+        cls.topo = fabric.build_topology(cls.snap)
+
+    def test_port_numbers(self):
+        self.assertEqual(fabric.port_number("sw33p1"), 65)
+        self.assertEqual(fabric.port_number("sw1p2"), 2)
+        self.assertEqual(fabric.port_number("IB1/17/2"), 34)
+        self.assertEqual(fabric.port_number("IB1/17"), 17)
+        self.assertIsNone(fabric.port_number("mgmt0", "swNpM"))
+        self.assertEqual(fabric.short_name("sys2-osl1-p-ifs-bel12"), "bel12")
+        self.assertEqual(fabric.short_name("ifs398"), "ifs398")
+
+    def test_structure_is_inferred(self):
+        t = self.topo
+        self.assertEqual((len(t["spines"]), len(t["leaves"]), t["rails"]), (4, 16, 8))
+        self.assertEqual([len(su["nodes"]) for su in t["sus"]], [6, 6], "nodes with a missing/misplaced NIC stay in their SU")
+        self.assertEqual({l["short"]: l["rail"] for l in t["leaves"]}["bel13"], 6)
+        gpu004 = next(n for n in t["nodes"] if n["name"].endswith("gpu004"))
+        self.assertEqual(sorted(l["rail"] for l in gpu004["links"]), [1, 2, 3, 4, 5, 7, 8], "ib6 stays rail 7")
+        self.assertEqual([o["name"] for o in t["others"]], ["sys2-osl1-p-phy-ufm0"])
+
+    def test_design_checks(self):
+        text = " ".join(c["text"] for c in self.topo["checks"])
+        self.assertIn("Full mesh", text)
+        self.assertIn("fewer than 8 rails: sys2-osl1-p-phy-gpu004", text)
+        self.assertIn("phy-gpu009 ib1→bel10", text)
+
+    def test_live_overlay_matches_ports(self):
+        r = region("osl1")
+        live = fabric.live_overlay(Nsr(FAKE), self.topo, r["sources"]["ufm"]["selector"], "infra-mimir", None, "infra-mimir")
+        self.assertEqual(live["coverage"]["matched"], live["coverage"]["cables"])
+        self.assertEqual(live["switches"]["sys2-osl1-p-ifs-bel3"]["nonactive"], 1)
+
+    def test_missing_fabric_is_explained(self):
+        with self.assertRaises(NsrError) as ctx:
+            fabric.pull_netbox(Nsr(FAKE), region("sta1")["fabric_view"])
+        self.assertIn("sys2-sta1", str(ctx.exception))
+
+
 class Http(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        import tempfile
+        dash.CACHE_DIR = Path(tempfile.mkdtemp(prefix="fabric-cache-"))
         dash.Handler.app = dash.App(CONFIG, Nsr(FAKE), ttl=60)
         cls.server = ThreadingHTTPServer(("127.0.0.1", 0), dash.Handler)
         cls.port = cls.server.server_address[1]
@@ -194,6 +239,33 @@ class Http(unittest.TestCase):
         self.assertEqual(self.get("/api/region/nope/fabric")[0], 404)
         self.assertEqual(self.get("/api/region/ice2/nope")[0], 404)
         self.assertEqual(self.get("/", host="evil.example")[0], 403)
+
+    def post(self, path, origin=None):
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=30)
+        headers = {"Host": "127.0.0.1:%d" % self.port}
+        if origin:
+            headers["Origin"] = origin
+        conn.request("POST", path, headers=headers)
+        resp = conn.getresponse()
+        body = resp.read()
+        conn.close()
+        return resp.status, body
+
+    def test_fabric_view_flow(self):
+        import time as _t
+        self.assertEqual(self.get("/f/osl1")[0], 200)
+        self.assertEqual(self.get("/api/fabric/ice2")[0], 404, "ICE2 keeps its own dashboard")
+        self.assertEqual(self.post("/api/fabric/osl1/netbox", origin="https://evil.example")[0], 403)
+        self.assertEqual(self.post("/api/fabric/osl1/netbox")[0], 202)
+        for _ in range(50):
+            job = json.loads(self.get("/api/fabric/osl1/netbox")[1])
+            if job["state"] != "running":
+                break
+            _t.sleep(0.1)
+        self.assertEqual(job["state"], "done")
+        view = json.loads(self.get("/api/fabric/osl1")[1])
+        self.assertEqual(view["topology"]["rails"], 8)
+        self.assertEqual(view["live"]["coverage"]["matched"], 223)
 
     def test_cache_reuses_answers(self):
         app = dash.Handler.app

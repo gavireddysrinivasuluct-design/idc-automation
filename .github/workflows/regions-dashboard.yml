@@ -34,6 +34,8 @@ jobs:
       - name: Page JavaScript parses
         run: |
           node -e '
-            const html = require("fs").readFileSync("assets/regions.html", "utf8");
-            [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].forEach(m => new Function(m[1]));
-            console.log("regions.html OK")'
+            for (const f of ["assets/regions.html", "assets/fabric.html"]) {
+              const html = require("fs").readFileSync(f, "utf8");
+              [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].forEach(m => new Function(m[1]));
+              console.log(f, "OK");
+            }'

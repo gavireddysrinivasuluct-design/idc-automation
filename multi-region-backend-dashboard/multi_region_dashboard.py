@@ -21,6 +21,8 @@ HTTP API (local only):
     GET /api/overview           all regions, grouped queries (cache 60 s)
     GET /api/region/<site>/<section>   section = fabric | switches | reach | events | incidents
     GET /api/topology/<site>    is that site's NetBox/UFM dashboard running?
+    GET /f/<site>               ICE2-style spine · leaf · rail view built from NetBox + UFM (nsr)
+    GET /api/fabric/<site>      that view's data;  POST|GET /api/fabric/<site>/netbox  snapshot job
     add ?refresh=1 to bypass the cache
 """
 
@@ -41,9 +43,12 @@ ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
 import checks  # noqa: E402
+from fabric import FabricStore  # noqa: E402
 from nsr_client import Cache, Nsr  # noqa: E402
 
 PAGE = ROOT / "assets" / "regions.html"
+FABRIC_PAGE = ROOT / "assets" / "fabric.html"
+CACHE_DIR = ROOT / "cache"
 SECTIONS = ("fabric", "switches", "reach", "events", "incidents")
 
 
@@ -66,6 +71,7 @@ class App:
         self.cache = Cache(ttl)
         self.incident_cache = Cache(ttl)
         self.started = time.time()
+        self.fabrics = FabricStore(nsr, config, CACHE_DIR, ttl)
 
     def incidents(self, force=False) -> dict:
         return self.incident_cache.get("pd", lambda: checks.fetch_incidents(self.nsr, self.config), force)
@@ -92,7 +98,7 @@ class App:
             regions.append({**{k: region.get(k) for k in ("site", "name", "location", "fabric", "clusters",
                                                          "cloud_regions", "switches_expected", "topology_dashboard",
                                                          "grafana_dashboards", "notes")},
-                            "sources": sorted(region["sources"])})
+                            "sources": sorted(region["sources"]), "fabric_view": bool(region.get("fabric_view"))})
         return {"grafana_url": self.config.get("grafana_url"), "regions": regions,
                 "nsr": self.nsr.binary, "started": self.started}
 
@@ -150,11 +156,32 @@ class Handler(BaseHTTPRequestHandler):
                 return self.respond(HTTPStatus.OK, self.app.section(site, section, force))
             if parts[:2] == ["api", "topology"] and len(parts) == 3 and parts[2] in self.app.by_site:
                 return self.respond(HTTPStatus.OK, self.app.topology(parts[2]))
+            if parts[0] == "f" and len(parts) == 2 and parts[1] in self.app.by_site:
+                return self.respond(HTTPStatus.OK, FABRIC_PAGE.read_text(encoding="utf-8"), "text/html; charset=utf-8")
+            if parts[:2] == ["api", "fabric"] and len(parts) >= 3 and parts[2] in self.app.by_site:
+                if not self.app.by_site[parts[2]].get("fabric_view"):
+                    return self.respond(HTTPStatus.NOT_FOUND, {"error": "no fabric view configured for this region"})
+                if len(parts) == 4 and parts[3] == "netbox":
+                    return self.respond(HTTPStatus.OK, self.app.fabrics.jobs.get(parts[2]) or {"state": "idle"})
+                return self.respond(HTTPStatus.OK, self.app.fabrics.view(parts[2], force))
             if path == "/api/health":
                 return self.respond(HTTPStatus.OK, {"ok": True, "nsr_calls": self.app.nsr.calls})
             return self.respond(HTTPStatus.NOT_FOUND, {"error": "not found"})
         except Exception as error:  # noqa: BLE001 - never leave the browser hanging
             return self.respond(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(error)})
+
+
+    def do_POST(self):  # noqa: N802 - only starts a read-only NetBox snapshot
+        if not self.host_ok():
+            return self.respond(HTTPStatus.FORBIDDEN, {"error": "wrong host"})
+        origin = self.headers.get("Origin")
+        if origin and origin.split("//")[-1].split(":")[0] not in ("127.0.0.1", "localhost"):
+            return self.respond(HTTPStatus.FORBIDDEN, {"error": "cross-site request refused"})
+        parts = [unquote(p) for p in urlparse(self.path).path.strip("/").split("/")]
+        if parts[:2] == ["api", "fabric"] and len(parts) == 4 and parts[3] == "netbox" \
+                and parts[2] in self.app.by_site and self.app.by_site[parts[2]].get("fabric_view"):
+            return self.respond(HTTPStatus.ACCEPTED, self.app.fabrics.refresh(parts[2]))
+        return self.respond(HTTPStatus.NOT_FOUND, {"error": "not found"})
 
 
 def main(argv=None) -> int:

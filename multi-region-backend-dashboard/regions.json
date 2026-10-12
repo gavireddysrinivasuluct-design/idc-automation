@@ -14,22 +14,49 @@
       "location": "Keflavik",
       "fabric": "InfiniBand XDR · Q3400",
       "clusters": "sys1-ice2",
-      "cloud_regions": ["is-sys1-ice2"],
+      "cloud_regions": [
+        "is-sys1-ice2"
+      ],
       "switches_expected": 100,
-      "match": ["ice2"],
+      "match": [
+        "ice2"
+      ],
       "sources": {
-        "ufm": {"datasource": "mimir", "selector": "job=\"ufm-mgmt-alert-primary-hf\",cloud_region=\"is-sys1-ice2\",device_type=\"switch\",source=\"\",port_id!=\"\""},
-        "gnmi": {"netbox_site": "ice2"},
-        "snmp": {"selector": "cloud_region=\"is-sys1-ice2\",job=~\"snmp.*\",role=~\"be-(leaf|spine)-switch\""},
-        "ping": {"selector": "cloud_region=\"is-sys1-ice2\",job=\"blackbox-mgmt-ping\",role=~\"be-(leaf|spine)-switch\""},
-        "ufm_server": {"datasource": "mimir", "selector": "job=\"ufm-system-monitoring\",cloud_region=\"is-sys1-ice2\""},
-        "ufm_events": {"logql": "{host_name=~\"sys1-ice2-p-phy-ufm[0-9]+\"}"}
+        "ufm": {
+          "datasource": "mimir",
+          "selector": "job=\"ufm-mgmt-alert-primary-hf\",cloud_region=\"is-sys1-ice2\",device_type=\"switch\",source=\"\",port_id!=\"\""
+        },
+        "gnmi": {
+          "netbox_site": "ice2"
+        },
+        "snmp": {
+          "selector": "cloud_region=\"is-sys1-ice2\",job=~\"snmp.*\",role=~\"be-(leaf|spine)-switch\""
+        },
+        "ping": {
+          "selector": "cloud_region=\"is-sys1-ice2\",job=\"blackbox-mgmt-ping\",role=~\"be-(leaf|spine)-switch\""
+        },
+        "ufm_server": {
+          "datasource": "mimir",
+          "selector": "job=\"ufm-system-monitoring\",cloud_region=\"is-sys1-ice2\""
+        },
+        "ufm_events": {
+          "logql": "{host_name=~\"sys1-ice2-p-phy-ufm[0-9]+\"}"
+        }
       },
       "topology_dashboard": "http://127.0.0.1:8765/",
       "grafana_dashboards": [
-        ["Site observability status", "/d/site-obs-status-ice2"],
-        ["IB backend actionable", "/d/ib-backend-actionable-sys1-ice2"],
-        ["IB health (UFM alert jobs)", "/d/ib-health-diagnostics-site-alert-jobs?var-site=sys1-ice2-p-swi-be%5Bls%5D%5B0-9%5D%2B"]
+        [
+          "Site observability status",
+          "/d/site-obs-status-ice2"
+        ],
+        [
+          "IB backend actionable",
+          "/d/ib-backend-actionable-sys1-ice2"
+        ],
+        [
+          "IB health (UFM alert jobs)",
+          "/d/ib-health-diagnostics-site-alert-jobs?var-site=sys1-ice2-p-swi-be%5Bls%5D%5B0-9%5D%2B"
+        ]
       ],
       "notes": [
         "Full coverage: gNMI on all 100 switches, UFM telemetry (alert-primary-hf), SNMP, blackbox ping and UFM event log in Loki.",
@@ -42,21 +69,45 @@
       "location": "London",
       "fabric": "InfiniBand NDR · sys1 (sys2 is Ethernet SN5610)",
       "clusters": "sys1-lon14",
-      "cloud_regions": ["gb-sys1-lon14"],
+      "cloud_regions": [
+        "gb-sys1-lon14"
+      ],
       "switches_expected": 100,
-      "match": ["lon14"],
+      "match": [
+        "lon14"
+      ],
       "sources": {
-        "ufm": {"datasource": "lon14_vm", "selector": "job=\"ufm-mgmt-alert-primary-hf\",cloud_region=\"gb-sys1-lon14\",device_type=\"switch\",source=\"\",port_id!=\"\""},
-        "gnmi": {"netbox_site": "lon14"},
-        "snmp": {"selector": "cloud_region=\"gb-sys1-lon14\",job=~\"snmp.*\",role=~\"be-(leaf|spine)-switch\""},
-        "ping": {"selector": "cloud_region=\"gb-sys1-lon14\",job=\"blackbox-mgmt-ping\",role=~\"be-(leaf|spine)-switch\""},
-        "ufm_server": {"datasource": "lon14_vm", "selector": "job=\"ufm-system-monitoring\",cloud_region=\"gb-sys1-lon14\""},
-        "ufm_events": {"logql": "{host_name=~\".*lon14.*ufm.*\"}"}
+        "ufm": {
+          "datasource": "lon14_vm",
+          "selector": "job=\"ufm-mgmt-alert-primary-hf\",cloud_region=\"gb-sys1-lon14\",device_type=\"switch\",source=\"\",port_id!=\"\""
+        },
+        "gnmi": {
+          "netbox_site": "lon14"
+        },
+        "snmp": {
+          "selector": "cloud_region=\"gb-sys1-lon14\",job=~\"snmp.*\",role=~\"be-(leaf|spine)-switch\""
+        },
+        "ping": {
+          "selector": "cloud_region=\"gb-sys1-lon14\",job=\"blackbox-mgmt-ping\",role=~\"be-(leaf|spine)-switch\""
+        },
+        "ufm_server": {
+          "datasource": "lon14_vm",
+          "selector": "job=\"ufm-system-monitoring\",cloud_region=\"gb-sys1-lon14\""
+        },
+        "ufm_events": {
+          "logql": "{host_name=~\".*lon14.*ufm.*\"}"
+        }
       },
       "topology_dashboard": "http://127.0.0.1:8766/",
       "grafana_dashboards": [
-        ["Site observability status", "/d/site-obs-status-lon14"],
-        ["IB backend site overview", "/d/ib-backend-site?var-site=lon14"]
+        [
+          "Site observability status",
+          "/d/site-obs-status-lon14"
+        ],
+        [
+          "IB backend site overview",
+          "/d/ib-backend-site?var-site=lon14"
+        ]
       ],
       "notes": [
         "LON14 UFM telemetry is only in the lon14-victoriametrics datasource (uid bfssob4wsbchsb), not in infra-mimir; gNMI is in infra-mimir.",
@@ -67,23 +118,52 @@
       "site": "osl1",
       "name": "OSL1",
       "location": "Oslo",
-      "fabric": "InfiniBand NDR · QM9700",
       "clusters": "sys2-osl1",
-      "cloud_regions": ["no-sys2-osl1", "no-sys1-osl1", "no-osl1"],
+      "cloud_regions": [
+        "no-sys2-osl1",
+        "no-sys1-osl1",
+        "no-osl1"
+      ],
       "switches_expected": 48,
-      "match": ["osl1"],
+      "match": [
+        "osl1"
+      ],
       "sources": {
-        "ufm": {"datasource": "mimir", "selector": "job=\"ufm-mgmt-alert-primary-hf\",cloud_region=\"no-sys2-osl1\",device_type=\"switch\",source=\"\",port_id!=\"\""},
-        "snmp": {"selector": "cloud_region=~\"no-sys2-osl1|no-sys1-osl1|no-osl1\",job=~\"snmp.*\",role=~\"be-(leaf|spine)-switch\""},
-        "ping": {"selector": "cloud_region=~\"no-sys2-osl1|no-sys1-osl1|no-osl1\",job=\"blackbox-mgmt-ping\",role=~\"be-(leaf|spine)-switch\""},
-        "ufm_server": {"datasource": "mimir", "selector": "job=\"ufm-system-monitoring\",cloud_region=\"no-sys2-osl1\""},
-        "ufm_events": {"logql": "{host_name=~\"sys2-osl1-p-phy-ufm[0-9]+\"}"},
-        "syslog": {"logql": "{cloud_region=\"no-sys2-osl1\", nscale_log_source=\"infra-collector-syslog\"}"}
+        "ufm": {
+          "datasource": "mimir",
+          "selector": "job=\"ufm-mgmt-alert-primary-hf\",cloud_region=\"no-sys2-osl1\",device_type=\"switch\",source=\"\",port_id!=\"\""
+        },
+        "snmp": {
+          "selector": "cloud_region=~\"no-sys2-osl1|no-sys1-osl1|no-osl1\",job=~\"snmp.*\",role=~\"be-(leaf|spine)-switch\""
+        },
+        "ping": {
+          "selector": "cloud_region=~\"no-sys2-osl1|no-sys1-osl1|no-osl1\",job=\"blackbox-mgmt-ping\",role=~\"be-(leaf|spine)-switch\""
+        },
+        "ufm_server": {
+          "datasource": "mimir",
+          "selector": "job=\"ufm-system-monitoring\",cloud_region=\"no-sys2-osl1\""
+        },
+        "ufm_events": {
+          "logql": "{host_name=~\"sys2-osl1-p-phy-ufm[0-9]+\"}"
+        },
+        "syslog": {
+          "logql": "{cloud_region=\"no-sys2-osl1\", nscale_log_source=\"infra-collector-syslog\"}"
+        }
+      },
+      "fabric_view": {
+        "netbox_site": "osl1",
+        "cluster": "sys2-osl1"
       },
       "topology_dashboard": null,
       "grafana_dashboards": [
-        ["Site observability status", "/d/site-obs-status-osl1"],
-        ["IB health (UFM alert jobs)", "/d/ib-health-diagnostics-site-alert-jobs?var-site=sys2-osl1-p-ifs-%28bel%28%5B0-9%5D%7C%5B12%5D%5B0-9%5D%7C3%5B01%5D%29%7Cbes%28%5B0-9%5D%7C1%5B0-5%5D%29%29"]
+        [
+          "Site observability status",
+          "/d/site-obs-status-osl1"
+        ],
+        [
+          "IB health (UFM alert jobs)",
+          "/d/ib-health-diagnostics-site-alert-jobs?var-site=sys2-osl1-p-ifs-%28bel%28%5B0-9%5D%7C%5B12%5D%5B0-9%5D%7C3%5B01%5D%29%7Cbes%28%5B0-9%5D%7C1%5B0-5%5D%29%29"
+        ]
       ],
       "notes": [
         "No gNMI: the gnmi NetBox tag is not applied at OSL1 (one leftover gnmic target, bes0, stuck in TRANSIENT_FAILURE).",
@@ -91,28 +171,55 @@
         "SNMP mlnx_health: 48 of 48 switches (about 139 series per switch). Blackbox ping: 48 of 48.",
         "Backend switch syslog arrives in Loki (nscale_log_source=infra-collector-syslog) but no alert rule reads it.",
         "Command-exporter (UFM HA role, CLI probes) is not rolled out to OSL1 yet (ANO-860 covers ICE2 and LON14 only)."
-      ]
+      ],
+      "fabric": "InfiniBand NDR · QM9700"
     },
     {
       "site": "sta1",
       "name": "STA1",
       "location": "Stavanger",
-      "fabric": "InfiniBand NDR · QM9700 (sys2) + Nokia (sys1)",
       "clusters": "sys2-sta1, sys1-sta1",
-      "cloud_regions": ["no-sys2-sta1", "no-sta1"],
+      "cloud_regions": [
+        "no-sys2-sta1",
+        "no-sta1"
+      ],
       "switches_expected": 120,
-      "match": ["sta1", "stavanger"],
+      "match": [
+        "sta1",
+        "stavanger"
+      ],
       "sources": {
-        "ufm": {"datasource": "mimir", "selector": "job=\"ufm-mgmt\",cloud_region=\"no-sys2-sta1\",port_id!=\"\""},
-        "snmp": {"selector": "cloud_region=~\"no-sta1|no-sys2-sta1\",job=~\"snmp.*|netboxSnmp.*\",role=~\"be-(leaf|spine)-switch\""},
-        "ping": {"selector": "cloud_region=~\"no-sys2-sta1|no-sta1\",job=\"blackbox-mgmt-ping\",role=~\"be-(leaf|spine)-switch\""},
-        "ufm_server": {"datasource": "mimir", "selector": "job=\"ufm-system-monitoring\",cloud_region=\"no-sys2-sta1\""},
-        "ufm_events": {"logql": "{host_name=~\"sys2-sta1-p-phy-ufm[0-9]+\"}"},
-        "syslog": {"logql": "{cloud_region=\"no-sys2-sta1\", service_name=\"syslog\"} | hostname=~\"(ifs|swi)[0-9]+|10[.]40[.]37[.][0-9]+\""}
+        "ufm": {
+          "datasource": "mimir",
+          "selector": "job=\"ufm-mgmt\",cloud_region=\"no-sys2-sta1\",port_id!=\"\""
+        },
+        "snmp": {
+          "selector": "cloud_region=~\"no-sta1|no-sys2-sta1\",job=~\"snmp.*|netboxSnmp.*\",role=~\"be-(leaf|spine)-switch\""
+        },
+        "ping": {
+          "selector": "cloud_region=~\"no-sys2-sta1|no-sta1\",job=\"blackbox-mgmt-ping\",role=~\"be-(leaf|spine)-switch\""
+        },
+        "ufm_server": {
+          "datasource": "mimir",
+          "selector": "job=\"ufm-system-monitoring\",cloud_region=\"no-sys2-sta1\""
+        },
+        "ufm_events": {
+          "logql": "{host_name=~\"sys2-sta1-p-phy-ufm[0-9]+\"}"
+        },
+        "syslog": {
+          "logql": "{cloud_region=\"no-sys2-sta1\", service_name=\"syslog\"} | hostname=~\"(ifs|swi)[0-9]+|10[.]40[.]37[.][0-9]+\""
+        }
+      },
+      "fabric_view": {
+        "netbox_site": "sta1",
+        "cluster": "sys2-sta1"
       },
       "topology_dashboard": null,
       "grafana_dashboards": [
-        ["IB health (UFM alert jobs)", "/d/ib-health-diagnostics-site-alert-jobs?var-site=ifs%2834%5B6-9%5D%7C3%5B5-9%5D%5B0-9%5D%7C4%5B0-3%5D%5B0-9%5D%7C44%5B0-1%5D%29"]
+        [
+          "IB health (UFM alert jobs)",
+          "/d/ib-health-diagnostics-site-alert-jobs?var-site=ifs%2834%5B6-9%5D%7C3%5B5-9%5D%5B0-9%5D%7C4%5B0-3%5D%5B0-9%5D%7C44%5B0-1%5D%29"
+        ]
       ],
       "notes": [
         "No gNMI at STA1 (gnmi tag not applied).",
@@ -123,27 +230,42 @@
         "Other STA1 sources seen in Mimir: per-switch exporter jobs scrape_swi638..swi705 (ports 9100 and 8001, 1 s to 60 s), PDU and rear-door-cooler SNMP, modbus, IPMI/Redfish for GPU nodes.",
         "Switch syslog reaches Loki in {cloud_region=no-sys2-sta1, service_name=syslog}, mixed with server syslog; the dashboard keeps lines whose hostname is ifs*/swi* or a 10.40.37.x switch management IP.",
         "UFM event-log alerts (ufm-ev-*) do fire for STA1 and page BackEnd Network (e.g. BENETOPS-25, BENETOPS-50)."
-      ]
+      ],
+      "fabric": "InfiniBand NDR · QM9700 (sys2) + Nokia (sys1)"
     },
     {
       "site": "glo1",
       "name": "GLO1",
       "location": "Glomfjord",
-      "fabric": "InfiniBand · sys4-glo1 (128 leaf, 72 spine)",
       "clusters": "sys4-glo1",
-      "cloud_regions": ["no-glo1"],
+      "cloud_regions": [
+        "no-glo1"
+      ],
       "switches_expected": 200,
-      "match": ["glo1", "glomfjord"],
+      "match": [
+        "glo1",
+        "glomfjord"
+      ],
       "sources": {
-        "ping": {"selector": "cloud_region=\"no-glo1\",job=\"blackbox-mgmt-ping\",role=~\"be-(leaf|spine)-switch\""},
-        "ufm_server": {"datasource": "mimir", "selector": "job=\"ufm-system-monitoring\",cloud_region=\"no-glo1\""}
+        "ping": {
+          "selector": "cloud_region=\"no-glo1\",job=\"blackbox-mgmt-ping\",role=~\"be-(leaf|spine)-switch\""
+        },
+        "ufm_server": {
+          "datasource": "mimir",
+          "selector": "job=\"ufm-system-monitoring\",cloud_region=\"no-glo1\""
+        }
+      },
+      "fabric_view": {
+        "netbox_site": "glo1",
+        "cluster": "sys4-glo1"
       },
       "topology_dashboard": null,
       "grafana_dashboards": [],
       "notes": [
         "No backend telemetry of any kind today: no gNMI, UFM, SNMP or ping. NetBox records for sys4-glo1 have no primary or OOB IP and no telemetry tags (Linear OBS-681).",
         "The probes stay on so the page turns live as soon as data appears."
-      ]
+      ],
+      "fabric": "InfiniBand · sys4-glo1 (128 leaf, 72 spine)"
     }
   ]
 }

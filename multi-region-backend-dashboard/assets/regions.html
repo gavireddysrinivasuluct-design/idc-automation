@@ -191,7 +191,8 @@ function regionPage(site, force, quiet){
 
 function links(r){
   const g = (r.grafana_dashboards || []).map(([t, p]) => `<a class="btn" target="_blank" rel="noopener" href="${esc(CONFIG.grafana_url + p)}">${esc(t)} ↗</a>`).join("");
-  const native = r.topology_dashboard ? `<a class="btn" target="_blank" rel="noopener" href="${esc(r.topology_dashboard)}">Open ${esc(r.name)} fabric dashboard separately ↗</a>` : "";
+  const url = r.topology_dashboard || (r.fabric_view ? "/f/" + r.site : "");
+  const native = url ? `<a class="btn" target="_blank" rel="noopener" href="${esc(url)}">Open ${esc(r.name)} fabric dashboard separately ↗</a>` : "";
   $("#links").innerHTML = native + g;
 }
 
@@ -199,7 +200,7 @@ function links(r){
    exactly as before: same topology, data model and controls. Live issues (nsr) is the
    second view. Regions without one open on Live issues. */
 function views(r){
-  const has = !!r.topology_dashboard;
+  const has = !!(r.topology_dashboard || r.fabric_view);
   const want = location.hash.slice(1) || (has ? "fabric" : "issues");
   const view = has && want === "fabric" ? "fabric" : "issues";
   $("#views").innerHTML = (has ? `<a href="#fabric" data-view="fabric" class="${view === "fabric" ? "on" : ""}">Fabric dashboard (topology, cabling, sync)</a>` : "") +
@@ -207,7 +208,12 @@ function views(r){
   $("#views").onclick = e => { const a = e.target.closest("[data-view]"); if(!a) return; e.preventDefault(); history.replaceState({}, "", "#" + a.dataset.view); views(r); };
   $("#v-issues").hidden = view !== "issues";
   $("#v-fabric").hidden = view !== "fabric";
-  if(view === "fabric" && !$("#v-fabric").dataset.loaded){
+  if(view === "fabric" && !r.topology_dashboard && !$("#v-fabric").dataset.loaded){
+    // Generic spine · leaf · rail view served by this service (NetBox + UFM via nsr).
+    $("#v-fabric").dataset.loaded = "1";
+    $("#v-fabric").innerHTML = `<iframe class="topo native" src="/f/${esc(r.site)}" title="${esc(r.name)} fabric"></iframe>`;
+  }
+  if(view === "fabric" && r.topology_dashboard && !$("#v-fabric").dataset.loaded){
     $("#v-fabric").dataset.loaded = "1";
     $("#v-fabric").innerHTML = `<p class="loading">Connecting to the ${esc(r.name)} fabric dashboard…</p>`;
     getJSON("/api/topology/" + r.site).then(t => {
