@@ -74,13 +74,15 @@ For cabling and topology, also start the site dashboards: ICE2 on 8765
 | ICE2 | ✓ 100 | ✓ alert-primary-hf (Mimir) | ✓ | ✓ | ✓ + HA role | UFM event log |
 | LON14 | ✓ 100 | ✓ **lon14-victoriametrics only** | ✓ | ✓ | ✓ + HA role | UFM event log |
 | OSL1 | ✗ | ✓ alert-primary-hf, 48 switches | ✓ mlnx_health 48/48 | ✓ 48/48 | ufm0 up, ufm1 down | UFM event log, switch syslog |
-| STA1 | ✗ | ✓ **job `ufm-mgmt`** (cset `nscale`), 96 switches, no BER/temp | Nokia sys1 only; QM9700 pending (PR #1041) | ✓ 96 | down since 24 Sep (ITSM-3588) | UFM event log, switch syslog (by mgmt IP) |
+| STA1 | ✗ | ✓ **job `ufm-mgmt`** (cset `nscale`), 97 switches, 8,328 ports (verified 12 Oct) | 24 Nokia sys1 (incl. chassis health); QM9700 pending (PR #1041) | ✓ 120 (96 QM9700 + 24 Nokia) | down since 24 Sep (ITSM-3588) | UFM event log, switch syslog |
 | GLO1 | ✗ | ✗ | ✗ | ✗ | ✗ | — (OBS-681) |
 
 So for **STA1 and OSL1** the live sources beyond gNMI are: UFM telemetry, blackbox ping,
 UFM server monitoring, the UFM event log and switch syslog in Loki, SNMP (OSL1 fully,
-STA1 Nokia only) and PagerDuty. STA1's UFM job uses different labels from the other sites,
-so its selector is the one most likely to need adjusting. Check it with:
+STA1 Nokia only) and PagerDuty. STA1's UFM data comes from a different job (`ufm-mgmt`)
+but carries the same labels, verified with `discover.py` on 12 Oct 2026. STA1 also has
+per-switch exporter jobs (`scrape_swi638..705`), PDU, cooler and IPMI/Redfish telemetry,
+not used here. Re-check any site with:
 
 ```bash
 python3 discover.py sta1        # or osl1, or --all

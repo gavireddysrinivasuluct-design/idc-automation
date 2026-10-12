@@ -100,15 +100,15 @@
       "fabric": "InfiniBand NDR · QM9700 (sys2) + Nokia (sys1)",
       "clusters": "sys2-sta1, sys1-sta1",
       "cloud_regions": ["no-sys2-sta1", "no-sta1"],
-      "switches_expected": 96,
+      "switches_expected": 120,
       "match": ["sta1", "stavanger"],
       "sources": {
         "ufm": {"datasource": "mimir", "selector": "job=\"ufm-mgmt\",cloud_region=\"no-sys2-sta1\",port_id!=\"\""},
         "snmp": {"selector": "cloud_region=~\"no-sta1|no-sys2-sta1\",job=~\"snmp.*|netboxSnmp.*\",role=~\"be-(leaf|spine)-switch\""},
-        "ping": {"selector": "cloud_region=\"no-sys2-sta1\",job=\"blackbox-mgmt-ping\",role=~\"be-(leaf|spine)-switch\""},
+        "ping": {"selector": "cloud_region=~\"no-sys2-sta1|no-sta1\",job=\"blackbox-mgmt-ping\",role=~\"be-(leaf|spine)-switch\""},
         "ufm_server": {"datasource": "mimir", "selector": "job=\"ufm-system-monitoring\",cloud_region=\"no-sys2-sta1\""},
         "ufm_events": {"logql": "{host_name=~\"sys2-sta1-p-phy-ufm[0-9]+\"}"},
-        "syslog": {"logql": "{cloud_region=\"no-sys2-sta1\", service_name=\"syslog\"}"}
+        "syslog": {"logql": "{cloud_region=\"no-sys2-sta1\", service_name=\"syslog\"} | hostname=~\"(ifs|swi)[0-9]+|10[.]40[.]37[.][0-9]+\""}
       },
       "topology_dashboard": null,
       "grafana_dashboards": [
@@ -116,11 +116,12 @@
       ],
       "notes": [
         "No gNMI at STA1 (gnmi tag not applied).",
-        "UFM telemetry comes from a different job than other sites: job=ufm-mgmt (cset 'nscale' on the VIP 10.40.40.54:8080), 96 switches; counters and port state only, no BER or temperature (LF) families. Label names are unverified: run `python3 discover.py sta1`.",
+        "UFM telemetry comes from a different job than other sites: job=ufm-mgmt (cset 'nscale' on the VIP 10.40.40.54:8080). Verified 2026-10-12 with discover.py: 97 switches, 8,328 ports, same labels as other sites (device_name, port_id, level), including eeber and infiniband_CBW.",
         "UFM server monitoring (ufm-system-monitoring) has been down since 2026-09-24 16:53 UTC, after the UFM password change (ITSM-3588).",
-        "Blackbox ping covers all 96 QM9700 switches (64 leaf, 32 spine), scraped from the GLO1 collector.",
-        "QM9700 SNMP is not live yet (PR #1041 / #242 open); SNMP if_mib exists only for the 16 Nokia sys1-sta1 leaves (cloud_region no-sta1).",
-        "MLNX-OS syslog from the QM9700s reaches Loki as an unlabelled stream {cloud_region=no-sys2-sta1, service_name=syslog}; the switch is identified only by management IP.",
+        "Blackbox ping: 96 QM9700 switches (sys2-sta1) plus 24 Nokia (sys1-sta1, cloud_region no-sta1) = 120 backend switches.",
+        "SNMP: 24 Nokia sys1-sta1 switches (16 leaf, 8 spine) via snmp-exporter, with ifOperStatus, ifHCInOctets and Nokia chassis health (tmnx temperature, fan, PSU). QM9700 SNMP is not live yet (PR #1041 / #242).",
+        "Other STA1 sources seen in Mimir: per-switch exporter jobs scrape_swi638..swi705 (ports 9100 and 8001, 1 s to 60 s), PDU and rear-door-cooler SNMP, modbus, IPMI/Redfish for GPU nodes.",
+        "Switch syslog reaches Loki in {cloud_region=no-sys2-sta1, service_name=syslog}, mixed with server syslog; the dashboard keeps lines whose hostname is ifs*/swi* or a 10.40.37.x switch management IP.",
         "UFM event-log alerts (ufm-ev-*) do fire for STA1 and page BackEnd Network (e.g. BENETOPS-25, BENETOPS-50)."
       ]
     },

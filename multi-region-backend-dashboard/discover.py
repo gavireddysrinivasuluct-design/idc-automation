@@ -48,7 +48,7 @@ def table(rows: list[dict], labels: list[str]) -> list[str]:
 def discover(nsr: Nsr, config: dict, region: dict) -> list[str]:
     cr = checks.cloud_regex(region)
     lines = ["# %s (%s) — cloud_region =~ %s — %s UTC" % (
-        region["name"], region.get("location", ""), cr, datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M"))]
+        region["name"], region.get("location", ""), cr, datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M"))]
 
     def ask(title, promql, labels, uid="infra-mimir"):
         lines.append("\n## %s   [%s]\n    %s" % (title, uid, promql))
@@ -126,7 +126,7 @@ def main(argv=None) -> int:
         lines = discover(nsr, config, by_site[site])
         text = "\n".join(lines) + "\n"
         print(text)
-        path = out_dir / ("%s-%s.txt" % (site, datetime.datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")))
+        path = out_dir / ("%s-%s.txt" % (site, datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")))
         path.write_text(text, encoding="utf-8")
         print("Saved %s" % path, file=sys.stderr)
     return 0
