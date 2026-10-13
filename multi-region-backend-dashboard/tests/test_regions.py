@@ -408,6 +408,13 @@ ThreadingHTTPServer(("127.0.0.1", port), H).serve_forever()
         self.assertEqual(status, 200)
         self.assertIn(b'href="/ice2/traffic-paths.html"', page)
         self.assertIn(b'var B="/ice2"', page, "fetch shim prefixes /api/ calls")
+        self.assertNotIn(b"nsr-live", page, "the nsr panel goes only on the main dashboard page (id=rail)")
+        page = engines.rewrite_html('<html><head></head><body><div class="rail" id="rail"></div></body></html>', "ice2")
+        self.assertIn('data-site="ice2" data-after="#rail"', page)
+        self.assertIn('<script src="/assets/nsr_panel.js">', page, "added after the prefix rewrite, so served by this service")
+        status, js = self.req("GET", "/assets/nsr_panel.js")
+        self.assertEqual(status, 200)
+        self.assertIn(b"#2dd4bf", js)
         self.assertEqual(self.req("GET", "/ice2")[0], 302)
 
     def test_api_and_post_pass_the_engine_guards(self):

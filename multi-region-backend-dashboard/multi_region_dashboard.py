@@ -158,6 +158,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self.respond(HTTPStatus.OK, self.app.section(site, section, force))
             if parts[:2] == ["api", "topology"] and len(parts) == 3 and parts[2] in self.app.by_site:
                 return self.respond(HTTPStatus.OK, self.app.topology(parts[2]))
+            if path == "/assets/nsr_panel.js":
+                return self.respond(HTTPStatus.OK, (ROOT / "assets" / "nsr_panel.js").read_text(encoding="utf-8"),
+                                    "text/javascript; charset=utf-8")
             if parts[0] in self.app.engines:
                 if len(parts) == 1 and not url.path.endswith("/"):
                     self.send_response(HTTPStatus.FOUND)

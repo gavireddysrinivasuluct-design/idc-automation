@@ -85,6 +85,18 @@ The Teleport login is optional; empty uses your `tsh` default, as plain `tsh ssh
   matrix, the canvas with live status and miscabling, the inspector, **Cabling vs UFM**, the
   scalable units and the design checks.
 
+### nsr metrics inside every fabric page (teal)
+
+Every fabric page (the ICE2 and LON14 engines too) carries the nsr live metrics directly
+under its own stat strip, in the same design but always in **teal** and tagged **nsr**, so
+they are never mistaken for NetBox / UFM / switch data: a teal stat strip (ping, switches in
+UFM telemetry, ports not Active, link-downs and errors in 15 min, UFM servers, gNMI sessions,
+PSU/fan problems, SNMP, open PagerDuty incidents), then **Live issues (nsr)** ranked with
+the affected switches and ports, UFM event-log lines and the incidents. It refreshes every
+60 s or with its own ⟳ Refresh. In the NetBox-first view the nsr-derived values on the page
+(per-cable live state, *Live status (nsr)* chip, *UFM · nsr* and *Ping · nsr* in the
+inspector) are teal as well.
+
 ### How the NetBox-first view reads the fabric
 
 - Rails are the GPU NIC names used across the fabric (`ib0..ib7`, `mlx5_0..3`), in order; a

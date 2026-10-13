@@ -99,9 +99,17 @@ SHIM = ('<script>(function(){var B="/%s";var F=window.fetch;window.fetch=functio
         'return F.call(this,u,o)};})();</script>')
 
 
+NSR_PANEL = ('<div id="nsr-live" data-site="%s" data-after="#rail"></div>'
+             '<script src="/assets/nsr_panel.js"></script>')
+
+
 def rewrite_html(html: str, site: str) -> str:
-    """Make an engine page work under /<site>/: prefix root-relative links and fetches."""
+    """Make an engine page work under /<site>/: prefix root-relative links and fetches, and add
+    the nsr live metrics (teal, under the page's own stat strip) to its main dashboard page."""
     html = re.sub(r'(href|src|action)="/(?!/)', r'\1="/%s/' % site, html)
+    if 'id="rail"' in html:
+        panel = NSR_PANEL % site
+        html = html.replace("</body>", panel + "</body>", 1) if "</body>" in html else html + panel
     shim = SHIM % site
     return html.replace("<head>", "<head>" + shim, 1) if "<head>" in html else shim + html
 
