@@ -23,11 +23,21 @@ ROOT = HERE.parent
 sys.path.insert(0, str(ROOT))
 
 import checks  # noqa: E402
+import engines  # noqa: E402
 import fabric  # noqa: E402
+import netbox_source  # noqa: E402
+import ufm_direct  # noqa: E402
 import multi_region_dashboard as dash  # noqa: E402
 from nsr_client import Nsr, NsrError  # noqa: E402
 
 FAKE = str(HERE / "fake_nsr.py")
+sys.path.insert(0, str(HERE))
+os.environ["NETBOX_TOKEN"] = "test-token"  # the fake NetBox only checks that a token is sent
+import fake_netbox  # noqa: E402
+import fake_nsr  # noqa: E402
+NB_SERVER = fake_netbox.serve(0)
+threading.Thread(target=NB_SERVER.serve_forever, daemon=True).start()
+NB_URL = "http://127.0.0.1:%d" % NB_SERVER.server_address[1]
 CONFIG = dash.load_config(ROOT / "regions.json")
 
 
@@ -163,7 +173,7 @@ class Sections(unittest.TestCase):
 class FabricModel(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.snap = fabric.pull_netbox(Nsr(FAKE), region("osl1")["fabric_view"])
+        cls.snap = netbox_source.pull_fabric(netbox_source.NetBox(NB_URL), region("osl1")["fabric_view"])
         cls.topo = fabric.build_topology(cls.snap)
 
     def test_port_numbers(self):
@@ -197,9 +207,39 @@ class FabricModel(unittest.TestCase):
         self.assertEqual(live["switches"]["sys2-osl1-p-ifs-bel3"]["nonactive"], 1)
 
     def test_missing_fabric_is_explained(self):
-        with self.assertRaises(NsrError) as ctx:
-            fabric.pull_netbox(Nsr(FAKE), region("sta1")["fabric_view"])
+        with self.assertRaises(netbox_source.NetBoxError) as ctx:
+            netbox_source.pull_fabric(netbox_source.NetBox(NB_URL), region("sta1")["fabric_view"])
         self.assertIn("sys2-sta1", str(ctx.exception))
+
+    def test_netbox_is_read_directly_not_through_nsr(self):
+        self.assertTrue(self.snap["source"].startswith("netbox http://127.0.0.1"))
+        self.assertNotIn(("netbox", "connections"), __import__("nsr_client").ALLOWED)
+
+    def test_ufm_links_vs_netbox(self):
+        leaves = fake_nsr.OSL1_LEAVES
+        records = []
+        for c in fake_nsr.osl1_cables():
+            m = __import__("re").match(r"sw(\d+)p(\d+)$", c["interface"])
+            port = 2 * (int(m.group(1)) - 1) + int(m.group(2))
+            peer = c["remote_device"].split("-")[-1]          # UFM names hosts without the site prefix
+            if c["device"] == leaves[0] and port == 3:
+                peer = "gpu011"                              # the cable at bel0 port 3 goes elsewhere
+            records.append({"source_port_node_description": "%s:%s" % (c["device"], c["interface"]), "source_port": port,
+                            "destination_port_node_description": "%s %s" % (peer, c["remote_interface"]), "destination_port": 1})
+        records.append({"source_port_node_description": leaves[1] + ":sw30p1", "source_port": 59,
+                        "destination_port_node_description": "gpu099 mlx5_0", "destination_port": 1})
+        switches = {s["name"] for s in self.topo["spines"]} | {l["name"] for l in self.topo["leaves"]}
+        result = fabric.compare_with_ufm(self.topo, ufm_direct.links_by_switch_port(records, switches))
+        k = result["counts"]
+        self.assertEqual((k["miscabled"], k["not_in_netbox"]), (1, 1))
+        self.assertEqual(k["match"], 223, "leaf-spine, GPU and the UFM server cable")
+        bad = result["rows"][0]
+        self.assertEqual((bad["status"], bad["leaf"], bad["actual"]), ("miscabled", leaves[0], "gpu011"))
+
+    def test_same_device_spellings(self):
+        self.assertTrue(ufm_direct.same_device("sys2-osl1-p-phy-gpu012", "gpu012"))
+        self.assertTrue(ufm_direct.same_device("ifs398", "ifs398"))
+        self.assertFalse(ufm_direct.same_device("sys2-osl1-p-phy-gpu012", "gpu013"))
 
 
 class Http(unittest.TestCase):
@@ -207,7 +247,7 @@ class Http(unittest.TestCase):
     def setUpClass(cls):
         import tempfile
         dash.CACHE_DIR = Path(tempfile.mkdtemp(prefix="fabric-cache-"))
-        dash.Handler.app = dash.App(CONFIG, Nsr(FAKE), ttl=60)
+        dash.Handler.app = dash.App(CONFIG, Nsr(FAKE), ttl=60, netbox_url=NB_URL, with_engines=False)
         cls.server = ThreadingHTTPServer(("127.0.0.1", 0), dash.Handler)
         cls.port = cls.server.server_address[1]
         dash.Handler.port = cls.port
@@ -254,7 +294,7 @@ class Http(unittest.TestCase):
     def test_fabric_view_flow(self):
         import time as _t
         self.assertEqual(self.get("/f/osl1")[0], 200)
-        self.assertEqual(self.get("/api/fabric/ice2")[0], 404, "ICE2 keeps its own dashboard")
+        self.assertEqual(self.get("/api/fabric/ice2")[0], 404, "ICE2 keeps its own engine")
         self.assertEqual(self.post("/api/fabric/osl1/netbox", origin="https://evil.example")[0], 403)
         self.assertEqual(self.post("/api/fabric/osl1/netbox")[0], 202)
         for _ in range(50):
@@ -266,6 +306,7 @@ class Http(unittest.TestCase):
         view = json.loads(self.get("/api/fabric/osl1")[1])
         self.assertEqual(view["topology"]["rails"], 8)
         self.assertEqual(view["live"]["coverage"]["matched"], 223)
+        self.assertIsNone(view["cabling"], "no UFM links fetched yet")
 
     def test_cache_reuses_answers(self):
         app = dash.Handler.app
@@ -279,3 +320,84 @@ class Http(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class EngineProxy(unittest.TestCase):
+    """The single service starts an engine and serves it under /<site>/ with its guards intact."""
+
+    FAKE_ENGINE = """
+import json, sys
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+port = int(sys.argv[sys.argv.index("--port") + 1])
+class H(BaseHTTPRequestHandler):
+    def log_message(self, *a): pass
+    def ok(self):
+        return self.headers.get("Host") == "127.0.0.1:%d" % port
+    def send(self, code, body, ctype="application/json"):
+        data = body.encode(); self.send_response(code); self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data))); self.end_headers(); self.wfile.write(data)
+    def do_GET(self):
+        if not self.ok(): return self.send(403, "{}")
+        if self.path == "/api/health": return self.send(200, json.dumps({"ok": True}))
+        if self.path == "/": return self.send(200, '<html><head></head><body><a href="/traffic-paths.html">t</a><script>fetch("/api/live")</script></body></html>', "text/html")
+        return self.send(200, json.dumps({"path": self.path}))
+    def do_POST(self):
+        origin = self.headers.get("Origin")
+        if not self.ok() or (origin and origin != "http://127.0.0.1:%d" % port): return self.send(403, "{}")
+        n = int(self.headers.get("Content-Length") or 0)
+        self.send(200, json.dumps({"posted": self.rfile.read(n).decode(), "csrf": self.headers.get("X-LON14-CSRF")}))
+ThreadingHTTPServer(("127.0.0.1", port), H).serve_forever()
+"""
+
+    @classmethod
+    def setUpClass(cls):
+        import socket
+        import tempfile
+        root = Path(tempfile.mkdtemp(prefix="engine-"))
+        (root / "eng" / "app").mkdir(parents=True)
+        (root / "eng" / "app" / "netbox_live_sync.py").write_text(cls.FAKE_ENGINE)
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            free = sock.getsockname()[1]
+        cls.engine = engines.Engine("ice2", {"dir": "eng", "port": free, "profile": "/nonexistent"}, root, NB_URL, root)
+        cls.engine.start()
+        app = dash.App(CONFIG, Nsr(FAKE), ttl=60, netbox_url=NB_URL, with_engines=False)
+        app.engines = {"ice2": cls.engine}
+        dash.Handler.app = app
+        cls.server = ThreadingHTTPServer(("127.0.0.1", 0), dash.Handler)
+        cls.port = cls.server.server_address[1]
+        dash.Handler.port = cls.port
+        threading.Thread(target=cls.server.serve_forever, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.engine.stop()
+
+    def req(self, method, path, body=None, headers=None):
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=30)
+        conn.request(method, path, body=body, headers={"Host": "127.0.0.1:%d" % self.port, **(headers or {})})
+        resp = conn.getresponse()
+        data = resp.read()
+        conn.close()
+        return resp.status, data
+
+    def test_engine_started_and_page_rewritten(self):
+        self.assertTrue(self.engine.status()["running"])
+        status, page = self.req("GET", "/ice2/")
+        self.assertEqual(status, 200)
+        self.assertIn(b'href="/ice2/traffic-paths.html"', page)
+        self.assertIn(b'var B="/ice2"', page, "fetch shim prefixes /api/ calls")
+        self.assertEqual(self.req("GET", "/ice2")[0], 302)
+
+    def test_api_and_post_pass_the_engine_guards(self):
+        self.assertEqual(json.loads(self.req("GET", "/ice2/api/live?x=1")[1])["path"], "/api/live?x=1")
+        status, body = self.req("POST", "/ice2/api/sync", body=b"{}", headers={
+            "Origin": "http://127.0.0.1:%d" % self.port, "X-LON14-CSRF": "tok", "Content-Type": "application/json"})
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body), {"posted": "{}", "csrf": "tok"})
+        self.assertEqual(self.req("POST", "/ice2/api/sync", headers={"Origin": "https://evil.example"})[0], 403)
+
+    def test_region_config_marks_engines(self):
+        cfg = json.loads(self.req("GET", "/api/config")[1])
+        self.assertTrue(next(r for r in cfg["regions"] if r["site"] == "ice2")["engine"])

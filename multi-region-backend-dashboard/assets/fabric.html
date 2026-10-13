@@ -94,7 +94,7 @@ const num = v => v == null ? "—" : Number(v).toLocaleString();
 const RAIL = ["#39c6e3","#7ee081","#f6c35b","#ff6fae","#a98bff","#ff8f4d","#2dd4bf","#ff5e78"];
 const rc = r => r ? RAIL[(r - 1) % RAIL.length] : "#5b6d86";
 const site = (location.pathname.match(/^\/f\/([a-z0-9-]+)/i) || [])[1];
-let D = null, sel = null, layers = {mesh:true, rails:true, live:true}, poll = null;
+let D = null, sel = null, layers = {mesh:true, rails:true, live:true, mis:true}, poll = null;
 
 function ago(t){ if(!t) return "never"; const m = Math.round((Date.now()/1000 - t)/60); return m < 1 ? "just now" : m < 120 ? m + " min ago" : Math.round(m/60) + " h ago"; }
 function when(t){ return t ? new Date(t*1000).toLocaleString([], {day:"2-digit", month:"short", hour:"2-digit", minute:"2-digit"}) : "—"; }
@@ -105,16 +105,22 @@ async function load(force){
   if(!r.ok){ $("#app").innerHTML = `<div class="notice">${esc(D.error || r.status)}</div>`; return; }
   render();
 }
-async function refreshNetbox(){
-  const b = $("#nb"); b.disabled = true;
-  await fetch(`/api/fabric/${site}/netbox`, {method:"POST", headers:{"X-Requested-With":"fabric"}});
+/* kind = "netbox" (expected topology, direct NetBox) or "ufm" (actual links, direct UFM REST) */
+async function runJob(kind){
+  const b = $(kind === "ufm" ? "#uf" : "#nb"); if(b) b.disabled = true;
+  const label = kind === "ufm" ? "Fetch from UFM" : "NetBox refresh";
+  const r = await fetch(`/api/fabric/${site}/${kind}`, {method:"POST", headers:{"X-Requested-With":"fabric"}});
+  if(!r.ok){ const e = await r.json().catch(() => ({})); $("#job").textContent = "· " + label + ": " + (e.error || r.status); if(b) b.disabled = false; return; }
   clearInterval(poll);
   poll = setInterval(async () => {
-    const j = await (await fetch(`/api/fabric/${site}/netbox`, {cache:"no-store"})).json();
-    $("#job").textContent = j.state === "running" ? "· " + j.step + "…" : (j.state === "error" ? "· NetBox refresh failed: " + j.error : "· " + (j.step || ""));
-    if(j.state !== "running"){ clearInterval(poll); load(false); }
+    const j = await (await fetch(`/api/fabric/${site}/${kind}`, {cache:"no-store"})).json();
+    $("#job").innerHTML = j.state === "running" ? "· " + esc(j.step) + "…" : (j.state === "error" ? `· <span style="color:var(--red)">${esc(label)} failed: ${esc(j.error)}</span> <span class="faint">${esc(j.hint || "")}</span>` : "· " + esc(j.step || ""));
+    if(j.state !== "running"){ clearInterval(poll); if(j.state === "done") load(false); else if(b) b.disabled = false; }
   }, 1500);
 }
+const refreshNetbox = () => runJob("netbox");
+/* NetBox (expected) vs UFM links (actual), keyed by leaf|port */
+function misKey(leaf, port){ const c = D.cabling; return c ? c.rows.find(r => r.leaf === leaf && String(r.port) === String(port) && r.status === "miscabled") : null; }
 
 /* ---------- live state helpers ---------- */
 function portLive(sw, p){ if(!D.live || p == null) return null; return D.live.ports[sw + "|" + p] || null; }
@@ -126,6 +132,7 @@ function linkState(sw, p){
   if(x.errors) return {cls:"warn", text:`errors ${num(x.errors)}`};
   return {cls:"ok", text:"Active"};
 }
+function misState(leaf, port){ const m = misKey(leaf, port); return m ? {cls:"bad", text:"UFM: " + m.actual + " " + (m.actual_port || "")} : null; }
 function swLive(name){ return (D.live && D.live.switches[name]) || null; }
 
 /* ---------- page ---------- */
@@ -137,9 +144,9 @@ function render(){
     <div class="meta">${T ? `${num(T.uplinks.length + T.nodes.reduce((a,n)=>a+n.links.length,0))} fabric cables<br>${num(T.uplinks.length)} spine · ${num(T.nodes.reduce((a,n)=>a+n.links.length,0))} GPU<br>` : ""}
     <a href="/r/${esc(site)}#issues" target="_top">Live issues ↗</a> <a href="/" target="_top">All regions</a></div></header>`;
   if(!T){
-    const j = D.job;
+    const j = (D.jobs || {}).netbox;
     $("#app").innerHTML = head + `<div class="panel empty-state"><h2>No NetBox snapshot for ${esc(D.name)} yet</h2>
-      <p>The fabric is drawn from NetBox cabling (read through nsr) with live UFM state on top. Take the first snapshot; it reads every backend leaf's cables and takes a minute or two.</p>
+      <p>The fabric is drawn from NetBox first: every backend leaf's cables, read directly through the local NetBox proxy (the same read-only token as the ICE2 dashboard). UFM's own link list is compared with it, and UFM telemetry adds live state. Take the first snapshot; it takes a minute or two.</p>
       <button class="btn go" id="nb">Read ${esc(D.name)} from NetBox</button> <span id="job" class="muted">${j && j.state === "error" ? "· last attempt failed: " + esc(j.error) : ""}</span></div>`;
     $("#nb").onclick = refreshNetbox;
     if(j && j.state === "running") refreshNetbox();
@@ -156,12 +163,13 @@ function render(){
   const perPair = T.spines.length && T.leaves.length ? T.uplinks.length / (T.spines.length * T.leaves.length) : 0;
   const fresh = L.collected_at && (Date.now()/1000 - L.collected_at) < 600;
   const status = !L.ufm ? ["NO LIVE UFM DATA", "#5b6d86"] : (down ? ["LIVE · " + down + " designed links not Active", "#ff5e78"] : ["LIVE · " + reporting + "/" + sws.length + " switches in UFM", "#38d9a0"]);
-  const R = T.rails;
+  const R = T.rails, C = D.cabling;
+  const mis = C ? C.counts.miscabled : null;
 
   $("#app").innerHTML = head + `
   <section class="status"><div class="l1"><i style="background:${status[1]};box-shadow:0 0 10px ${status[1]}"></i><span style="color:${status[1]}">${esc(status[0])}</span></div>
-    <div class="l2">NetBox snapshot: <b>${when(T.netbox_collected_at)}</b> · ${ago(T.netbox_collected_at)} · UFM telemetry: <b>${when(L.collected_at)}</b> · ${ago(L.collected_at)} · cables matched to UFM ports: <b>${num(L.coverage.matched)}/${num(L.coverage.cables)}</b>${L.errors.length ? ` · <span style="color:var(--red)">${L.errors.length} live query error(s): ${esc(L.errors[0].error)}</span>` : ""}</div>
-    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center"><button class="btn" id="nb">Refresh NetBox</button><button class="btn go" id="lv">⟳ Refresh live</button><span id="job" class="muted"></span></div></section>
+    <div class="l2">NetBox (expected): <b>${when(T.netbox_collected_at)}</b> · ${ago(T.netbox_collected_at)} · UFM links (actual): ${C ? `<b>${when(C.collected_at)}</b> · ${ago(C.collected_at)} · ${num(C.links)} links from ${esc(C.host)}` : "<b>not fetched</b>"} · UFM telemetry (nsr): <b>${when(L.collected_at)}</b> · ${ago(L.collected_at)} · cables matched to UFM ports: <b>${num(L.coverage.matched)}/${num(L.coverage.cables)}</b>${L.errors.length ? ` · <span style="color:var(--red)">${L.errors.length} live query error(s): ${esc(L.errors[0].error)}</span>` : ""}</div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center"><button class="btn" id="nb">Refresh NetBox</button><button class="btn" id="uf">⟳ Fetch from UFM</button><button class="btn go" id="lv">⟳ Refresh metrics</button><span id="job" class="muted"></span></div></section>
   <section class="rail">
     <div class="c-s"><b>${T.spines.length}</b><span>spine switches</span></div>
     <div class="c-l"><b>${T.leaves.length}</b><span>leaf switches</span></div>
@@ -172,11 +180,13 @@ function render(){
     <div class="${reporting === sws.length ? "c-ok" : "c-a"}"><b>${reporting} / ${sws.length}</b><span>switches reporting to UFM</span></div>
     <div class="${pinged.length && pingUp < pinged.length ? "c-r" : "c-ok"}"><b>${pinged.length ? pingUp + " / " + pinged.length : "—"}</b><span>switches answering ping</span></div>
     <div class="${down ? "c-r" : "c-ok"}"><b>${L.coverage.matched ? num(active) + " / " + num(L.coverage.matched) : "—"}</b><span>matched links Active${down ? " · " + down + " down" : ""}${flap ? " · " + flap + " flapping/errors" : ""}</span></div>
+    <div class="${mis ? "c-r" : C ? "c-ok" : ""}"><b>${C ? num(mis) : "—"}</b><span>${C ? `miscabled vs NetBox · ${num(C.counts.not_in_ufm)} not seen by UFM · ${num(C.counts.not_in_netbox)} UFM-only` : "miscabling: press Fetch from UFM"}</span></div>
   </section>
   <div class="controls"><div class="chips">
     <button class="chip" data-l="mesh" style="--c:var(--spine)" aria-pressed="${layers.mesh}"><i></i>Spine mesh</button>
     <button class="chip" data-l="rails" style="--c:var(--leaf)" aria-pressed="${layers.rails}"><i></i>GPU rails</button>
-    <button class="chip" data-l="live" style="--c:var(--red)" aria-pressed="${layers.live}"><i></i>Live status</button></div>
+    <button class="chip" data-l="live" style="--c:var(--red)" aria-pressed="${layers.live}"><i></i>Live status</button>
+    <button class="chip" data-l="mis" style="--c:#e879f9" aria-pressed="${layers.mis}"><i></i>Miscabling</button></div>
     <div class="search"><input id="q" placeholder="Search: leaf, spine, GPU node, IP" list="names"><datalist id="names">${sws.concat(T.nodes).map(x => `<option value="${esc(x.name)}">`).join("")}</datalist><button class="btn" id="clear">Clear</button></div></div>
   <section class="panel"><h2>How the rail groups are wired</h2><div class="two">
     <div class="card"><div class="cap">One GPU node, end to end — click any node on the canvas below to load it here</div><div id="e2e"></div></div>
@@ -186,10 +196,12 @@ function render(){
       <li><b>Scalable units</b> group GPU nodes that use the same leaves (a node with one NIC missing or misplaced stays in its SU and is flagged below).</li>
       <li><b>Live</b> state is UFM telemetry for the leaf end of each cable (port matched by number).</li></ul></section>
   <div class="stage"><div class="canvas" id="canvas"></div><aside class="panel inspector" id="insp"></aside></div>
+  <section class="panel"><h2>Cabling vs UFM</h2>${cablingTable(C)}</section>
   <div class="two"><section class="panel"><h2>Scalable units</h2><div class="sus">${T.sus.map(su => `<div><b>${su.name}</b> · ${su.nodes.length} nodes · ${su.nodes.length * R} RDMA cables · leaves ${su.leaves.map(l => esc(short(l))).join(" / ")}</div>`).join("") || "<span class='muted'>No GPU nodes cabled in NetBox.</span>"}</div></section>
     <section class="panel"><h2>Design checks</h2><ul class="checks">${checks(T, L).map(c => `<li class="${c.level}"><i>${c.level === "ok" ? "✓" : "!"}</i><span>${esc(c.text)}</span></li>`).join("")}</ul></section></div>`;
 
   $("#nb").onclick = refreshNetbox;
+  $("#uf").onclick = () => runJob("ufm");
   $("#lv").onclick = () => { $("#lv").disabled = true; load(true); };
   document.querySelectorAll(".chip").forEach(c => c.onclick = () => { layers[c.dataset.l] = !layers[c.dataset.l]; render(); });
   $("#q").onchange = e => pick(e.target.value.trim());
@@ -199,6 +211,13 @@ function render(){
 const leafRail = n => (D.topology.leaves.find(l => l.name === n) || {}).rail;
 const short = n => (D.topology.spines.concat(D.topology.leaves).find(s => s.name === n) || {}).short || n;
 
+function cablingTable(C){
+  if(!C) return `<p class="muted">Press <b>Fetch from UFM</b> to read UFM's live link list directly (REST, through the site's jump host) and compare every NetBox cable with what is really plugged in. One-time setup per site: <code>scripts/configure_site_ufm.sh ${esc(site)}</code>.</p>`;
+  const k = C.counts, lab = {miscabled:["bad","miscabled"], not_in_ufm:["warn","not seen by UFM"], not_in_netbox:["na","UFM only"]};
+  return `<p class="muted" style="margin-top:0">UFM ${esc(C.host)} · ${num(C.links)} links at ${esc(C.at)} · <b style="color:var(--green)">${num(k.match)}</b> NetBox cables match UFM · <b style="color:var(--red)">${num(k.miscabled)}</b> miscabled · <b style="color:var(--amber)">${num(k.not_in_ufm)}</b> not seen by UFM (down, or port numbering differs) · ${num(k.not_in_netbox)} links UFM sees that NetBox lacks${k.unknown_port ? " · " + num(k.unknown_port) + " NetBox ports without a port number" : ""}</p>` +
+    (C.rows.length ? `<div style="max-height:420px;overflow:auto"><table><tr><th>Result</th><th>Leaf</th><th>Port</th><th>Expected (NetBox)</th><th>Actual (UFM)</th><th>Cable</th></tr>${C.rows.map(r => `<tr><td><span class="st ${lab[r.status][0]}">${lab[r.status][1]}</span></td><td class="m"><a href="#" data-pick="${esc(r.leaf)}">${esc(short(r.leaf))}</a></td><td class="m">${esc(r.port)}</td><td class="m">${esc(r.expected || "—")} ${esc(r.expected_port || "")}</td><td class="m">${esc(r.actual || "—")} ${esc(r.actual_port || "")}</td><td class="m">${esc(r.cable ?? "—")}</td></tr>`).join("")}</table></div>${C.truncated ? `<p class="faint">${C.truncated} more not shown.</p>` : ""}` : `<p style="color:var(--green)">Every NetBox cable matches UFM.</p>`);
+}
+document.addEventListener("click", e => { const a = e.target.closest("table [data-pick]"); if(a){ e.preventDefault(); pick(a.dataset.pick); } });
 function checks(T, L){
   const out = [...T.checks];
   if(L.ufm){
@@ -256,6 +275,7 @@ function canvas(T){
   // mesh
   if(layers.mesh) s += `<g stroke="#a98bff" stroke-opacity=".10" stroke-width=".6">${T.uplinks.filter(u => pos[u.spine]).map(u => `<line x1="${pos[u.leaf][0]}" y1="${LY-14}" x2="${pos[u.spine][0]}" y2="${SY+14}"/>`).join("")}</g>`;
   if(layers.live) s += `<g stroke="#ff5e78" stroke-width="1.6" stroke-dasharray="4 3">${T.uplinks.filter(u => pos[u.spine] && linkState(u.leaf, u.leaf_portnum).cls === "bad").map(u => `<line x1="${pos[u.leaf][0]}" y1="${LY-14}" x2="${pos[u.spine][0]}" y2="${SY+14}"/>`).join("")}</g>`;
+  if(layers.mis && D.cabling) s += `<g stroke="#e879f9" stroke-width="2.2">${T.uplinks.filter(u => pos[u.spine] && misKey(u.leaf, u.leaf_port)).map(u => `<line x1="${pos[u.leaf][0]}" y1="${LY-14}" x2="${pos[u.spine][0]}" y2="${SY+14}"/>`).join("")}</g>`;
   s += `<text x="${pad}" y="18" fill="#8b9db6" font-size="11" letter-spacing="2">SPINES · ${sp.length}</text><text x="${pad}" y="${LY-34}" fill="#8b9db6" font-size="11" letter-spacing="2">LEAVES · ${leaves.length} · ${R} RAILS</text>`;
   const dot = n => { const x = L.switches[n]; if(!x) return "#5b6d86"; if(x.ping === 0) return "#ff5e78"; if(x.nonactive) return "#f6a93b"; return x.ports ? "#38d9a0" : "#5b6d86"; };
   sp.forEach(t => { const [x] = pos[t.name]; s += `<g class="sw" data-pick="${esc(t.name)}" style="cursor:pointer"><rect x="${x-sw/2}" y="${SY-14}" width="${sw}" height="28" rx="4" fill="#1a1736" stroke="${sel === t.name ? "#fff" : "#a98bff"}" stroke-width="${sel === t.name ? 2 : 1}"/><text x="${x}" y="${SY+4}" fill="#e7eef7" font-size="${sw < 22 ? 7 : 9}" text-anchor="middle">${esc(t.short.replace(/^\D+/, ""))}</text>${layers.live ? `<circle cx="${x+sw/2-3}" cy="${SY-12}" r="3" fill="${dot(t.name)}"/>` : ""}</g>`; });
@@ -273,7 +293,8 @@ function canvas(T){
       const node = T.nodes.find(x => x.name === n), cx = b.x + 10 + (i % per) * (tw + 3), cy = b.y + 32 + Math.floor(i / per) * (th + 3);
       const states = node.links.map(l => linkState(l.leaf, l.leaf_portnum).cls);
       const misrailed = node.links.some(l => leafRail(l.leaf) && leafRail(l.leaf) !== l.rail);
-      const border = misrailed ? "#ff5e78" : !layers.live ? "#2d4566" : states.includes("bad") ? "#ff5e78" : states.includes("warn") ? "#f6a93b" : node.links.length < R ? "#f6a93b" : "#2d4566";
+      const miscab = layers.mis && D.cabling && node.links.some(l => misKey(l.leaf, l.leaf_port));
+      const border = miscab ? "#e879f9" : misrailed ? "#ff5e78" : !layers.live ? "#2d4566" : states.includes("bad") ? "#ff5e78" : states.includes("warn") ? "#f6a93b" : node.links.length < R ? "#f6a93b" : "#2d4566";
       s += `<g data-pick="${esc(n)}" style="cursor:pointer"><rect x="${cx}" y="${cy}" width="${tw}" height="${th}" rx="2" fill="#132238" stroke="${sel === n ? "#fff" : border}" stroke-width="${sel === n ? 1.8 : 1}"/>`;
       const bwid = (tw - 4) / Math.max(R, 1);
       for(let r = 1; r <= R; r++){ const has = node.links.some(l => l.rail === r); s += `<rect x="${cx + 2 + (r-1)*bwid}" y="${cy + th - 6}" width="${Math.max(1, bwid - .8)}" height="4" fill="${has ? rc(r) : "#2a3850"}"/>`; }
@@ -303,8 +324,8 @@ function inspector(){
     const lv = swLive(sw.name) || {};
     const isSpine = T.spines.includes(sw);
     const links = isSpine ? T.uplinks.filter(u => u.spine === sw.name).map(u => [u.spine_port, short(u.leaf), u.leaf_port, u.cable, linkState(u.leaf, u.leaf_portnum)])
-      : [...T.uplinks.filter(u => u.leaf === sw.name).map(u => [u.leaf_port, short(u.spine), u.spine_port, u.cable, linkState(u.leaf, u.leaf_portnum)]),
-         ...T.nodes.flatMap(n => n.links.filter(l => l.leaf === sw.name).map(l => [l.leaf_port, n.short, l.iface, l.cable, linkState(l.leaf, l.leaf_portnum)]))];
+      : [...T.uplinks.filter(u => u.leaf === sw.name).map(u => [u.leaf_port, short(u.spine), u.spine_port, u.cable, misState(u.leaf, u.leaf_port) || linkState(u.leaf, u.leaf_portnum)]),
+         ...T.nodes.flatMap(n => n.links.filter(l => l.leaf === sw.name).map(l => [l.leaf_port, n.short, l.iface, l.cable, misState(l.leaf, l.leaf_port) || linkState(l.leaf, l.leaf_portnum)]))];
     links.sort((a, b) => (a[4].cls === "ok") - (b[4].cls === "ok"));
     el.innerHTML = `<div class="k">${isSpine ? "Spine" : "Leaf · rail " + (sw.rail || "—") + (sw.su ? " · SU" + sw.su : "")}</div><h3>${esc(sw.short)}</h3>
       <dl class="kv"><dt>NetBox name</dt><dd>${esc(sw.name)}</dd><dt>Model</dt><dd>${esc(sw.model || "—")}</dd><dt>Mgmt IP</dt><dd>${esc(sw.ip || "—")}</dd><dt>Status / rack</dt><dd>${esc(sw.status || "—")} · ${esc(sw.rack || "—")}</dd>
@@ -317,7 +338,7 @@ function inspector(){
   if(node){
     el.innerHTML = `<div class="k">GPU node${node.su ? " · SU" + node.su : ""}</div><h3>${esc(node.name)}</h3>
       <dl class="kv"><dt>RDMA links</dt><dd>${node.links.length} of ${T.rails} rails</dd></dl>
-      <table><tr><th>Rail · NIC</th><th>Leaf</th><th>Leaf port</th><th>Cable</th><th>Live</th></tr>${node.links.map(l => { const s = linkState(l.leaf, l.leaf_portnum), lr = leafRail(l.leaf), wrong = lr && lr !== l.rail; return `<tr><td class="m"><span style="color:${rc(l.rail)}">■</span> ${l.rail} · ${esc(l.iface)}</td><td class="m">${esc(short(l.leaf))}${wrong ? ` <span class="st bad">rail ${lr} leaf</span>` : ""}</td><td class="m">${esc(l.leaf_port)}</td><td class="m">${esc(l.cable ?? "—")}</td><td><span class="st ${s.cls}">${esc(s.text)}</span></td></tr>`; }).join("")}</table>`;
+      <table><tr><th>Rail · NIC</th><th>Leaf</th><th>Leaf port</th><th>Cable</th><th>Live</th></tr>${node.links.map(l => { const s = misState(l.leaf, l.leaf_port) || linkState(l.leaf, l.leaf_portnum), lr = leafRail(l.leaf), wrong = lr && lr !== l.rail; return `<tr><td class="m"><span style="color:${rc(l.rail)}">■</span> ${l.rail} · ${esc(l.iface)}</td><td class="m">${esc(short(l.leaf))}${wrong ? ` <span class="st bad">rail ${lr} leaf</span>` : ""}</td><td class="m">${esc(l.leaf_port)}</td><td class="m">${esc(l.cable ?? "—")}</td><td><span class="st ${s.cls}">${esc(s.text)}</span></td></tr>`; }).join("")}</table>`;
   }
 }
 function e2e(T){

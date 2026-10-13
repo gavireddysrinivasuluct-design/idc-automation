@@ -75,7 +75,7 @@ details.q summary{cursor:pointer;color:var(--faint);font-size:11.5px;margin-top:
 </head>
 <body>
 <header>
-  <h1>Backend regions <span>· live fabric issues</span></h1>
+  <h1>Backend fabric <span>· all regions</span></h1>
   <div class="bar">
     <span id="stamp">Loading…</span>
     <label class="toggle"><input type="checkbox" id="auto" checked> auto-refresh 60 s</label>
@@ -191,7 +191,7 @@ function regionPage(site, force, quiet){
 
 function links(r){
   const g = (r.grafana_dashboards || []).map(([t, p]) => `<a class="btn" target="_blank" rel="noopener" href="${esc(CONFIG.grafana_url + p)}">${esc(t)} ↗</a>`).join("");
-  const url = r.topology_dashboard || (r.fabric_view ? "/f/" + r.site : "");
+  const url = r.engine ? "/" + r.site + "/" : (r.fabric_view ? "/f/" + r.site : "");
   const native = url ? `<a class="btn" target="_blank" rel="noopener" href="${esc(url)}">Open ${esc(r.name)} fabric dashboard separately ↗</a>` : "";
   $("#links").innerHTML = native + g;
 }
@@ -200,7 +200,7 @@ function links(r){
    exactly as before: same topology, data model and controls. Live issues (nsr) is the
    second view. Regions without one open on Live issues. */
 function views(r){
-  const has = !!(r.topology_dashboard || r.fabric_view);
+  const has = !!(r.engine || r.fabric_view);
   const want = location.hash.slice(1) || (has ? "fabric" : "issues");
   const view = has && want === "fabric" ? "fabric" : "issues";
   $("#views").innerHTML = (has ? `<a href="#fabric" data-view="fabric" class="${view === "fabric" ? "on" : ""}">Fabric dashboard (topology, cabling, sync)</a>` : "") +
@@ -208,20 +208,20 @@ function views(r){
   $("#views").onclick = e => { const a = e.target.closest("[data-view]"); if(!a) return; e.preventDefault(); history.replaceState({}, "", "#" + a.dataset.view); views(r); };
   $("#v-issues").hidden = view !== "issues";
   $("#v-fabric").hidden = view !== "fabric";
-  if(view === "fabric" && !r.topology_dashboard && !$("#v-fabric").dataset.loaded){
-    // Generic spine · leaf · rail view served by this service (NetBox + UFM via nsr).
+  if(view === "fabric" && !r.engine && !$("#v-fabric").dataset.loaded){
+    // NetBox-first spine · leaf · rail view served by this service (NetBox + UFM direct, metrics via nsr).
     $("#v-fabric").dataset.loaded = "1";
     $("#v-fabric").innerHTML = `<iframe class="topo native" src="/f/${esc(r.site)}" title="${esc(r.name)} fabric"></iframe>`;
   }
-  if(view === "fabric" && r.topology_dashboard && !$("#v-fabric").dataset.loaded){
+  if(view === "fabric" && r.engine && !$("#v-fabric").dataset.loaded){
     $("#v-fabric").dataset.loaded = "1";
     $("#v-fabric").innerHTML = `<p class="loading">Connecting to the ${esc(r.name)} fabric dashboard…</p>`;
     getJSON("/api/topology/" + r.site).then(t => {
       if(current !== r.site) return;
       $("#v-fabric").innerHTML = t.running
         ? `<iframe class="topo native" src="${esc(t.url)}" title="${esc(r.name)} fabric dashboard"></iframe>`
-        : `<div class="notice">The ${esc(r.name)} fabric dashboard (${esc(t.url)}) is not running. Start it in a terminal, then reload this page:<code class="cmd">cd ~/Downloads/Tools/idc-automation/${esc(r.site)}-netbox-dashboard\n./scripts/open_dashboard.command</code>Live issues from nsr are in the other tab.</div>`;
-      if(!t.running) delete $("#v-fabric").dataset.loaded;
+        : `<div class="notice">The ${esc(r.name)} engine is ${t.error ? "not running: " + esc(t.error) : "starting…"} It runs from <code>${esc(t.dir)}</code> on internal port ${esc(t.port)}; its log is <code>${esc(t.log)}</code>. This page retries every 5 s. Live issues from nsr are in the other tab.</div>`;
+      if(!t.running){ delete $("#v-fabric").dataset.loaded; setTimeout(() => { if(current === r.site && location.hash !== "#issues") views(r); }, 5000); }
     }).catch(e => { $("#v-fabric").innerHTML = `<div class="notice err">${esc(e.message)}</div>`; delete $("#v-fabric").dataset.loaded; });
   }
 }

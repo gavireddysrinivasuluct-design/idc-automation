@@ -397,7 +397,7 @@ def run_overview(nsr: Nsr, config: dict, incidents: dict) -> dict:
         else:
             status = "healthy"
         out.append({**{k: region.get(k) for k in ("site", "name", "location", "fabric", "clusters",
-                                                     "switches_expected", "topology_dashboard")},
+                                                     "switches_expected")},
                     "metrics": m, "coverage": coverage, "issues": issues, "status": status,
                     "incidents": site_inc.get("incidents", [])[:5]})
     return {"regions": out, "errors": errors, "queries": len(queries), "collected_at": time.time(),

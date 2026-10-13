@@ -1,34 +1,33 @@
 #!/usr/bin/env python3
-"""Backend regions dashboard: pick a region, see its live fabric issues.
+"""Backend fabric dashboard: one read-only service for every backend region.
 
-Read-only and lightweight. Everything live comes through the `nsr` CLI
-(nscaledev/netops-misc), which owns Teleport mTLS and the PagerDuty token:
+    python3 multi_region_dashboard.py            # http://127.0.0.1:8765/
 
-  * Grafana / Mimir / VictoriaMetrics: UFM telemetry, gNMI, SNMP, blackbox ping,
-    UFM server health (small aggregated PromQL only)
-  * Loki: UFM event log and backend switch syslog
-  * PagerDuty: open BackEnd Network incidents
+* Pick a region; each region page has the ICE2-style fabric dashboard and the live issues.
+* ICE2 and LON14: their full engines (<site>-netbox-dashboard) run as child processes and
+  are served under /ice2/ and /lon14/, unchanged.
+* Other InfiniBand regions (OSL1, STA1, GLO1): topology from NetBox first (direct, through
+  the local NetBox proxy and the read-only Keychain token), actual links from UFM directly
+  (REST through the site's jump host), drawn in the same design at /f/<site>.
+* nsr is used only for metrics, logs and incidents: UFM telemetry, gNMI, SNMP, ping,
+  UFM servers (Grafana), the UFM event log and syslog (Loki), PagerDuty.
 
-Nothing logs in to a switch, UFM or NetBox, and nothing is written anywhere. The deep
-per-site dashboards (ICE2 on 8765, LON14 on 8766) are linked from their region page.
-
-    python3 multi_region_dashboard.py            # http://127.0.0.1:8780/
-    python3 multi_region_dashboard.py --nsr ~/.local/bin/nsr --port 8780
+Nothing is written to NetBox, UFM or any device.
 
 HTTP API (local only):
     GET /                       region picker          GET /r/<site>   region page
-    GET /api/config             regions, sources, notes
-    GET /api/overview           all regions, grouped queries (cache 60 s)
-    GET /api/region/<site>/<section>   section = fabric | switches | reach | events | incidents
-    GET /api/topology/<site>    is that site's NetBox/UFM dashboard running?
-    GET /f/<site>               ICE2-style spine · leaf · rail view built from NetBox + UFM (nsr)
-    GET /api/fabric/<site>      that view's data;  POST|GET /api/fabric/<site>/netbox  snapshot job
+    GET /<engine-site>/...      the ICE2 / LON14 engine (proxied)
+    GET /f/<site>               NetBox-first fabric view
+    GET /api/fabric/<site>      its data;  POST|GET /api/fabric/<site>/netbox | /ufm  snapshot jobs
+    GET /api/config | /api/overview | /api/region/<site>/<fabric|switches|reach|events|incidents>
+    GET /api/topology/<site>    engine status
     add ?refresh=1 to bypass the cache
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import json
 import sys
 import threading
@@ -43,6 +42,7 @@ ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
 import checks  # noqa: E402
+import engines  # noqa: E402
 from fabric import FabricStore  # noqa: E402
 from nsr_client import Cache, Nsr  # noqa: E402
 
@@ -65,13 +65,20 @@ def load_config(path: Path) -> dict:
 
 
 class App:
-    def __init__(self, config: dict, nsr: Nsr, ttl: int = 60) -> None:
+    def __init__(self, config: dict, nsr: Nsr, ttl: int = 60, netbox_url: str = "http://127.0.0.1:8444",
+                 profile: Path | None = None, with_engines: bool = True) -> None:
         self.config, self.nsr = config, nsr
         self.by_site = {region["site"]: region for region in config["regions"]}
         self.cache = Cache(ttl)
         self.incident_cache = Cache(ttl)
         self.started = time.time()
-        self.fabrics = FabricStore(nsr, config, CACHE_DIR, ttl)
+        self.fabrics = FabricStore(nsr, config, CACHE_DIR, ttl, netbox_url, profile)
+        self.engines = {r["site"]: engines.Engine(r["site"], r["engine"], ROOT.parent, netbox_url, CACHE_DIR)
+                        for r in config["regions"] if r.get("engine")} if with_engines else {}
+
+    def start_engines(self) -> None:
+        for engine in self.engines.values():
+            threading.Thread(target=engine.start, daemon=True).start()
 
     def incidents(self, force=False) -> dict:
         return self.incident_cache.get("pd", lambda: checks.fetch_incidents(self.nsr, self.config), force)
@@ -96,26 +103,21 @@ class App:
         regions = []
         for region in self.config["regions"]:
             regions.append({**{k: region.get(k) for k in ("site", "name", "location", "fabric", "clusters",
-                                                         "cloud_regions", "switches_expected", "topology_dashboard",
+                                                         "cloud_regions", "switches_expected",
                                                          "grafana_dashboards", "notes")},
-                            "sources": sorted(region["sources"]), "fabric_view": bool(region.get("fabric_view"))})
+                            "sources": sorted(region["sources"]), "fabric_view": bool(region.get("fabric_view")),
+                            "engine": region["site"] in self.engines})
         return {"grafana_url": self.config.get("grafana_url"), "regions": regions,
                 "nsr": self.nsr.binary, "started": self.started}
 
     def topology(self, site: str) -> dict:
-        url = self.by_site[site].get("topology_dashboard")
-        if not url:
-            return {"site": site, "configured": False}
-        try:
-            with urllib.request.urlopen(url.rstrip("/") + "/api/health", timeout=2) as response:
-                return {"site": site, "configured": True, "running": response.status == 200, "url": url}
-        except Exception:  # noqa: BLE001 - any failure just means "not running"
-            return {"site": site, "configured": True, "running": False, "url": url}
+        engine = self.engines.get(site)
+        return engine.status() if engine else {"site": site, "configured": False}
 
 
 class Handler(BaseHTTPRequestHandler):
     app: App
-    port: int = 8780
+    port: int = 8765
     server_version = "backend-regions/1"
 
     def log_message(self, fmt, *args):  # quiet: the page polls
@@ -156,13 +158,21 @@ class Handler(BaseHTTPRequestHandler):
                 return self.respond(HTTPStatus.OK, self.app.section(site, section, force))
             if parts[:2] == ["api", "topology"] and len(parts) == 3 and parts[2] in self.app.by_site:
                 return self.respond(HTTPStatus.OK, self.app.topology(parts[2]))
+            if parts[0] in self.app.engines:
+                if len(parts) == 1 and not url.path.endswith("/"):
+                    self.send_response(HTTPStatus.FOUND)
+                    self.send_header("Location", "/%s/" % parts[0])
+                    self.end_headers()
+                    return None
+                rest = "/" + url.path.split("/", 2)[2] if url.path.count("/") >= 2 else "/"
+                return engines.forward(self.app.engines[parts[0]], self, "GET", rest + ("?" + url.query if url.query else ""))
             if parts[0] == "f" and len(parts) == 2 and parts[1] in self.app.by_site:
                 return self.respond(HTTPStatus.OK, FABRIC_PAGE.read_text(encoding="utf-8"), "text/html; charset=utf-8")
             if parts[:2] == ["api", "fabric"] and len(parts) >= 3 and parts[2] in self.app.by_site:
                 if not self.app.by_site[parts[2]].get("fabric_view"):
                     return self.respond(HTTPStatus.NOT_FOUND, {"error": "no fabric view configured for this region"})
-                if len(parts) == 4 and parts[3] == "netbox":
-                    return self.respond(HTTPStatus.OK, self.app.fabrics.jobs.get(parts[2]) or {"state": "idle"})
+                if len(parts) == 4 and parts[3] in ("netbox", "ufm"):
+                    return self.respond(HTTPStatus.OK, self.app.fabrics.jobs.get(parts[2] + ":" + parts[3]) or {"state": "idle"})
                 return self.respond(HTTPStatus.OK, self.app.fabrics.view(parts[2], force))
             if path == "/api/health":
                 return self.respond(HTTPStatus.OK, {"ok": True, "nsr_calls": self.app.nsr.calls})
@@ -171,22 +181,36 @@ class Handler(BaseHTTPRequestHandler):
             return self.respond(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(error)})
 
 
-    def do_POST(self):  # noqa: N802 - only starts a read-only NetBox snapshot
+    def do_POST(self):  # noqa: N802 - read-only jobs (NetBox / UFM snapshot) or an engine's own POSTs
         if not self.host_ok():
             return self.respond(HTTPStatus.FORBIDDEN, {"error": "wrong host"})
         origin = self.headers.get("Origin")
         if origin and origin.split("//")[-1].split(":")[0] not in ("127.0.0.1", "localhost"):
             return self.respond(HTTPStatus.FORBIDDEN, {"error": "cross-site request refused"})
-        parts = [unquote(p) for p in urlparse(self.path).path.strip("/").split("/")]
-        if parts[:2] == ["api", "fabric"] and len(parts) == 4 and parts[3] == "netbox" \
-                and parts[2] in self.app.by_site and self.app.by_site[parts[2]].get("fabric_view"):
-            return self.respond(HTTPStatus.ACCEPTED, self.app.fabrics.refresh(parts[2]))
+        url = urlparse(self.path)
+        parts = [unquote(p) for p in url.path.strip("/").split("/")]
+        if parts and parts[0] in self.app.engines and len(parts) > 1:
+            rest = "/" + url.path.split("/", 2)[2]
+            return engines.forward(self.app.engines[parts[0]], self, "POST", rest + ("?" + url.query if url.query else ""))
+        if parts[:2] == ["api", "fabric"] and len(parts) == 4 and parts[2] in self.app.by_site \
+                and self.app.by_site[parts[2]].get("fabric_view"):
+            if parts[3] == "netbox":
+                return self.respond(HTTPStatus.ACCEPTED, self.app.fabrics.refresh(parts[2]))
+            if parts[3] == "ufm":
+                try:
+                    return self.respond(HTTPStatus.ACCEPTED, self.app.fabrics.fetch_ufm(parts[2]))
+                except KeyError:
+                    return self.respond(HTTPStatus.BAD_REQUEST, {"error": "no device profile"})
         return self.respond(HTTPStatus.NOT_FOUND, {"error": "not found"})
 
 
 def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(description="Read-only backend regions dashboard (live data via nsr).")
-    parser.add_argument("--port", type=int, default=8780)
+    parser = argparse.ArgumentParser(description="Backend fabric dashboard: one read-only service for every region.")
+    parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument("--netbox-url", default="http://127.0.0.1:8444", help="local NetBox proxy (default 127.0.0.1:8444)")
+    parser.add_argument("--device-profile", default=os.path.expanduser("~/.config/idc-automation/device-access.ini"),
+                        help="private profile with [ufm.<site>] sections for direct UFM access")
+    parser.add_argument("--no-engines", action="store_true", help="do not start the ICE2/LON14 engines")
     parser.add_argument("--nsr", default=None, help="path to nsr (default: PATH or ~/.local/bin/nsr)")
     parser.add_argument("--regions", default=str(ROOT / "regions.json"))
     parser.add_argument("--cache-seconds", type=int, default=60, help="how long live answers are reused (default 60)")
@@ -195,16 +219,22 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
     config = load_config(Path(args.regions))
     nsr = Nsr(args.nsr, max_parallel=max(1, min(args.max_parallel, 12)))
-    Handler.app, Handler.port = App(config, nsr, args.cache_seconds), args.port
+    app = App(config, nsr, args.cache_seconds, args.netbox_url, Path(args.device_profile), not args.no_engines)
+    Handler.app, Handler.port = app, args.port
     server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     server.daemon_threads = True
-    print("Backend regions dashboard: http://127.0.0.1:%d/   (nsr: %s)" % (args.port, nsr.binary), flush=True)
+    print("Backend fabric dashboard: http://127.0.0.1:%d/   (nsr: %s; engines: %s)" % (
+        args.port, nsr.binary, ", ".join("%s on %d" % (s, e.port) for s, e in app.engines.items()) or "none"), flush=True)
+    app.start_engines()
     if args.warm:
         threading.Thread(target=Handler.app.overview, daemon=True).start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
+    finally:
+        for engine in app.engines.values():
+            engine.stop()
     return 0
 
 

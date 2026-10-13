@@ -7,8 +7,9 @@ only runs a fixed allow-list of read verbs and parses their `--json` output:
     nsr --json -q grafana query <promql> --datasource <uid>
     nsr --json -q grafana loki  <logql>  --since 1h --limit N [--datasource <uid>]
     nsr --json -q pd incidents --status triggered --status acknowledged [--service ID]
-    nsr --json -q netbox devices --site S --role R          (fabric snapshot, on request)
-    nsr --json -q netbox connections --site S --role R ...  (fabric snapshot, on request)
+
+nsr is used for metrics, logs and incidents only. Topology comes from NetBox and UFM
+directly (netbox_source.py, ufm_direct.py), as in the ICE2 / LON14 dashboards.
 
 Every call has a timeout, and at most `max_parallel` nsr processes run at once so a page
 load never fans out into dozens of simultaneous Grafana queries.
@@ -24,8 +25,7 @@ import time
 from pathlib import Path
 
 # The only nsr verbs this dashboard may run. Anything else is a programming error.
-ALLOWED = {("grafana", "query"), ("grafana", "loki"), ("pd", "incidents"),
-           ("netbox", "devices"), ("netbox", "connections")}
+ALLOWED = {("grafana", "query"), ("grafana", "loki"), ("pd", "incidents")}
 
 
 class NsrError(RuntimeError):

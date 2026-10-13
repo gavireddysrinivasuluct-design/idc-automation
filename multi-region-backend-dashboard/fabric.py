@@ -1,12 +1,14 @@
 """Generic backend fabric model: the ICE2-style spine · leaf · rail view for any site.
 
-Built only from what nsr can read, so a new InfiniBand site needs a regions.json entry
-and nothing else (no jump host, switch login or UFM password):
+Data sources, in order of authority:
 
-* Topology (expected): NetBox devices and cabling through `nsr netbox devices` and
-  `nsr netbox connections`, saved as a snapshot under cache/ and refreshed on request.
-* Live state (actual): UFM telemetry per switch port, blackbox ping per switch, through
-  `nsr grafana query`, cached like every other live answer.
+* Topology (expected), first: NetBox devices and cabling, read directly through the local
+  NetBox proxy with the read-only Keychain token (netbox_source.py), saved as a snapshot
+  under cache/ and refreshed on request.
+* Actual links: UFM's own link list, read directly over the UFM REST API through the
+  site's jump host (ufm_direct.py), compared cable by cable with NetBox (miscabling).
+* Metrics only through nsr: UFM telemetry port state / link-downs / errors and blackbox
+  ping per switch (`nsr grafana query`), cached like every other live answer.
 
 Structure is inferred, not hard-coded:
 * rails: a GPU node's leaf-facing NICs, in natural name order, are rails 1..R;
@@ -27,6 +29,8 @@ import time
 from collections import Counter, defaultdict
 from pathlib import Path
 
+import netbox_source
+import ufm_direct
 from nsr_client import Nsr, NsrError
 
 SPINE, LEAF = "be-spine-switch", "be-leaf-switch"
@@ -60,49 +64,6 @@ def port_number(interface: str, scheme: str = "auto") -> int | None:
             return 2 * (int(m.group(2)) - 1) + int(m.group(3))
     m = re.search(r"(\d+)$", name)
     return int(m.group(1)) if m else None
-
-
-def _device_fields(device: dict) -> dict:
-    return {
-        "name": device.get("name"),
-        "short": short_name(device.get("name") or ""),
-        "model": (device.get("device_type") or {}).get("model"),
-        "ip": ((device.get("primary_ip4") or device.get("primary_ip") or {}).get("address") or "").split("/")[0] or None,
-        "status": (device.get("status") or {}).get("value"),
-        "cluster": (device.get("cluster") or {}).get("name"),
-        "rack": (device.get("rack") or {}).get("name"),
-    }
-
-
-# -- NetBox snapshot ----------------------------------------------------------
-
-def pull_netbox(nsr: Nsr, fabric: dict, progress=lambda text: None) -> dict:
-    """Read the fabric's switches and every leaf cable from NetBox (read-only)."""
-    site, cluster = fabric["netbox_site"], fabric.get("cluster")
-    devices = {}
-    for role in (SPINE, LEAF):
-        progress("NetBox: %s at %s" % (role, site))
-        rows = nsr.run(("netbox", "devices"), "--site", site, "--role", role, "--limit", "2000", timeout=180) or []
-        for device in rows:
-            info = _device_fields(device)
-            if cluster and info["cluster"] and info["cluster"] != cluster:
-                continue
-            info["role"] = role
-            devices[info["name"]] = info
-    leaves = [name for name, d in devices.items() if d["role"] == LEAF]
-    if not leaves:
-        raise NsrError("NetBox has no %s at site %s%s" % (LEAF, site, " cluster " + cluster if cluster else ""),
-                       "Check netbox_site / cluster for this fabric in regions.json.")
-    progress("NetBox: cabling of %d leaves" % len(leaves))
-    args = ["--site", site, "--role", LEAF, "--max-devices", str(max(25, len(leaves) * 2 + 10)), "--limit", "800"]
-    if not fabric.get("fiber_graph"):
-        args.append("--no-fiber-graph")
-    rows = nsr.run(("netbox", "connections"), *args, timeout=600) or []
-    keep = set(leaves)
-    cables = [{k: r.get(k) for k in ("device", "interface", "remote_device", "remote_interface", "state", "cable")}
-              for r in rows if r.get("device") in keep and r.get("remote_device")]
-    return {"site": site, "cluster": cluster, "collected_at": time.time(),
-            "devices": devices, "cables": cables}
 
 
 # -- structure ----------------------------------------------------------------
@@ -315,11 +276,57 @@ def live_overlay(nsr: Nsr, topo: dict, ufm_selector: str | None, ufm_ds: str | N
 
 # -- service glue ------------------------------------------------------------
 
-class FabricStore:
-    """NetBox snapshots on disk (refreshed on request) plus a cached live overlay."""
+def compare_with_ufm(topo: dict, actual: dict) -> dict:
+    """NetBox (expected) vs UFM links (actual), at the leaf end of every NetBox cable."""
+    rows, counts = [], {"match": 0, "miscabled": 0, "not_in_ufm": 0, "unknown_port": 0, "not_in_netbox": 0}
+    expected_ports = set()
 
-    def __init__(self, nsr: Nsr, config: dict, cache_dir: Path, ttl: int = 60) -> None:
+    def check(kind, leaf, port_label, portnum, far, far_port, cable):
+        if portnum is None:
+            counts["unknown_port"] += 1
+            return
+        key = "%s|%d" % (leaf, portnum)
+        expected_ports.add(key)
+        got = actual.get(key)
+        if not got:
+            counts["not_in_ufm"] += 1
+            rows.append({"kind": kind, "status": "not_in_ufm", "leaf": leaf, "port": port_label, "expected": far,
+                         "expected_port": far_port, "actual": None, "actual_port": None, "cable": cable})
+        elif ufm_direct.same_device(far, got["peer"]):
+            counts["match"] += 1
+        else:
+            counts["miscabled"] += 1
+            rows.append({"kind": kind, "status": "miscabled", "leaf": leaf, "port": port_label, "expected": far,
+                         "expected_port": far_port, "actual": got["peer"], "actual_port": got["peer_port"], "cable": cable})
+
+    for u in topo["uplinks"]:
+        check("leaf-spine", u["leaf"], u["leaf_port"], u["leaf_portnum"], u["spine"], u["spine_port"], u["cable"])
+    for n in topo["nodes"]:
+        for l in n["links"]:
+            check("leaf-gpu", l["leaf"], l["leaf_port"], l["leaf_portnum"], n["name"], l["iface"], l["cable"])
+    for o in topo["others"]:          # UFM servers and other hosts NetBox cables to the leaves
+        for l in o["links"]:
+            check("leaf-other", l["leaf"], l["leaf_port"], port_number(l["leaf_port"]), o["name"], l["iface"], l["cable"])
+    leaves = {l["name"] for l in topo["leaves"]}
+    for key, got in actual.items():
+        leaf, _, port = key.partition("|")
+        if leaf in leaves and key not in expected_ports and got.get("peer"):
+            counts["not_in_netbox"] += 1
+            rows.append({"kind": "ufm-only", "status": "not_in_netbox", "leaf": leaf, "port": port, "expected": None,
+                         "expected_port": None, "actual": got["peer"], "actual_port": got["peer_port"], "cable": None})
+    order = {"miscabled": 0, "not_in_ufm": 1, "not_in_netbox": 2}
+    rows.sort(key=lambda r: (order[r["status"]], natural(r["leaf"]), natural(str(r["port"]))))
+    return {"counts": counts, "rows": rows[:2000], "truncated": max(0, len(rows) - 2000)}
+
+
+class FabricStore:
+    """NetBox snapshots (expected) and UFM link snapshots (actual) on disk, refreshed on
+    request; the nsr metrics overlay is cached like every other live answer."""
+
+    def __init__(self, nsr: Nsr, config: dict, cache_dir: Path, ttl: int = 60,
+                 netbox_url: str = "http://127.0.0.1:8444", profile: Path | None = None) -> None:
         self.nsr, self.config, self.dir, self.ttl = nsr, config, cache_dir, ttl
+        self.netbox_url, self.profile = netbox_url, profile
         self.dir.mkdir(exist_ok=True)
         self.lock = threading.Lock()
         self.jobs: dict = {}
@@ -333,30 +340,54 @@ class FabricStore:
             raise KeyError(site)
         return region, fabric
 
-    def path(self, site: str) -> Path:
-        return self.dir / ("%s-netbox.json" % site)
+    def path(self, site: str, kind: str = "netbox") -> Path:
+        return self.dir / ("%s-%s.json" % (site, kind))
 
-    def refresh(self, site: str) -> dict:
-        region, fabric = self.fabric(site)
+    def _start(self, key: str, work) -> dict:
         with self.lock:
-            job = self.jobs.get(site)
+            job = self.jobs.get(key)
             if job and job["state"] == "running":
                 return job
-            job = self.jobs[site] = {"state": "running", "started": time.time(), "step": "starting"}
+            job = self.jobs[key] = {"state": "running", "started": time.time(), "step": "starting"}
 
-        def work():
+        def run():
             try:
-                snap = pull_netbox(self.nsr, fabric, progress=lambda text: job.update(step=text))
-                tmp = self.path(site).with_suffix(".tmp")
-                tmp.write_text(json.dumps(snap), encoding="utf-8")
-                tmp.replace(self.path(site))
-                self.topos.pop(site, None)
-                job.update(state="done", step="NetBox snapshot saved", finished=time.time())
-            except (NsrError, ValueError) as error:
+                work(job)
+                job.update(state="done", finished=time.time())
+            except (netbox_source.NetBoxError, ufm_direct.UfmError, NsrError, OSError, ValueError) as error:
                 job.update(state="error", error=str(error), hint=getattr(error, "hint", ""), finished=time.time())
 
-        threading.Thread(target=work, daemon=True).start()
+        threading.Thread(target=run, daemon=True).start()
         return job
+
+    def _save(self, path: Path, data: dict) -> None:
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data), encoding="utf-8")
+        tmp.replace(path)
+
+    def refresh(self, site: str) -> dict:
+        """Read the region's expected topology from NetBox (direct, read-only)."""
+        _, fabric = self.fabric(site)
+
+        def work(job):
+            snap = netbox_source.pull_fabric(netbox_source.NetBox(self.netbox_url), fabric,
+                                             progress=lambda text: job.update(step=text))
+            self._save(self.path(site), snap)
+            self.topos.pop(site, None)
+            job.update(step="NetBox snapshot saved: %d switches, %d cables" % (len(snap["devices"]), len(snap["cables"])))
+        return self._start(site + ":netbox", work)
+
+    def fetch_ufm(self, site: str) -> dict:
+        """Read UFM's actual links (direct REST through the jump host)."""
+        self.fabric(site)
+        if not self.profile:
+            raise KeyError("no device profile")
+
+        def work(job):
+            got = ufm_direct.fetch_links(self.profile, site, self.dir, progress=lambda text: job.update(step=text))
+            self._save(self.path(site, "ufm"), {k: got[k] for k in ("host", "at", "collected_at", "links")})
+            job.update(step="UFM: %d links from %s" % (len(got["links"]), got["host"]))
+        return self._start(site + ":ufm", work)
 
     def topology(self, site: str) -> dict | None:
         path = self.path(site)
@@ -369,15 +400,28 @@ class FabricStore:
         snap = json.loads(path.read_text(encoding="utf-8"))
         topo = build_topology(snap, self.fabric(site)[1].get("port_names", "auto"))
         topo["netbox_collected_at"] = snap.get("collected_at")
+        topo["netbox_source"] = snap.get("source")
         self.topos[site] = (mtime, topo)
         return topo
+
+    def ufm_compare(self, site: str, topo: dict) -> dict | None:
+        path = self.path(site, "ufm")
+        if not path.is_file():
+            return None
+        snap = json.loads(path.read_text(encoding="utf-8"))
+        switches = {s["name"] for s in topo["spines"]} | {l["name"] for l in topo["leaves"]}
+        actual = ufm_direct.links_by_switch_port(snap.get("links"), switches)
+        result = compare_with_ufm(topo, actual)
+        result.update(host=snap.get("host"), at=snap.get("at"), collected_at=snap.get("collected_at"),
+                      links=len(snap.get("links") or []), switch_ports=len(actual))
+        return result
 
     def view(self, site: str, force: bool = False) -> dict:
         region, fabric = self.fabric(site)
         topo = self.topology(site)
         base = {"site": site, "name": region["name"], "location": region.get("location"),
                 "fabric_label": region.get("fabric"), "cluster": fabric.get("cluster"),
-                "job": self.jobs.get(site)}
+                "jobs": {k: self.jobs.get(site + ":" + k) for k in ("netbox", "ufm")}}
         if topo is None:
             return {**base, "topology": None}
         live = self.live.get(site)
@@ -388,4 +432,4 @@ class FabricStore:
             live = live_overlay(self.nsr, topo, ufm.get("selector"), ds_uid(self.config, ufm.get("datasource")),
                                 (src.get("ping") or {}).get("selector"), ds_uid(self.config, "mimir"))
             self.live[site] = live
-        return {**base, "topology": topo, "live": live}
+        return {**base, "topology": topo, "live": live, "cabling": self.ufm_compare(site, topo)}
