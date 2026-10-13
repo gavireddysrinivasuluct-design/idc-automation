@@ -58,6 +58,12 @@ def port_number(interface: str, scheme: str = "auto") -> int | None:
             return 2 * (int(m.group(1)) - 1) + int(m.group(2))
         if scheme == "swNpM":
             return None
+    if scheme in ("auto", "swpNsM"):
+        m = re.search(r"swp(\d+)s(\d+)$", name)      # OSL1 NetBox: swp17s0 / swp17s1 = cage 17, port 1 / 2
+        if m:
+            return 2 * (int(m.group(1)) - 1) + int(m.group(2)) + 1
+        if scheme == "swpNsM":
+            return None
     if scheme in ("auto", "cage/split"):
         m = re.search(r"(\d+)/(\d+)/(\d+)$", name)
         if m:

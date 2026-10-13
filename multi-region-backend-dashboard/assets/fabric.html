@@ -53,7 +53,7 @@ h1 span{color:var(--dim);font-weight:500}
 .panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px 20px}
 .panel h2{font:600 19px var(--display);margin:0 0 14px;letter-spacing:.02em}
 .two{display:grid;grid-template-columns:1fr 1fr;gap:18px}
-@media(max-width:1100px){.two{grid-template-columns:1fr}.stage{grid-template-columns:1fr!important}}
+@media(max-width:1250px){.two{grid-template-columns:1fr}.stage{grid-template-columns:1fr!important}.inspector{position:static;max-height:none}}
 .card{border:1px solid var(--line);border-radius:10px;background:#0c1726;padding:12px 14px}
 .card .cap{font-size:12.5px;color:var(--dim);margin-bottom:8px}
 .matrix{display:grid;gap:4px;font:12px var(--mono)}
@@ -66,7 +66,8 @@ h1 span{color:var(--dim);font-weight:500}
 .stage{display:grid;grid-template-columns:minmax(0,1fr) 380px;gap:18px}
 .canvas{background:#0b1524;border:1px solid var(--line);border-radius:12px;padding:10px;overflow:auto}
 svg text{font-family:var(--mono)}
-.inspector{position:sticky;top:12px;align-self:start;max-height:calc(100vh - 24px);overflow:auto}
+.inspector{position:sticky;top:12px;align-self:start;max-height:calc(100vh - 24px);overflow:auto;min-width:0}
+.inspector table{display:block;overflow-x:auto;white-space:nowrap}
 .inspector .k{font:500 11px var(--mono);letter-spacing:.18em;color:var(--leaf);text-transform:uppercase}
 .inspector h3{font:700 24px var(--display);margin:6px 0 4px}
 .kv{display:grid;grid-template-columns:110px 1fr;gap:4px 10px;font-size:13px;margin:10px 0}.kv dt{color:var(--dim)}.kv dd{margin:0;font-family:var(--mono);font-size:12.5px}
@@ -259,6 +260,7 @@ function canvas(T){
   const sw = Math.min(34, (W - 2*pad) / Math.max(sp.length, 1) - 4), lw = Math.min(34, (W - 2*pad) / Math.max(leaves.length, 1) - 4);
   const sx = i => pad + (i + .5) * (W - 2*pad) / sp.length, lx = i => pad + (i + .5) * (W - 2*pad) / leaves.length;
   const SY = 40, LY = 330, BY = 460;
+  GEO = {SY, LY, sw: {}, node: {}};
   const pos = {};
   sp.forEach((s, i) => pos[s.name] = [sx(i), SY]); leaves.forEach((l, i) => pos[l.name] = [lx(i), LY]);
   // SU blocks
@@ -273,7 +275,7 @@ function canvas(T){
   const H = Math.max(BY + 60, y + rowH + 20);
   let s = `<svg viewBox="0 0 ${W} ${H}" width="100%" style="min-width:900px">`;
   // mesh
-  if(layers.mesh) s += `<g stroke="#a98bff" stroke-opacity=".10" stroke-width=".6">${T.uplinks.filter(u => pos[u.spine]).map(u => `<line x1="${pos[u.leaf][0]}" y1="${LY-14}" x2="${pos[u.spine][0]}" y2="${SY+14}"/>`).join("")}</g>`;
+  if(layers.mesh) s += `<g id="mesh" stroke="#a98bff" stroke-opacity=".10" stroke-width=".6">${T.uplinks.filter(u => pos[u.spine]).map(u => `<line x1="${pos[u.leaf][0]}" y1="${LY-14}" x2="${pos[u.spine][0]}" y2="${SY+14}"/>`).join("")}</g>`;
   if(layers.live) s += `<g stroke="#ff5e78" stroke-width="1.6" stroke-dasharray="4 3">${T.uplinks.filter(u => pos[u.spine] && linkState(u.leaf, u.leaf_portnum).cls === "bad").map(u => `<line x1="${pos[u.leaf][0]}" y1="${LY-14}" x2="${pos[u.spine][0]}" y2="${SY+14}"/>`).join("")}</g>`;
   if(layers.mis && D.cabling) s += `<g stroke="#e879f9" stroke-width="2.2">${T.uplinks.filter(u => pos[u.spine] && misKey(u.leaf, u.leaf_port)).map(u => `<line x1="${pos[u.leaf][0]}" y1="${LY-14}" x2="${pos[u.spine][0]}" y2="${SY+14}"/>`).join("")}</g>`;
   s += `<text x="${pad}" y="18" fill="#8b9db6" font-size="11" letter-spacing="2">SPINES · ${sp.length}</text><text x="${pad}" y="${LY-34}" fill="#8b9db6" font-size="11" letter-spacing="2">LEAVES · ${leaves.length} · ${R} RAILS</text>`;
@@ -291,6 +293,7 @@ function canvas(T){
     s += `<rect x="${b.x}" y="${b.y}" width="${b.w}" height="${b.h}" rx="8" fill="#0d1a2b" stroke="#223550"/><text x="${b.x+12}" y="${b.y+20}" fill="#e7eef7" font-size="13" font-weight="600">${b.su.name}</text><text x="${b.x+60}" y="${b.y+20}" fill="#8b9db6" font-size="10">${b.su.nodes.length} nodes · ${b.su.leaves.map(short).join(" ")}</text>`;
     b.su.nodes.forEach((n, i) => {
       const node = T.nodes.find(x => x.name === n), cx = b.x + 10 + (i % per) * (tw + 3), cy = b.y + 32 + Math.floor(i / per) * (th + 3);
+      GEO.node[n] = [cx + tw/2, cy, cx + tw/2, cy + th/2];
       const states = node.links.map(l => linkState(l.leaf, l.leaf_portnum).cls);
       const misrailed = node.links.some(l => leafRail(l.leaf) && leafRail(l.leaf) !== l.rail);
       const miscab = layers.mis && D.cabling && node.links.some(l => misKey(l.leaf, l.leaf_port));
@@ -302,8 +305,51 @@ function canvas(T){
     });
   }
   if(T.others.length) s += `<text x="${pad}" y="${H-6}" fill="#5b6d86" font-size="10">Other endpoints on leaves: ${esc(T.others.map(o => o.name).join(", ").slice(0, 180))}</text>`;
-  $("#canvas").innerHTML = s + "</svg>";
+  Object.entries(pos).forEach(([n, p]) => GEO.sw[n] = p);
+  $("#canvas").innerHTML = s + `<g id="hl" style="pointer-events:none"></g></svg>`;
   $("#canvas").onclick = e => { const g = e.target.closest("[data-pick]"); if(g) pick(g.dataset.pick); };
+  // Like ICE2: hover previews a device's cables, click pins them (and the inspector).
+  $("#canvas").onmouseover = e => { const g = e.target.closest("[data-pick]"); if(g) trace(g.dataset.pick); };
+  $("#canvas").onmouseleave = () => trace(sel);
+  trace(sel);
+}
+
+/* ---------- trace: draw every cable of one device on top of the canvas ---------- */
+let GEO = null;
+function trace(name){
+  const hl = $("#hl"), mesh = $("#mesh");
+  if(!hl || !GEO) return;
+  if(!name){ hl.innerHTML = ""; if(mesh) mesh.setAttribute("stroke-opacity", ".10"); return; }
+  const T = D.topology, {SY, LY} = GEO, S = GEO.sw, N = GEO.node;
+  const isSpine = T.spines.some(x => x.name === name), isLeaf = T.leaves.some(x => x.name === name);
+  const node = T.nodes.find(x => x.name === name);
+  let out = "", ends = new Set([name]);
+  const up = (u, color) => { if(!S[u.leaf] || !S[u.spine]) return;
+    const m = misKey(u.leaf, u.leaf_port), st = linkState(u.leaf, u.leaf_portnum).cls;
+    const c = m ? "#e879f9" : st === "bad" ? "#ff5e78" : color;
+    out += `<line x1="${S[u.leaf][0]}" y1="${LY-14}" x2="${S[u.spine][0]}" y2="${SY+14}" stroke="${c}" stroke-width="${m || st === "bad" ? 2.4 : 1.6}" ${st === "bad" ? 'stroke-dasharray="5 3"' : ""} stroke-opacity=".95"/>`;
+    ends.add(u.leaf); ends.add(u.spine); };
+  const down = (leaf, n, l) => { if(!S[leaf] || !N[n]) return;
+    const m = misKey(leaf, l.leaf_port), st = linkState(leaf, l.leaf_portnum).cls;
+    const c = m ? "#e879f9" : st === "bad" ? "#ff5e78" : rc(l.rail);
+    const [x1] = S[leaf], [x2, y2] = N[n];
+    out += `<path d="M${x1} ${LY+14} C${x1} ${LY+80},${x2} ${y2-60},${x2} ${y2}" fill="none" stroke="${c}" stroke-width="1.6" stroke-opacity=".95" ${st === "bad" ? 'stroke-dasharray="5 3"' : ""}/>`;
+    ends.add(leaf); ends.add(n); };
+  if(isSpine) T.uplinks.filter(u => u.spine === name).forEach(u => up(u, "#c4b5fd"));
+  if(isLeaf){
+    T.uplinks.filter(u => u.leaf === name).forEach(u => up(u, "#c4b5fd"));
+    T.nodes.forEach(n => n.links.filter(l => l.leaf === name).forEach(l => down(name, n.name, l)));
+  }
+  if(node) node.links.forEach(l => down(l.leaf, node.name, l));
+  // outline every device at the other end
+  ends.forEach(e => {
+    if(S[e]){ const [x, y] = S[e], w = 36; out += `<rect x="${x-w/2}" y="${y-16}" width="${w}" height="32" rx="5" fill="none" stroke="#fff" stroke-width="${e === name ? 2.2 : 1.2}" stroke-opacity="${e === name ? 1 : .7}"/>`; }
+    else if(N[e]){ const [x, y] = N[e]; out += `<rect x="${x-17}" y="${y-2}" width="34" height="24" rx="3" fill="none" stroke="#fff" stroke-width="${e === name ? 2 : 1.2}"/>`; }
+  });
+  const n = ends.size - 1;
+  out += `<text x="30" y="${LY + 40}" fill="#e7eef7" font-size="11">${esc(short(name))} · ${n} connected device${n === 1 ? "" : "s"}</text>`;
+  hl.innerHTML = out;
+  if(mesh) mesh.setAttribute("stroke-opacity", ".04");
 }
 
 /* ---------- selection ---------- */

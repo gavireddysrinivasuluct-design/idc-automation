@@ -181,6 +181,8 @@ class FabricModel(unittest.TestCase):
         self.assertEqual(fabric.port_number("sw1p2"), 2)
         self.assertEqual(fabric.port_number("IB1/17/2"), 34)
         self.assertEqual(fabric.port_number("IB1/17"), 17)
+        self.assertEqual(fabric.port_number("swp17s0"), 33)
+        self.assertEqual(fabric.port_number("swp17s1"), 34)
         self.assertIsNone(fabric.port_number("mgmt0", "swNpM"))
         self.assertEqual(fabric.short_name("sys2-osl1-p-ifs-bel12"), "bel12")
         self.assertEqual(fabric.short_name("ifs398"), "ifs398")
