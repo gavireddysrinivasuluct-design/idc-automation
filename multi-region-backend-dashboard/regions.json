@@ -246,7 +246,8 @@
       "fabric_view": {
         "netbox_site": "sta1",
         "cluster": "sys2-sta1",
-        "ufm_hosts": "10.40.40.54"
+        "ufm_hosts": "10.40.40.54",
+        "ufm_node": "sta1-p-phy-ufm2"
       },
       "grafana_dashboards": [
         [

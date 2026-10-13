@@ -57,10 +57,17 @@ By hand: `python3 multi_region_dashboard.py` (options: `--port`, `--netbox-url`,
 ./scripts/configure_site_ufm.sh osl1     # and sta1
 ```
 
-It asks for the Teleport jump host that reaches that UFM, your login there, the UFM address
-(OSL1 VIP 10.50.40.9, STA1 VIP 10.40.40.54 are pre-filled), and a read-only UFM web user; it
-writes a `[ufm.<site>]` section (no password) to `device-access.ini` and stores the password
-in Keychain item `idc-automation-<site>-ufm-rest`.
+It asks how to reach that UFM, then for a read-only UFM web user; it writes a `[ufm.<site>]`
+section (no password) to `device-access.ini` and stores the password in Keychain item
+`idc-automation-<site>-ufm-rest`. Two ways in:
+
+- **Direct to the UFM node** (STA1): the UFM appliance is itself a Teleport node,
+  `tsh ssh sta1-p-phy-ufm2` (pre-filled). Leave the jump host empty. The node asks its own
+  REST API on 127.0.0.1, then the VIP 10.40.40.54 if it is the standby.
+- **Through a jump host** (OSL1, until its UFM node is in Teleport): a node that reaches the
+  UFM VIP on 443 (10.50.40.9 pre-filled).
+
+The Teleport login is optional; empty uses your `tsh` default, as plain `tsh ssh <node>` does.
 
 ## Using it
 

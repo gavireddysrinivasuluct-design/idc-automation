@@ -1,17 +1,20 @@
 """UFM, read directly: the actual links of a NetBox-first region (OSL1, STA1, ...).
 
 The same read-only path the ICE2 / LON14 dashboards use for "Fetch from UFM": one
-`tsh ssh` session to the site's jump host, which asks the UFM REST API for
-GET /ufmRest/resources/links. The UFM web password comes from macOS Keychain and is
+`tsh ssh` session, which asks the UFM REST API for GET /ufmRest/resources/links. The
+session goes either to a jump host that reaches the UFM address, or, where the UFM
+appliance itself is a Teleport node (STA1: `tsh ssh sta1-p-phy-ufm2`), straight to the
+UFM node, which asks its own REST API on 127.0.0.1 (then the VIP, if that node is standby). The UFM web password comes from macOS Keychain and is
 written only to the worker's stdin. UFM's self-signed certificate is pinned on first use
 (cache/<site>-ufm-pins.json).
 
 Profile (the same private ini as the other dashboards, mode 600), one section per site:
 
     [ufm.osl1]
-    jump_host = <teleport node that reaches the UFM VIP>
-    jump_user = <your teleport login>
-    hosts = 10.50.40.9
+    jump_host = <teleport node that reaches the UFM VIP>      (or leave empty and set ufm_node)
+    ufm_node = <the UFM appliance as a Teleport node>         (direct: tsh ssh <ufm_node>)
+    jump_user = <your teleport login>                         (optional: tsh default login)
+    hosts = 10.50.40.9                                        (direct default: 127.0.0.1 + VIP)
     rest_user = <read-only UFM web user>
     rest_keychain_service = idc-automation-osl1-ufm-rest
     rest_keychain_account = <same as rest_user>
@@ -87,13 +90,29 @@ def read_profile(path: Path, site: str) -> dict:
         raise UfmError("Direct UFM access for %s is not set up" % site.upper(),
                        "Run scripts/configure_site_ufm.sh %s once (jump host, UFM address, read-only web user)." % site)
     cfg = dict(parser.items(section))
-    missing = [k for k in ("jump_host", "jump_user", "hosts", "rest_user", "rest_keychain_service") if not cfg.get(k)]
+    # Where the tsh session lands: a jump host, or the UFM appliance itself (direct).
+    cfg["target"] = (cfg.get("jump_host") or "").strip() or (cfg.get("ufm_node") or "").strip()
+    cfg["direct"] = not (cfg.get("jump_host") or "").strip()
+    missing = [k for k in ("hosts", "rest_user", "rest_keychain_service") if not cfg.get(k)]
+    if not cfg["target"]:
+        missing.insert(0, "jump_host or ufm_node")
     if missing:
         raise UfmError("[%s] in %s is missing %s" % (section, path, ", ".join(missing)),
                        "Run scripts/configure_site_ufm.sh %s again." % site)
     cfg["hosts"] = cfg["hosts"].split()
     cfg.setdefault("rest_keychain_account", cfg["rest_user"])
     return cfg
+
+
+def tsh_command(cfg: dict) -> list[str]:
+    """`tsh ssh [--login user] <jump host | UFM node> <python worker>`. UFM appliances may only
+    have the platform Python, so fall back to it when python3 is not on PATH."""
+    script = base64.b64encode(WORKER.encode()).decode()
+    boot = "import base64,sys;exec(base64.b64decode(sys.argv[1]))"
+    remote = ('PY=$(command -v python3 || command -v /usr/libexec/platform-python || echo python3); '
+              '"$PY" -u -c %s %s' % (shlex.quote(boot), script))
+    login = ["--login", cfg["jump_user"]] if cfg.get("jump_user") else []
+    return ["tsh", "ssh", *login, cfg["target"], remote]
 
 
 def keychain(service: str, account: str) -> str:
@@ -110,10 +129,8 @@ def fetch_links(profile: Path, site: str, cache_dir: Path, progress=lambda text:
     pins = json.loads(pins_file.read_text()) if pins_file.is_file() else {}
     payload = {"user": cfg["rest_user"], "password": keychain(cfg["rest_keychain_service"], cfg["rest_keychain_account"]),
                "hosts": cfg["hosts"], "path": LINKS_PATH, "pins": pins, "timeout": timeout - 30}
-    script = base64.b64encode(WORKER.encode()).decode()
-    boot = "import base64,sys;exec(base64.b64decode(sys.argv[1]))"
-    cmd = ["tsh", "ssh", "--login", cfg["jump_user"], cfg["jump_host"], "python3 -u -c %s %s" % (shlex.quote(boot), script)]
-    progress("UFM: Teleport session to %s" % cfg["jump_host"])
+    cmd = tsh_command(cfg)
+    progress("UFM: Teleport session to %s%s" % (cfg["target"], " (the UFM node itself)" if cfg["direct"] else ""))
     child = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     timer = threading.Timer(timeout, child.kill)
     timer.daemon = True
@@ -130,7 +147,7 @@ def fetch_links(profile: Path, site: str, cache_dir: Path, progress=lambda text:
                 continue
             events.append(event)
             if event.get("event") == "trying":
-                progress("UFM: reading live links from %s via %s" % (event["host"], cfg["jump_host"]))
+                progress("UFM: reading live links from %s via %s" % (event["host"], cfg["target"]))
         child.wait()
         stderr = child.stderr.read()
     finally:
@@ -139,7 +156,8 @@ def fetch_links(profile: Path, site: str, cache_dir: Path, progress=lambda text:
     if not got:
         fails = ["%s: %s" % (e.get("host"), e.get("detail")) for e in events if e.get("event") == "failed"]
         raise UfmError("No UFM host answered: " + (" | ".join(fails) or stderr.strip()[-200:] or "worker failed"),
-                       "Check `tsh login`, that %s reaches %s on 443, and the UFM web password." % (cfg["jump_host"], " ".join(cfg["hosts"])))
+                       "Check `tsh login`, `tsh ssh %s` works, that it reaches %s on 443, and the UFM web password."
+                       % (cfg["target"], " ".join(cfg["hosts"])))
     pins[got["host"]] = got["fingerprint"]
     cache_dir.mkdir(exist_ok=True)
     pins_file.write_text(json.dumps(pins, indent=1))

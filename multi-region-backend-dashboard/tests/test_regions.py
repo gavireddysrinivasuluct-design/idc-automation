@@ -236,6 +236,24 @@ class FabricModel(unittest.TestCase):
         bad = result["rows"][0]
         self.assertEqual((bad["status"], bad["leaf"], bad["actual"]), ("miscabled", leaves[0], "gpu011"))
 
+    def test_direct_ufm_node_profile(self):
+        import tempfile
+        ini = Path(tempfile.mkdtemp()) / "p.ini"
+        ini.write_text("[ufm.sta1]\nufm_node = sta1-p-phy-ufm2\njump_host =\njump_user =\n"
+                       "hosts = 127.0.0.1 10.40.40.54\nrest_user = ro\nrest_keychain_service = idc-automation-sta1-ufm-rest\n")
+        cfg = ufm_direct.read_profile(ini, "sta1")
+        self.assertTrue(cfg["direct"])
+        cmd = ufm_direct.tsh_command(cfg)
+        self.assertEqual(cmd[:3], ["tsh", "ssh", "sta1-p-phy-ufm2"], "no --login when none is set; straight to the UFM node")
+        self.assertIn("platform-python", cmd[3])
+        ini.write_text("[ufm.osl1]\njump_host = jmp-osl1\njump_user = me\nhosts = 10.50.40.9\nrest_user = ro\n"
+                       "rest_keychain_service = s\n")
+        cfg = ufm_direct.read_profile(ini, "osl1")
+        self.assertEqual(ufm_direct.tsh_command(cfg)[:5], ["tsh", "ssh", "--login", "me", "jmp-osl1"])
+        ini.write_text("[ufm.glo1]\nhosts = 1.2.3.4\nrest_user = ro\nrest_keychain_service = s\n")
+        with self.assertRaises(ufm_direct.UfmError):
+            ufm_direct.read_profile(ini, "glo1")
+
     def test_same_device_spellings(self):
         self.assertTrue(ufm_direct.same_device("sys2-osl1-p-phy-gpu012", "gpu012"))
         self.assertTrue(ufm_direct.same_device("ifs398", "ifs398"))
