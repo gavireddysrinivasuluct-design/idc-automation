@@ -97,6 +97,102 @@ the affected switches and ports, UFM event-log lines and the incidents. It refre
 (per-cable live state, *Live status (nsr)* chip, *UFM · nsr* and *Ping · nsr* in the
 inspector) are teal as well.
 
+### One-click switch login (click the IP)
+
+In any switch's inspector (ICE2, LON14 and the NetBox-first regions) the management IP is a
+link. Clicking it opens a session on that switch in iTerm (Terminal if iTerm is not
+installed): the first click opens a new iTerm window, each later click a new tab in that
+window, named after the switch. If you close that window, the next click opens a new one.
+
+The session runs:
+
+    tsh ssh -t --login <jump_user> <jump_host> ssh <ssh_user>@<ip>
+
+and `scripts/connect_switch.exp` types the switch password at the switch's own password
+prompt. The IP comes from this service's data (the engine's device lookup or the NetBox
+snapshot), never from the page; the password is read inside that Terminal and never reaches
+the service, the browser or a file. Host-key questions and Teleport MFA are left for you.
+
+Password source, per region: `op_ref = op://<vault>/<item>/password` (1Password CLI, read
+with `op read`) if set, otherwise the Keychain entry already in the profile
+(`keychain_service` / `keychain_account`, written by `configure_device_access.sh`). So ICE2
+and LON14 work with their existing profiles. To use 1Password instead, install the CLI
+(`brew install 1password-cli`, then 1Password → Settings → Developer → *Integrate with
+1Password CLI*) and add to the engine's profile (see `regions.json`):
+
+```ini
+[connect.ice2]
+op_ref = op://<vault>/<item>/password
+```
+
+Each key (`op_ref`, `keychain_service`, `keychain_account`, `ssh_user`, `jump_host`,
+`jump_user`) is taken from `[connect.<site>]`, then `[<site>]`, then `[connect]`. OSL1, STA1
+and GLO1 need their own `[connect.<site>]` (or a shared `[connect]`) section in
+`~/.config/idc-automation/device-access.ini`. Settings are read on each click.
+
+### Passwords from 1Password (rotated passwords)
+
+Put a 1Password secret reference in the profile wherever a password is used for a login
+opened from the dashboard; it is read with `op read` on every click, so a rotated password in
+1Password is used straight away and nothing has to be updated locally. It takes priority
+over the Keychain entry next to it, which stays as the fallback.
+
+```ini
+[ufm]                  # ICE2 UFM CLI (root over SSH through jmp0)
+op_ref = op://<vault>/<ICE2 UFM item>/password
+```
+
+Used for the UFM logins today; switch logins stay on Keychain (the same `op_ref` key in
+`[ice2]`, `[lon14]` or `[connect.<site>]` would move them later).
+
+Get a reference from the 1Password app: open the item, click ▾ next to the password, *Copy
+Secret Reference*. Needs the 1Password CLI linked to the desktop app (1Password → Settings →
+Developer → *Integrate with 1Password CLI*); 1Password asks for Touch ID on the first use.
+
+For iTerm (or any terminal) to use it, macOS must let that app reach 1Password's data:
+System Settings → Privacy & Security → Files & Folders → iTerm → *Data shared by 1Password
+and affiliated apps*. Without it, `op` in that terminal says "not currently signed in" (and
+`op signin` asks for the account password instead of Touch ID). The same applies to the app
+you start the dashboard from, because its UFM fetches run `op` too.
+
+The background UFM read for the NetBox-first regions (`ufm_direct.py`, **Fetch from UFM** on
+OSL1 / STA1) does the same for the UFM web (REST) password: `rest_op_ref` in `[ufm.<site>]`
+is read with `op read --no-newline` on every fetch, and `rest_keychain_service` /
+`rest_keychain_account` stay the fallback when it is not set:
+
+```ini
+[ufm.osl1]
+rest_op_ref = op://<vault>/<OSL1 UFM web item>/password
+```
+
+If 1Password is locked or the CLI is missing, the fetch stops with an error naming
+`rest_op_ref` and the profile; unlock 1Password (or remove the key to use Keychain) and fetch
+again. The ICE2 and LON14 dashboards read `op_ref` / `rest_op_ref` in `[ufm]` the same way for their
+Fetch from UFM job (see their READMEs, *Maintenance*). Switch passwords for Sync stay in Keychain.
+
+### One-click UFM CLI and web UI
+
+Each UFM has **CLI** and **Web UI** buttons: in the UFM inspector on ICE2 / LON14 (click
+UFM1 / UFM2), and under *UFM* in the inspector of the NetBox-first regions (nothing selected).
+The UFMs come from nscaleproxy's host map (`netops-misc/nscaleproxy`, installed with
+`uv tool install`) and from the UFM appliances Teleport lists as nodes.
+
+- **CLI** opens a tab in the same iTerm window as the switch sessions. A UFM that is a
+  Teleport node (OSL1 ufm0/ufm1, STA1 ufm2) opens with `tsh ssh [--login <jump_user from
+  [ufm.<site>]>] <node>`. Otherwise, when the UFM's IP is in the profile's UFM SSH login
+  (`[ufm]` for ICE2: `ufm_hosts`, `ufm_user`, and `op_ref` or `keychain_service` +
+  `keychain_account`), it goes through the site's jump host and types the password, like the
+  switches.
+- **Web UI** opens `https://<ufm-host>/` in your default browser. The browser must use
+  nscaleproxy's PAC (`http://127.0.0.1:8080/proxy.pac`, or a saved copy that points at
+  `PROXY 127.0.0.1:8080`). If nscaleproxy is not running, the dashboard starts it in an iTerm
+  tab first and waits for it. The UFM web password never passes through the dashboard: let
+  the 1Password browser extension fill it by adding each UFM address (for example
+  `https://sys1-ice2-p-phy-ufm1/`) as a website on the UFM web login item in 1Password.
+
+Today: ICE2 ufm1/ufm2 (CLI via jmp0, web), OSL1 ufm0/ufm1 (CLI, web), STA1 ufm2 (CLI, web)
+and ufm4 (web only). LON14 and GLO1 have no UFM in the host map or Teleport.
+
 ### How the NetBox-first view reads the fabric
 
 - Rails are the GPU NIC names used across the fabric (`ib0..ib7`, `mlx5_0..3`), in order; a
@@ -163,6 +259,9 @@ editing.
 | `assets/fabric.html` | Spine · leaf · rail view for regions without their own dashboard |
 | `fabric.py` | NetBox snapshot, inferred rails/SUs, design checks, UFM live overlay |
 | `scripts/open_regions.command` | One-click start of the single service |
+| `device_connect.py` | Click-the-IP switch login: resolves the IP, opens Terminal |
+| `ufm_access.py` | UFM CLI (iTerm) and web UI (browser through nscaleproxy) |
+| `scripts/connect_switch.exp` | Runs in that Terminal: jump host → switch, password from `op read` |
 | `tests/` | Offline tests with `fake_nsr.py` and `fake_netbox.py` (invented data) |
 
 HTTP API (127.0.0.1 only): `GET /api/config`, `GET /api/overview`,

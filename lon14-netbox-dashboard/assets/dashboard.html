@@ -88,6 +88,8 @@ th{font:500 10px var(--mono);letter-spacing:.1em;text-transform:uppercase;color:
 td{font-family:var(--mono);font-size:11.5px}
 td.pl2{color:var(--plan)}
 .peer{color:var(--edge);cursor:pointer}
+.ssh{font:inherit;color:var(--edge);background:none;border:0;padding:0;cursor:pointer;text-decoration:underline dotted;text-underline-offset:3px}.ssh:hover{text-decoration-style:solid}.ssh:disabled{opacity:.6;cursor:progress}
+.ssh-msg{display:block;font-size:11.5px;color:var(--dim)}.ssh-msg:empty{display:none}.ssh-msg.bad{color:#ff8a80}
 .tag{display:inline-block;font:600 9.5px var(--mono);letter-spacing:.08em;padding:1px 6px;border-radius:9px;border:1px solid currentColor}
 .grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:16px}
 .card{background:linear-gradient(180deg,var(--panel2),var(--panel));border:1px solid var(--line);border-radius:12px;padding:16px 18px;min-width:0}
@@ -544,16 +546,18 @@ document.getElementById('clr').onclick = () => { document.getElementById('q').va
 const insp = document.getElementById('insp');
 const tbl = (h, rows) => `<table><thead><tr>${h.map(x => `<th>${x}</th>`).join('')}</tr></thead><tbody>${rows.map(r => `<tr>${r.map(c => `<td>${c}</td>`).join('')}</tr>`).join('')}</tbody></table>`;
 const lk = (id, t) => `<span class="peer" data-id="${id}" tabindex="0">${t}</span>`;
-const deviceMetaHtml = (d, field) => field === 'model' ? (d.vendor ? `${esc(d.vendor)} · ${esc(d.model)}` : esc(d.model)) : field === 'ip' ? `${esc(d.primary_ip)} · ${esc(d.status)}` : esc(d.vendor + ' · ' + d.model + ' · ' + d.primary_ip);
+// Clicking the IP opens Terminal on the switch (backend fabric dashboard: /api/connect, password from 1Password).
+const sshLink = (host, ip) => ip ? `<button type="button" class="ssh" data-host="${esc(host)}" title="Open an iTerm session on ${esc(host)} · password from your device profile">${esc(String(ip).split('/')[0])}</button>` : '—';
+const deviceMetaHtml = (d, field, host) => field === 'model' ? (d.vendor ? `${esc(d.vendor)} · ${esc(d.model)}` : esc(d.model)) : field === 'ip' ? `${sshLink(d.hostname || host, d.primary_ip)} · ${esc(d.status)}<span class="ssh-msg"></span>` : esc(d.vendor + ' · ' + d.model + ' · ' + d.primary_ip);
 async function loadDeviceMeta(hostname) {
   const targets = [...insp.querySelectorAll('[data-netbox-host]')].filter(item => item.dataset.netboxHost === hostname); if (!targets.length) return;
   // 1) Facts collected by the most recent sync arrive with /api/live: no NetBox call on click.
   const known = LIVE.devices && LIVE.devices[hostname];
-  if (known) { const [primary_ip, vendor, model, status] = known; targets.forEach(item => item.innerHTML = deviceMetaHtml({primary_ip, vendor, model, status}, item.dataset.netboxField)); return; }
+  if (known) { const [primary_ip, vendor, model, status] = known; targets.forEach(item => item.innerHTML = deviceMetaHtml({primary_ip, vendor, model, status}, item.dataset.netboxField, hostname)); return; }
   if (!SERVICE) { targets.forEach(item => item.textContent = item.dataset.netboxField === 'ip' ? '—' : 'Open through netbox_live_sync.py and press Sync'); return; }
   // 2) Not synced yet: the service answers from its cache or asks NetBox once and remembers it.
   try { const r = await fetch(`/api/device/${encodeURIComponent(hostname)}`), data = await r.json(); if (!r.ok) throw Error(data.error);
-    targets.forEach(item => item.innerHTML = deviceMetaHtml(data, item.dataset.netboxField)); }
+    targets.forEach(item => item.innerHTML = deviceMetaHtml(data, item.dataset.netboxField, hostname)); }
   catch (error) { targets.forEach(item => item.textContent = item.dataset.netboxField === 'ip' ? '—' : 'Not synced yet · press Sync once the NetBox proxy is running'); }
 }
 const ord = p => { const m = p.match(/sw(\d+)p(\d+)/); return m ? +m[1]*10 + +m[2] : 0; };
@@ -582,10 +586,19 @@ function inspect(id) {
     ${tbl(['Port', 'Plane', 'Type', 'Peer', 'Peer port', 'Cable', 'Live'], trs)}<p class="small">All peers come from NetBox cables at site lon14: RDMA1–4 → the SU's four BEL leaves, eth0/eth1 → SpectrumX FEL leaves, BF MGMT / BMC → OBL out-of-band leaves.</p>`; }
 }
 function pickUfm(i) { cur = null; cool(); svg.classList.add('hot'); const u = UFM[i]; on(tiles[u[0]]); (ufmEl[u[0]] || []).forEach(e => on(e)); UFMC[i].forEach(c => { if (c[3] === 'fabric') on(tiles[c[1]], 'nb'); });
-  insp.innerHTML = `<div class="role" style="color:var(--sp)">fabric manager</div><h2>${u[0].toUpperCase()}</h2><dl class="kv"><dt>Hostname</dt><dd>${u[1]}</dd><dt>Model</dt><dd>NVIDIA UFM Gen 3.5</dd><dt>Primary IP</dt><dd>${u[2]}</dd><dt>Rack</dt><dd>${u[3]}</dd><dt>Status</dt><dd style="color:var(--mgmt)">Active</dd></dl>
+  insp.innerHTML = `<div class="role" style="color:var(--sp)">fabric manager</div><h2>${u[0].toUpperCase()}</h2><dl class="kv"><dt>Hostname</dt><dd>${u[1]}</dd><dt>Model</dt><dd>NVIDIA UFM Gen 3.5</dd><dt>Primary IP</dt><dd>${u[2]}</dd><dt>Rack</dt><dd>${u[3]}</dd><dt>Status</dt><dd style="color:var(--mgmt)">Active</dd><dt>Open</dt><dd><button type="button" class="ssh" data-ufm="${u[1]}" data-act="cli" title="CLI session on ${u[1]} in iTerm">CLI</button> · <button type="button" class="ssh" data-ufm="${u[1]}" data-act="web" title="UFM web UI through nscaleproxy">Web UI</button><span class="ssh-msg"></span></dd></dl>
   ${tbl(['UFM port', 'Peer', 'Peer port', 'Role'], UFMC[i].map(c => [c[0], c[3] === 'fabric' ? lk(c[1], c[1]) : c[3] === 'peer' ? `<span class="peer" data-u="${1 - i}">${c[1]}</span>` : esc('sys1-lon14-p-swi-' + c[1]), c[2], c[3] === 'fabric' ? 'backend leaf · HCA' : c[3] === 'frontend' ? 'frontend leaf · in-band' : c[3] === 'oob' ? 'OOB leaf · BMC / mgmt' : 'UFM HA peer']))}
   <p class="small">From the UFM connection record you supplied; these cables have no NetBox cable ID in the exports.</p>`; }
-insp.addEventListener('click', e => { const p = e.target.closest('.peer'); if (!p) return; if (p.dataset.u != null) pickUfm(+p.dataset.u); else pick(p.dataset.id); });
+async function openSsh(button) {
+  const msg = button.parentElement.querySelector('.ssh-msg'); button.disabled = true; msg.className = 'ssh-msg'; msg.textContent = 'Opening a session in iTerm…';
+  const ufm = button.dataset.ufm, url = ufm ? `/api/ufm/${button.dataset.act}/${encodeURIComponent(ufm)}` : `/api/connect/${encodeURIComponent(button.dataset.host)}`;
+  if (ufm && button.dataset.act === 'web') msg.textContent = 'Opening the UFM web UI… (starts nscaleproxy in iTerm if needed)';
+  try { const r = await fetch(url, {method: 'POST', headers: {'X-Requested-With': 'connect'}}), d = await r.json().catch(() => ({}));
+    if (!r.ok) throw Error(d.error === 'Not found' ? 'Open this page through the backend fabric dashboard (port 8765) to log in from here.' : d.error || 'HTTP ' + r.status);
+    msg.textContent = d.opened === 'web' ? `Opened https://${d.host}/ in your browser${d.started_proxy ? ' · nscaleproxy started in iTerm' : ''}` : d.opened === "cli" ? `Opened in ${d.app || "iTerm"} · via ${d.via}` : `Opened in iTerm · ${d.ip} via ${d.via} · ${d.password}`; }
+  catch (error) { msg.className = 'ssh-msg bad'; msg.textContent = error.message; }
+  finally { button.disabled = false; } }
+insp.addEventListener('click', e => { const s = e.target.closest('.ssh'); if (s) { openSsh(s); return; } const p = e.target.closest('.peer'); if (!p) return; if (p.dataset.u != null) pickUfm(+p.dataset.u); else pick(p.dataset.id); });
 insp.addEventListener('keydown', e => { const p = e.target.closest('.peer'); if (p && e.key === 'Enter') pick(p.dataset.id); });
 
 function tipFor(e, id) { let h = '';

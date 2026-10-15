@@ -820,7 +820,10 @@ class SyncState:
             parser.read(self.device_profile, encoding="utf-8")
         except (configparser.Error, TypeError):
             return False
-        return parser.has_section("ufm") and all(parser.get("ufm", k, fallback="") for k in ("rest_user", "rest_keychain_service", "rest_keychain_account"))
+        if not parser.has_section("ufm") or not parser.get("ufm", "rest_user", fallback="").strip():
+            return False
+        return bool(parser.get("ufm", "rest_op_ref", fallback="").strip()) or \
+            all(parser.get("ufm", k, fallback="") for k in ("rest_keychain_service", "rest_keychain_account"))
 
     def switches_from_ufm(self) -> bool:
         if self.switch_source == "ssh":

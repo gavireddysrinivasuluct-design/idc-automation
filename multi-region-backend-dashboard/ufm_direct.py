@@ -4,7 +4,8 @@ The same read-only path the ICE2 / LON14 dashboards use for "Fetch from UFM": on
 `tsh ssh` session, which asks the UFM REST API for GET /ufmRest/resources/links. The
 session goes either to a jump host that reaches the UFM address, or, where the UFM
 appliance itself is a Teleport node (STA1: `tsh ssh sta1-p-phy-ufm2`), straight to the
-UFM node, which asks its own REST API on 127.0.0.1 (then the VIP, if that node is standby). The UFM web password comes from macOS Keychain and is
+UFM node, which asks its own REST API on 127.0.0.1 (then the VIP, if that node is standby). The UFM web password comes from 1Password
+(`op read <rest_op_ref>`, so a rotated password is picked up on the next fetch) or else macOS Keychain, and is
 written only to the worker's stdin. UFM's self-signed certificate is pinned on first use
 (cache/<site>-ufm-pins.json).
 
@@ -16,6 +17,7 @@ Profile (the same private ini as the other dashboards, mode 600), one section pe
     jump_user = <your teleport login>                         (optional: tsh default login)
     hosts = 10.50.40.9                                        (direct default: 127.0.0.1 + VIP)
     rest_user = <read-only UFM web user>
+    rest_op_ref = op://<vault>/<item>/password                (preferred; else the Keychain entry below)
     rest_keychain_service = idc-automation-osl1-ufm-rest
     rest_keychain_account = <same as rest_user>
 
@@ -28,6 +30,7 @@ import base64
 import configparser
 import getpass
 import gzip
+import os
 import json
 import re
 import shlex
@@ -93,7 +96,9 @@ def read_profile(path: Path, site: str) -> dict:
     # Where the tsh session lands: a jump host, or the UFM appliance itself (direct).
     cfg["target"] = (cfg.get("jump_host") or "").strip() or (cfg.get("ufm_node") or "").strip()
     cfg["direct"] = not (cfg.get("jump_host") or "").strip()
-    missing = [k for k in ("hosts", "rest_user", "rest_keychain_service") if not cfg.get(k)]
+    missing = [k for k in ("hosts", "rest_user") if not cfg.get(k)]
+    if not (cfg.get("rest_op_ref") or "").strip() and not cfg.get("rest_keychain_service"):
+        missing.append("rest_op_ref (or rest_keychain_service)")
     if not cfg["target"]:
         missing.insert(0, "jump_host or ufm_node")
     if missing:
@@ -115,6 +120,34 @@ def tsh_command(cfg: dict) -> list[str]:
     return ["tsh", "ssh", *login, cfg["target"], remote]
 
 
+def op_read(ref: str, key: str, profile: Path) -> str:
+    """A 1Password secret reference (the same plain op://vault/item/field rule as device_connect.op_secret),
+    read now so a rotated password is used on the next fetch."""
+    ref = ref.strip()
+    if not ref.startswith("op://") or any(c in ref for c in "\"'`$\\\n"):
+        raise UfmError("%s in %s must be a plain op://vault/item/field reference" % (key, profile))
+    try:
+        out = subprocess.run(["op", "--account", os.environ.get("OP_ACCOUNT") or "nscale.1password.com", "read", "--no-newline", ref], capture_output=True, text=True, timeout=60)
+    except FileNotFoundError:
+        raise UfmError("1Password CLI (op) is not installed; %s in %s needs it" % (key, profile),
+                       "Install it (brew install 1password-cli) and enable CLI integration in the 1Password app, "
+                       "or remove %s to use Keychain." % key) from None
+    except subprocess.TimeoutExpired:
+        raise UfmError("1Password did not answer for %s in %s" % (key, profile),
+                       "Unlock the 1Password app (or run: op signin) and try again.") from None
+    if out.returncode or not out.stdout:
+        detail = (out.stderr.strip().splitlines() or ["no value"])[-1][:200]
+        raise UfmError("Could not read %s in %s from 1Password: %s" % (key, profile, detail),
+                       "Unlock the 1Password app (or run: op signin) and check the reference, then try again.")
+    return out.stdout
+
+
+def rest_password(cfg: dict, profile: Path) -> str:
+    if (cfg.get("rest_op_ref") or "").strip():
+        return op_read(cfg["rest_op_ref"], "rest_op_ref", profile)
+    return keychain(cfg["rest_keychain_service"], cfg["rest_keychain_account"])
+
+
 def keychain(service: str, account: str) -> str:
     out = subprocess.run(["security", "find-generic-password", "-s", service, "-a", account, "-w"],
                          capture_output=True, text=True, timeout=10)
@@ -127,7 +160,7 @@ def fetch_links(profile: Path, site: str, cache_dir: Path, progress=lambda text:
     cfg = read_profile(profile, site)
     pins_file = cache_dir / ("%s-ufm-pins.json" % site)
     pins = json.loads(pins_file.read_text()) if pins_file.is_file() else {}
-    payload = {"user": cfg["rest_user"], "password": keychain(cfg["rest_keychain_service"], cfg["rest_keychain_account"]),
+    payload = {"user": cfg["rest_user"], "password": rest_password(cfg, profile),
                "hosts": cfg["hosts"], "path": LINKS_PATH, "pins": pins, "timeout": timeout - 30}
     cmd = tsh_command(cfg)
     progress("UFM: Teleport session to %s%s" % (cfg["target"], " (the UFM node itself)" if cfg["direct"] else ""))

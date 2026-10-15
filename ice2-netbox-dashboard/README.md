@@ -626,6 +626,35 @@ Typical timings: switches a few seconds from UFM, or about 34 s for 100 switches
 | Roll back the code | `git log --oneline -5`, then `git checkout <commit>`. Return with `git checkout main`. |
 | Reset local state (forces a full NetBox pull and fresh IPs) | Stop the service, then `rm -rf .netbox-live-sync` |
 
+### Passwords from 1Password (rotated passwords)
+
+If the UFM passwords rotate in 1Password, point the profile at 1Password instead of
+re-running `configure_ufm_access.sh` after every rotation. Add a secret reference next to the
+existing Keychain keys in `~/.config/idc-automation/device-access.ini`:
+
+```ini
+[ufm]
+op_ref = op://<vault>/<UFM CLI item>/password          # UFM host SSH login (Fetch from UFM)
+rest_op_ref = op://<vault>/<UFM web item>/password     # UFM web (REST) user (Fetch from UFM)
+```
+
+Each fetch runs `op read --no-newline <reference>` when it starts, so the current password is
+used without restarting the service. A key that is not set falls back to its Keychain item
+(`keychain_service` / `keychain_account`, `rest_keychain_service` / `rest_keychain_account`),
+so existing profiles keep working unchanged. The value must be a plain
+`op://vault/item/field` reference (1Password app: open the item, ▾ next to the password,
+*Copy Secret Reference*). It needs the 1Password CLI linked to the desktop app
+(`brew install 1password-cli`, then 1Password → Settings → Developer → *Integrate with
+1Password CLI*), and 1Password must be unlocked when a fetch runs. The switch password (Sync)
+stays in Keychain for now.
+
+Offline tests for the 1Password / Keychain choice (fake `op` and `security`, nothing real is read):
+
+```bash
+cd ice2-netbox-dashboard
+python3 -m unittest discover -s tests -v
+```
+
 ---
 
 ## 10. Troubleshooting
@@ -656,6 +685,8 @@ Typical timings: switches a few seconds from UFM, or about 34 s for 100 switches
 | Incidents: "UFM live links look incomplete" | UFM answered with far fewer links than the last scan (UFM restarting, or an unknown format) | The previous data is kept; fetch again later, and open an issue if it persists |
 | Fetch from UFM: "UFM access is not set up yet" | No `[ufm]` section in your profile, or the service was not restarted | `./scripts/configure_ufm_access.sh`, then restart the service |
 | Fetch from UFM: "The UFM password is not in Keychain" | Keychain item missing or renamed | `./scripts/configure_ufm_access.sh` |
+| Fetch from UFM: "The UFM password (op_ref / rest_op_ref under [ufm] ...) could not be read from 1Password" or "1Password did not answer" | 1Password is locked, or the CLI is not linked to the app | Unlock 1Password (or `op signin`) and retry; or remove the key named in the message to use Keychain ([9](#9-maintenance)) |
+| Fetch from UFM: "1Password CLI (op) is not installed" | The profile has `op_ref` / `rest_op_ref` but `op` is not on the service's PATH | `brew install 1password-cli`, then restart the service from that shell |
 | Fetch from UFM: "Teleport login expired" | Teleport session ended | `tsh login`, then press the button again |
 | Fetch from UFM: `HTTP 401 Unauthorized` | Wrong UFM web user or password | `./scripts/configure_ufm_access.sh` with the current web password |
 | Fetch from UFM: `ConnectionRefusedError` or `timed out` for every address | `jmp0` cannot reach the UFM web port | Check the `curl` test in [4.9](#49-optional-let-the-dashboard-fetch-from-ufm); ask for HTTPS from `jmp0` to UFM |

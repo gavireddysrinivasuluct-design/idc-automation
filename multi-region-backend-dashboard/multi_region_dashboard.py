@@ -21,6 +21,8 @@ HTTP API (local only):
     GET /api/fabric/<site>      its data;  POST|GET /api/fabric/<site>/netbox | /ufm  snapshot jobs
     GET /api/config | /api/overview | /api/region/<site>/<fabric|switches|reach|events|incidents>
     GET /api/topology/<site>    engine status
+    POST /api/connect/<site>/<switch>   open Terminal on the switch (device_connect.py)
+    GET /api/ufm/<site>; POST /api/ufm/<site>/<cli|web>/<ufm>   UFM CLI / web UI (ufm_access.py)
     add ?refresh=1 to bypass the cache
 """
 
@@ -42,7 +44,9 @@ ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
 import checks  # noqa: E402
+import device_connect  # noqa: E402
 import engines  # noqa: E402
+import ufm_access  # noqa: E402
 from fabric import FabricStore  # noqa: E402
 from nsr_client import Cache, Nsr  # noqa: E402
 
@@ -156,6 +160,8 @@ class Handler(BaseHTTPRequestHandler):
                 if site not in self.app.by_site or section not in SECTIONS:
                     return self.respond(HTTPStatus.NOT_FOUND, {"error": "unknown region or section"})
                 return self.respond(HTTPStatus.OK, self.app.section(site, section, force))
+            if parts[:2] == ["api", "ufm"] and len(parts) == 3 and parts[2] in self.app.by_site:
+                return self.respond(HTTPStatus.OK, {"site": parts[2], "ufms": ufm_access.ufms(self.app, parts[2])})
             if parts[:2] == ["api", "topology"] and len(parts) == 3 and parts[2] in self.app.by_site:
                 return self.respond(HTTPStatus.OK, self.app.topology(parts[2]))
             if path == "/assets/nsr_panel.js":
@@ -192,6 +198,36 @@ class Handler(BaseHTTPRequestHandler):
             return self.respond(HTTPStatus.FORBIDDEN, {"error": "cross-site request refused"})
         url = urlparse(self.path)
         parts = [unquote(p) for p in url.path.strip("/").split("/")]
+        # One-click switch login, from a fabric page (/api/connect/<site>/<host>) or an engine
+        # page, whose fetch shim sends it as /<site>/api/connect/<host>.
+        target = (parts[2], parts[3]) if parts[:2] == ["api", "connect"] and len(parts) == 4 else \
+            (parts[0], parts[3]) if parts[1:3] == ["api", "connect"] and len(parts) == 4 else None
+        # UFM CLI / web UI, from a fabric page (/api/ufm/<site>/<cli|web>/<ufm>) or an engine page
+        # (/<site>/api/ufm/<cli|web>/<ufm> through its fetch shim).
+        ufm = (parts[2], parts[3], parts[4]) if parts[:2] == ["api", "ufm"] and len(parts) == 5 else \
+            (parts[0], parts[3], parts[4]) if parts[1:3] == ["api", "ufm"] and len(parts) == 5 else None
+        if ufm and ufm[1] in ("cli", "web"):
+            if not origin or self.headers.get("X-Requested-With") != "connect":
+                return self.respond(HTTPStatus.FORBIDDEN, {"error": "Open the UFM from the dashboard page."})
+            try:
+                site = ufm[0].lower()
+                if site not in self.app.by_site:
+                    return self.respond(HTTPStatus.NOT_FOUND, {"error": "Unknown region."})
+                opener = ufm_access.open_cli if ufm[1] == "cli" else ufm_access.open_web
+                return self.respond(HTTPStatus.OK, opener(self.app, site, ufm[2]))
+            except device_connect.ConnectError as error:
+                return self.respond(error.status, {"error": str(error)})
+            except Exception as error:  # noqa: BLE001 - the page shows it next to the button
+                return self.respond(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(error)})
+        if target:
+            if not origin or self.headers.get("X-Requested-With") != "connect":
+                return self.respond(HTTPStatus.FORBIDDEN, {"error": "Open the switch from the dashboard page."})
+            try:
+                return self.respond(HTTPStatus.OK, device_connect.connect(self.app, target[0].lower(), target[1]))
+            except device_connect.ConnectError as error:
+                return self.respond(error.status, {"error": str(error)})
+            except Exception as error:  # noqa: BLE001 - the page shows it next to the IP
+                return self.respond(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(error)})
         if parts and parts[0] in self.app.engines and len(parts) > 1:
             rest = "/" + url.path.split("/", 2)[2]
             return engines.forward(self.app.engines[parts[0]], self, "POST", rest + ("?" + url.query if url.query else ""))

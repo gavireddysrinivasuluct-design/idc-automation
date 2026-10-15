@@ -26,8 +26,9 @@ The copy is a candidate: it becomes the expected design only after review
 (assets/expected_topology.csv) are the cross-check.
 
 Read-only: nothing is sent to the fabric and nothing on UFM changes (REST is GET
-only). Passwords come from macOS Keychain (scripts/configure_ufm_access.sh) and
-are written only to the worker's stdin, never to argv, the environment or a file.
+only). Passwords come from 1Password when the [ufm] section has op_ref / rest_op_ref
+(`op read`, so a rotated password is used on the next fetch), else from macOS Keychain
+(scripts/configure_ufm_access.sh), and are written only to the worker's stdin, never to argv, the environment or a file.
 """
 
 from __future__ import annotations
@@ -188,8 +189,9 @@ def read_profile(path: Path) -> dict:
         raise RuntimeError("UFM access is not set up yet. Run ./scripts/configure_ufm_access.sh, then restart the service.")
     site = dict(parser.items(SITE_SECTION)) if parser.has_section(SITE_SECTION) else {}
     ufm = dict(parser.items("ufm"))
-    has_ssh = all(ufm.get(k) for k in ("ufm_user", "keychain_service", "keychain_account"))
-    has_rest = all(ufm.get(k) for k in ("rest_user", "rest_keychain_service", "rest_keychain_account"))
+    ufm = {k: v.strip() for k, v in ufm.items()}
+    has_ssh = bool(ufm.get("ufm_user")) and (bool(ufm.get("op_ref")) or all(ufm.get(k) for k in ("keychain_service", "keychain_account")))
+    has_rest = bool(ufm.get("rest_user")) and (bool(ufm.get("rest_op_ref")) or all(ufm.get(k) for k in ("rest_keychain_service", "rest_keychain_account")))
     if not (has_ssh or has_rest):
         raise RuntimeError("The [ufm] profile section has no complete login. Run ./scripts/configure_ufm_access.sh again.")
     hosts = (ufm.get("ufm_hosts") or DEFAULT_UFM_HOSTS).split()
@@ -197,9 +199,38 @@ def read_profile(path: Path) -> dict:
     return {"jump_host": site.get("jump_host", DEFAULT_JUMP_HOST), "jump_user": site.get("jump_user") or site.get("ssh_user", ""),
             "design": None if design.lower() in ("none", "-", "off") else design,
             "ufm_hosts": hosts, "has_ssh": has_ssh, "has_rest": has_rest,
+            "op_ref": ufm.get("op_ref", ""), "rest_op_ref": ufm.get("rest_op_ref", ""),
             "ufm_user": ufm.get("ufm_user", ""), "service": ufm.get("keychain_service", ""), "account": ufm.get("keychain_account", ""),
             "rest_user": ufm.get("rest_user", ""), "rest_hosts": (ufm.get("rest_hosts") or " ".join(hosts)).split(),
             "rest_service": ufm.get("rest_keychain_service", ""), "rest_account": ufm.get("rest_keychain_account", "")}
+
+
+def op_password(ref: str, key: str) -> str:
+    """[ufm] op_ref / rest_op_ref = op://vault/item/field (plain reference only, as in device_connect.op_secret),
+    read on every fetch so a rotated password is picked up."""
+    where = "%s under [ufm] in the device profile" % key
+    if not ref.startswith("op://") or any(c in ref for c in "\"'`$\\\n"):
+        raise RuntimeError("%s must be a plain op://vault/item/field reference." % where)
+    if not shutil.which("op"):
+        raise RuntimeError("1Password CLI (op) is not installed, but %s needs it. Install it, or remove %s to use Keychain." % (where, key))
+    try:
+        done = subprocess.run(["op", "--account", os.environ.get("OP_ACCOUNT") or "nscale.1password.com", "read", "--no-newline", ref], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              check=False, timeout=60)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("1Password did not answer for %s. Unlock the 1Password app (or run: op signin) and try again." % where) from None
+    if done.returncode or not done.stdout:
+        detail = (done.stderr.strip().splitlines() or ["no value"])[-1][:200]
+        raise RuntimeError("The UFM password (%s) could not be read from 1Password: %s. "
+                           "Unlock the 1Password app (or run: op signin) and try again." % (where, detail))
+    return done.stdout
+
+
+def ufm_password(prof: dict, rest: bool) -> str:
+    """The UFM SSH (rest=False) or REST password: 1Password when op_ref / rest_op_ref is set, else Keychain."""
+    key = "rest_op_ref" if rest else "op_ref"
+    if prof.get(key):
+        return op_password(prof[key], key)
+    return keychain_password(prof["rest_service"], prof["rest_account"]) if rest else keychain_password(prof["service"], prof["account"])
 
 
 def keychain_password(service: str, account: str) -> str:
@@ -249,7 +280,7 @@ def save_design(data: bytes, target_dir: Path) -> dict:
 
 def fetch_files(prof: dict, target_dir: Path, progress: dict, timeout: int = 180, skip: tuple = ()) -> dict:
     """UFM files, plus the host design file when one is configured, over one SSH session."""
-    password = keychain_password(prof["service"], prof["account"])
+    password = ufm_password(prof, rest=False)
     archive = shlex.quote("cd / && tar czhf - --ignore-failed-read %s %s %s 2>/dev/null" % (SCAN, MASTER, REPORT))
     design_path = prof.get("design", DESIGN)
     # The design is optional: a missing file sends an empty design section instead of failing the fetch.
@@ -447,7 +478,7 @@ def rest_call(prof: dict, target_dir: Path, progress: dict, requests: list, time
     """Run the REST worker for one or more GETs against the same UFM host, persist the TLS pin.
     Returns (host, {event: answer}, errors)."""
     pins = load_pins(target_dir)
-    password = keychain_password(prof["rest_service"], prof["rest_account"])
+    password = ufm_password(prof, rest=True)
     payload = {"password": password, "user": prof["rest_user"], "hosts": prof["rest_hosts"], "requests": requests,
                "pins": pins, "timeout": timeout - 30}
     del password

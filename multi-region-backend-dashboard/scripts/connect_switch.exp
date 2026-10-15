@@ -1,0 +1,64 @@
+#!/usr/bin/expect -f
+# Opened in Terminal by the dashboard (device_connect.py): SSH to one switch through the
+# Teleport jump host and type its password at the switch's password prompt.
+#   connect_switch.exp op <op_ref> <1password account> <jump_user> <jump_host> <ssh_user> <ip> <hostname>
+#   connect_switch.exp keychain <service> <account> <jump_user> <jump_host> <ssh_user> <ip> <hostname>
+# The password is read here (op read, or macOS Keychain) and kept only in this process.
+
+if {[llength $argv] != 8} {
+  puts "usage: connect_switch.exp op|keychain ref account jump_user jump_host ssh_user ip hostname"
+  exit 2
+}
+lassign $argv kind ref account jump_user jump_host ssh_user ip hostname
+log_user 1
+
+# 1Password: run op on its own pseudo-terminal (spawn, not exec). Its desktop-app integration
+# needs a terminal to ask for Touch ID; without one it answers "not currently signed in".
+# Its output is never shown (log_user 0) and is captured from the expect buffer.
+proc read_1password {account ref} {
+  set timeout 120
+  log_user 0
+  spawn -noecho op --account $account read --no-newline $ref
+  set out ""
+  expect {
+    -re {.+} { append out $expect_out(0,string); exp_continue }
+    timeout { catch {close}; wait; log_user 1; error "1Password did not answer within 2 minutes" }
+    eof
+  }
+  lassign [wait] pid spawn oserr status
+  log_user 1
+  if {$status != 0} { error [string trim $out] }
+  return [string trimright $out "\r\n"]
+}
+
+if {$kind eq "op"} {
+  set source 1Password
+  set read {read_1password $account $ref}
+} else {
+  set source Keychain
+  set read {exec security find-generic-password -s $ref -a $account -w}
+}
+puts "$hostname ($ip) via $jump_host — reading the password from $source…"
+
+if {[catch $read password]} {
+  puts "\n$source did not return the password:\n  $password"
+  puts "Check the password settings in your device profile, or unlock $source and click the IP again."
+  exit 1
+}
+
+spawn -noecho tsh ssh -t --login $jump_user $jump_host ssh -o ConnectTimeout=15 -o NumberOfPasswordPrompts=2 $ssh_user@$ip
+set sent 0
+# Only the switch's own prompt ("user@ip's password:" or "Password:"); Teleport's prompts end
+# differently, so the switch password is never typed into them. Host-key questions and MFA are
+# left to you; after the first password the session is yours.
+# Like the collector (run_ntp_audit.py): the password followed by "\n", once.
+interact -o -re {('s password|\n[Pp]assword|^[Pp]assword): ?$} {
+  send_user -- $interact_out(0,string)
+  if {!$sent} {
+    set sent 1
+    send -- "$password\n"
+    set password ""
+  } else {
+    send_user "\n(The $source password was not accepted; type it or press Ctrl-C.)\n"
+  }
+}

@@ -75,6 +75,8 @@ svg text{font-family:var(--mono)}
 table{width:100%;border-collapse:collapse;font-size:12px}th,td{text-align:left;padding:4px 6px;border-bottom:1px solid #1b2a40}th{color:var(--dim);font-weight:500}
 td.m{font-family:var(--mono)}
 .st{font:600 11px var(--mono);padding:1px 6px;border-radius:4px}
+.ssh{font:inherit;color:var(--leaf);background:none;border:0;padding:0;cursor:pointer;text-decoration:underline dotted;text-underline-offset:3px}.ssh:hover{text-decoration-style:solid}.ssh:disabled{opacity:.6;cursor:progress}
+.ssh-msg{display:block;font-size:11.5px;color:var(--dim)}.ssh-msg:empty{display:none}.ssh-msg.bad{color:var(--red)}
 .st.ok{color:var(--green);background:rgba(56,217,160,.1)}.st.bad{color:var(--red);background:rgba(255,94,120,.12)}.st.warn{color:var(--amber);background:rgba(246,169,59,.12)}.st.na{color:var(--faint);background:#121e30}
 .checks{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:10px}
 .checks li{display:flex;gap:10px;font-size:14px}.checks li i{flex:none;width:18px;height:18px;border-radius:50%;margin-top:2px;display:grid;place-items:center;font:700 11px var(--body);color:#08101b}
@@ -364,10 +366,28 @@ function pick(name){
   const hit = all.find(x => x.name.toLowerCase() === q) || all.find(x => (x.short || "").toLowerCase() === q) || all.find(x => (x.ip || "") === q) || all.find(x => x.name.toLowerCase().includes(q));
   if(hit){ sel = hit.name; render(); }
 }
+// Clicking a switch's IP opens an iTerm session on it (POST /api/connect); the UFM buttons open
+// a UFM CLI session or its web UI through nscaleproxy (POST /api/ufm/<site>/<cli|web>/<ufm>).
+let UFMS = null;
+fetch(`/api/ufm/${site}`, {cache:"no-store"}).then(r => r.json()).then(d => { UFMS = d.ufms || []; if(D && !sel) inspector(); }).catch(() => { UFMS = []; });
+const ufmList = () => UFMS === null ? `<p class="muted" style="font-size:12.5px">Looking up UFMs…</p>` : !UFMS.length ? `<p class="muted" style="font-size:12.5px">No UFM for this region in nscaleproxy's host map or Teleport.</p>`
+  : `<dl class="kv">${UFMS.map(u => `<dt>${esc(u.name.replace(/^.*-(ufm\d+)$/, "$1"))}</dt><dd>${u.cli ? `<button type="button" class="ssh" data-ufm="${esc(u.name)}" data-act="cli" title="CLI session on ${esc(u.name)} in iTerm">CLI</button>` : `<span class="muted" title="Not a Teleport node and no UFM SSH login in the profile">no CLI</span>`} · ${u.web ? `<button type="button" class="ssh" data-ufm="${esc(u.name)}" data-act="web" title="UFM web UI through nscaleproxy">Web UI</button>` : "no web UI"}${u.ip ? ` <span class="muted">${esc(u.ip)}</span>` : ""}<span class="ssh-msg"></span></dd>`).join("")}</dl>`;
+document.addEventListener("click", async e => {
+  const button = e.target.closest(".ssh"); if(!button) return;
+  const ufm = button.dataset.ufm, url = ufm ? `/api/ufm/${site}/${button.dataset.act}/${encodeURIComponent(ufm)}` : `/api/connect/${site}/${encodeURIComponent(button.dataset.host)}`;
+  const msg = button.parentElement.querySelector(".ssh-msg"); button.disabled = true; msg.className = "ssh-msg";
+  msg.textContent = ufm && button.dataset.act === "web" ? "Opening the UFM web UI… (starts nscaleproxy in iTerm if needed)" : "Opening a session in iTerm…";
+  try { const r = await fetch(url, {method:"POST", headers:{"X-Requested-With":"connect"}}), d = await r.json().catch(() => ({}));
+    if(!r.ok) throw Error(d.error || "HTTP " + r.status);
+    msg.textContent = d.opened === "web" ? `Opened https://${d.host}/ in your browser${d.started_proxy ? " · nscaleproxy started in iTerm" : ""}` : d.opened === "cli" ? `Opened in ${d.app || "iTerm"} · via ${d.via}` : `Opened in iTerm · ${d.ip} via ${d.via} · ${d.password}`; }
+  catch(error){ msg.className = "ssh-msg bad"; msg.textContent = error.message; }
+  finally { button.disabled = false; }
+});
 function inspector(){
   const T = D.topology, el = $("#insp");
   if(!sel){ el.innerHTML = `<div class="k">Inspector</div><h3>Select a switch or GPU node</h3><p class="muted" style="font-size:13px">Click any spine, leaf or node tile. Spines show their leaf cables, leaves their uplinks and GPU links, nodes their ${T.rails} RDMA links, all with NetBox cable IDs and the live UFM state of the leaf port.</p>
     <dl class="kv"><dt>Spines</dt><dd>${esc(T.spines.map(s => s.short).slice(0,3).join(", "))}${T.spines.length > 3 ? " …" : ""}</dd><dt>Leaves</dt><dd>${esc(T.leaves.map(s => s.short).slice(0,3).join(", "))}${T.leaves.length > 3 ? " …" : ""}</dd><dt>GPU nodes</dt><dd>${T.nodes.length}</dd></dl>
+    <div class="k" style="margin-top:14px">UFM</div>${ufmList()}
     <div class="legend">${Array.from({length:T.rails}, (_, i) => `<span style="color:${rc(i+1)}">■</span> rail ${i+1} `).join("")}</div>`; return; }
   const sw = [...T.spines, ...T.leaves].find(x => x.name === sel), node = T.nodes.find(x => x.name === sel);
   const row = (a, b, c, d, cls, txt) => `<tr><td class="m">${esc(a)}</td><td class="m">${esc(b)}</td><td class="m">${esc(c)}</td><td class="m">${esc(d ?? "—")}</td><td><span class="st ${cls}">${esc(txt)}</span></td></tr>`;
@@ -379,7 +399,7 @@ function inspector(){
          ...T.nodes.flatMap(n => n.links.filter(l => l.leaf === sw.name).map(l => [l.leaf_port, n.short, l.iface, l.cable, misState(l.leaf, l.leaf_port) || linkState(l.leaf, l.leaf_portnum)]))];
     links.sort((a, b) => (a[4].cls === "ok") - (b[4].cls === "ok"));
     el.innerHTML = `<div class="k">${isSpine ? "Spine" : "Leaf · rail " + (sw.rail || "—") + (sw.su ? " · SU" + sw.su : "")}</div><h3>${esc(sw.short)}</h3>
-      <dl class="kv"><dt>NetBox name</dt><dd>${esc(sw.name)}</dd><dt>Model</dt><dd>${esc(sw.model || "—")}</dd><dt>Mgmt IP</dt><dd>${esc(sw.ip || "—")}</dd><dt>Status / rack</dt><dd>${esc(sw.status || "—")} · ${esc(sw.rack || "—")}</dd>
+      <dl class="kv"><dt>NetBox name</dt><dd>${esc(sw.name)}</dd><dt>Model</dt><dd>${esc(sw.model || "—")}</dd><dt>Mgmt IP</dt><dd>${sw.ip ? `<button type="button" class="ssh" data-host="${esc(sw.name)}" title="Open an iTerm session on ${esc(sw.name)} · password from your device profile">${esc(sw.ip)}</button><span class="ssh-msg"></span>` : "—"}</dd><dt>Status / rack</dt><dd>${esc(sw.status || "—")} · ${esc(sw.rack || "—")}</dd>
       <dt style="color:#2dd4bf">UFM · nsr</dt><dd>${lv.ports ? `${lv.ports} ports · <span style="color:${lv.nonactive ? "var(--red)" : "var(--green)"}">${lv.nonactive} not Active</span> · ${lv.linkdown} flapped · ${lv.errors} with errors (15 min)` : "no telemetry"}</dd>
       <dt style="color:#2dd4bf">Ping · nsr</dt><dd>${lv.ping == null ? "—" : lv.ping ? "answering" : "<span style='color:var(--red)'>NOT answering</span>"}</dd>
       ${isSpine ? `<dt>Leaf cables</dt><dd>${sw.leaves}</dd>` : `<dt>Cables</dt><dd>${sw.uplinks} up (${sw.spines} spines) · ${sw.downlinks} GPU</dd>`}</dl>
