@@ -284,7 +284,12 @@ def fetch_incidents(nsr: Nsr, config: dict) -> dict:
         "url": incident.get("html_url"),
         "service": (incident.get("service") or {}).get("summary"),
     } for incident in raw]
-    return {"state": "ok", "incidents": slim, "collected_at": time.time()}
+    # PagerDuty's own list of the open incidents on this service, for the dashboard's links.
+    base = next((i["url"].split("/incidents/")[0] for i in slim if (i.get("url") or "").count("/incidents/")),
+                "https://nscale.eu.pagerduty.com")
+    service = config.get("pagerduty_service")
+    list_url = base + "/incidents" + ("?service_ids%5B%5D=" + service if service else "")
+    return {"state": "ok", "incidents": slim, "list_url": list_url, "collected_at": time.time()}
 
 
 # -- all-regions overview ---------------------------------------------------

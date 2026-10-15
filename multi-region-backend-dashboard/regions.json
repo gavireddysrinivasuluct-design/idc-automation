@@ -45,16 +45,16 @@
       },
       "grafana_dashboards": [
         [
-          "Site observability status",
-          "/d/site-obs-status-ice2"
+          "ICE2 (Keflavik) site overview",
+          "/d/ice2-site-overview"
         ],
         [
-          "IB backend actionable",
-          "/d/ib-backend-actionable-sys1-ice2"
+          "InfiniBand XDR site overview",
+          "/d/ib-backend-site?var-cloud_region=is-sys1-ice2"
         ],
         [
-          "IB health (UFM alert jobs)",
-          "/d/ib-health-diagnostics-site-alert-jobs?var-site=sys1-ice2-p-swi-be%5Bls%5D%5B0-9%5D%2B"
+          "InfiniBand XDR device view",
+          "/d/ib-backend-device?var-cloud_region=is-sys1-ice2"
         ]
       ],
       "notes": [
@@ -110,12 +110,16 @@
       },
       "grafana_dashboards": [
         [
-          "Site observability status",
-          "/d/site-obs-status-lon14"
+          "LON14 (London) site overview",
+          "/d/lon14-site-overview"
         ],
         [
-          "IB backend site overview",
-          "/d/ib-backend-site?var-site=lon14"
+          "InfiniBand XDR site overview",
+          "/d/ib-backend-site?var-cloud_region=gb-sys1-lon14"
+        ],
+        [
+          "InfiniBand XDR device view",
+          "/d/ib-backend-device?var-cloud_region=gb-sys1-lon14"
         ]
       ],
       "notes": [
@@ -190,12 +194,12 @@
       },
       "grafana_dashboards": [
         [
-          "Site observability status",
-          "/d/site-obs-status-osl1"
+          "InfiniBand NDR site overview",
+          "/d/ufm-fabric-site?var-cloud_region=no-sys2-osl1"
         ],
         [
-          "IB health (UFM alert jobs)",
-          "/d/ib-health-diagnostics-site-alert-jobs?var-site=sys2-osl1-p-ifs-%28bel%28%5B0-9%5D%7C%5B12%5D%5B0-9%5D%7C3%5B01%5D%29%7Cbes%28%5B0-9%5D%7C1%5B0-5%5D%29%29"
+          "Backend switch health (SNMP)",
+          "/d/be-switch-health-osl1"
         ]
       ],
       "notes": [
@@ -251,8 +255,12 @@
       },
       "grafana_dashboards": [
         [
-          "IB health (UFM alert jobs)",
-          "/d/ib-health-diagnostics-site-alert-jobs?var-site=ifs%2834%5B6-9%5D%7C3%5B5-9%5D%5B0-9%5D%7C4%5B0-3%5D%5B0-9%5D%7C44%5B0-1%5D%29"
+          "STA1 (Stavanger) site overview",
+          "/d/sta1-site-overview"
+        ],
+        [
+          "InfiniBand NDR site overview",
+          "/d/ufm-fabric-site?var-cloud_region=no-sys2-sta1"
         ]
       ],
       "notes": [

@@ -31,7 +31,7 @@ from pathlib import Path
 
 import netbox_source
 import ufm_direct
-from nsr_client import Nsr, NsrError
+from nsr_client import Cache, Nsr, NsrError
 
 SPINE, LEAF = "be-spine-switch", "be-leaf-switch"
 UFM_ACTIVE = 4
@@ -337,7 +337,8 @@ class FabricStore:
         self.lock = threading.Lock()
         self.jobs: dict = {}
         self.topos: dict = {}
-        self.live: dict = {}
+        self.live = Cache(ttl)          # live overlay per site, shared by every tab
+        self.compares: dict = {}        # site -> ((netbox mtime, ufm mtime), comparison)
 
     def fabric(self, site: str) -> tuple[dict, dict]:
         region = next(r for r in self.config["regions"] if r["site"] == site)
@@ -411,9 +412,19 @@ class FabricStore:
         return topo
 
     def ufm_compare(self, site: str, topo: dict) -> dict | None:
+        """NetBox vs UFM, recomputed only when either snapshot file changes."""
         path = self.path(site, "ufm")
         if not path.is_file():
             return None
+        key = (self.topos.get(site, (None,))[0], path.stat().st_mtime)
+        cached = self.compares.get(site)
+        if cached and cached[0] == key:
+            return cached[1]
+        result = self._ufm_compare(path, topo)
+        self.compares[site] = (key, result)
+        return result
+
+    def _ufm_compare(self, path: Path, topo: dict) -> dict:
         snap = json.loads(path.read_text(encoding="utf-8"))
         switches = {s["name"] for s in topo["spines"]} | {l["name"] for l in topo["leaves"]}
         actual = ufm_direct.links_by_switch_port(snap.get("links"), switches)
@@ -430,12 +441,10 @@ class FabricStore:
                 "jobs": {k: self.jobs.get(site + ":" + k) for k in ("netbox", "ufm")}}
         if topo is None:
             return {**base, "topology": None}
-        live = self.live.get(site)
-        if force or not live or time.time() - live["collected_at"] > self.ttl:
-            src = region["sources"]
-            ufm = src.get("ufm") or {}
-            from checks import ds_uid  # local import keeps fabric.py usable on its own
-            live = live_overlay(self.nsr, topo, ufm.get("selector"), ds_uid(self.config, ufm.get("datasource")),
-                                (src.get("ping") or {}).get("selector"), ds_uid(self.config, "mimir"))
-            self.live[site] = live
+        src = region["sources"]
+        ufm = src.get("ufm") or {}
+        from checks import ds_uid  # local import keeps fabric.py usable on its own
+        live = self.live.get(site, lambda: live_overlay(
+            self.nsr, topo, ufm.get("selector"), ds_uid(self.config, ufm.get("datasource")),
+            (src.get("ping") or {}).get("selector"), ds_uid(self.config, "mimir")), force)
         return {**base, "topology": topo, "live": live, "cabling": self.ufm_compare(site, topo)}

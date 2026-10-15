@@ -24,6 +24,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+import theme
+
 HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailers",
        "transfer-encoding", "upgrade", "host", "origin", "referer", "accept-encoding", "content-length"}
 
@@ -103,6 +105,9 @@ NSR_PANEL = ('<div id="nsr-live" data-site="%s" data-after="#rail"></div>'
              '<script src="/assets/nsr_panel.js"></script>')
 
 
+LIGHT = False  # set by the service: engine pages get the same white theme (theme.py)
+
+
 def rewrite_html(html: str, site: str) -> str:
     """Make an engine page work under /<site>/: prefix root-relative links and fetches, and add
     the nsr live metrics (teal, under the page's own stat strip) to its main dashboard page."""
@@ -137,7 +142,10 @@ def forward(engine: Engine, handler, method: str, rest: str) -> None:
         conn.close()
     ctype = resp.getheader("Content-Type") or ""
     if "text/html" in ctype:
-        data = rewrite_html(data.decode("utf-8", "replace"), engine.site).encode("utf-8")
+        data = rewrite_html(data.decode("utf-8", "replace"), engine.site)
+        data = (theme.solid_tiles(theme.apply(data)) if LIGHT else data).encode("utf-8")
+    elif LIGHT and ("javascript" in ctype or "text/css" in ctype):
+        data = theme.apply(data.decode("utf-8", "replace")).encode("utf-8")
     handler.send_response(resp.status)
     for key, value in resp.getheaders():
         low = key.lower()

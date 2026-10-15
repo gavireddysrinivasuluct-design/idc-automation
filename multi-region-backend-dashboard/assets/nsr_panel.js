@@ -20,11 +20,15 @@
     ".nsrp .hd{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:0 0 8px;font:500 11px/1 'JetBrains Mono',ui-monospace,monospace;letter-spacing:.18em;text-transform:uppercase;color:var(--nsr)}" +
     ".nsrp .tag{font:700 10px 'JetBrains Mono',monospace;letter-spacing:.08em;color:#04211d;background:var(--nsr);border-radius:4px;padding:2px 6px}" +
     ".nsrp .hd .sp{flex:1}.nsrp .hd a,.nsrp .hd button{font:500 12px 'IBM Plex Sans',system-ui;letter-spacing:0;text-transform:none;color:var(--nsr);background:none;border:1px solid color-mix(in srgb,var(--nsr) 45%,transparent);border-radius:6px;padding:4px 10px;cursor:pointer;text-decoration:none}" +
-    ".nsrp .strip{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:1px;background:color-mix(in srgb,var(--nsr) 35%,#223550);border:1px solid color-mix(in srgb,var(--nsr) 45%,#223550);border-radius:10px;overflow:hidden}" +
+    ".nsrp .strip{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:0;border:1px solid color-mix(in srgb,var(--nsr) 45%,#223550);border-radius:10px;overflow:hidden}" +
+    ".nsrp .strip>div{box-shadow:inset -1px -1px 0 color-mix(in srgb,var(--nsr) 35%,#223550)}" +
     ".nsrp .strip div{background:linear-gradient(180deg,#0f2a2b,#0d1f24);padding:10px 14px}" +
     ".nsrp .strip b{display:block;font:600 24px/1.1 'Chakra Petch','Arial Narrow',system-ui;color:var(--nsr);font-variant-numeric:tabular-nums}" +
     ".nsrp .strip b.bad{color:#ff5e78}.nsrp .strip b.warn{color:#f6a93b}.nsrp .strip b.na{color:#5b6d86}" +
     ".nsrp .strip span{font-size:12px;color:#8fb8b3}" +
+    ".nsrp .strip .lnk a{display:block;color:inherit;text-decoration:none}.nsrp .strip .lnk a:hover span{text-decoration:underline}" +
+    ".nsrp .strip em.pdl{display:flex;flex-wrap:wrap;gap:4px 8px;margin-top:6px;font:500 11.5px 'JetBrains Mono',ui-monospace,monospace;font-style:normal}" +
+    ".nsrp .strip em.pdl a.pdn{color:var(--nsr);text-decoration:none}.nsrp .strip em.pdl a.pdn:hover{text-decoration:underline}" +
     ".nsrp details.box{margin-top:10px;background:#0c1d22;border:1px solid color-mix(in srgb,var(--nsr) 35%,#223550);border-radius:10px}" +
     ".nsrp details.box>summary{cursor:pointer;padding:10px 14px;font:600 15px 'Chakra Petch',system-ui;color:var(--nsr);list-style:none}" +
     ".nsrp details.box>summary::-webkit-details-marker{display:none}.nsrp .in{padding:0 14px 12px}" +
@@ -65,7 +69,22 @@
     function rows(id) { var x = c(id); return x && x.state === "ok" ? x.rows : null; }
     function sum(r) { return r ? r.reduce(function (a, x) { return a + (x.value || 0); }, 0) : null; }
 
-    function tile(val, label, cls) { return '<div><b class="' + (cls || "") + '">' + val + "</b><span>" + esc(label) + "</span></div>"; }
+    function tile(val, label, cls, href, extra) {
+      var inner = '<b class="' + (cls || "") + '">' + val + "</b><span>" + esc(label) + (href ? " \u2197" : "") + "</span>";
+      return "<div" + (href ? ' class="lnk"' : "") + ">" + (href ? '<a href="' + esc(href) + '" target="_blank" rel="noopener" title="Open in PagerDuty">' + inner + "</a>" : inner) + (extra || "") + "</div>";
+    }
+    // PagerDuty tile: opens the incident (one) or PagerDuty's open-incident list for the service
+    // (several); each incident number underneath links to that incident.
+    function pdTile(inc) {
+      var label = "open PagerDuty incidents", list = data.incidents && data.incidents.list_url;
+      if (inc == null) return tile("\u2014", label, "na");
+      if (!inc.length) return tile("0", label, "", list);
+      var href = inc.length === 1 && inc[0].url ? inc[0].url : list;
+      var nums = inc.length > 1 ? '<em class="pdl">' + inc.slice(0, 8).map(function (i) {
+        return i.url ? '<a class="pdn" href="' + esc(i.url) + '" target="_blank" rel="noopener" title="' + esc(i.title) + '">#' + esc(i.number) + "</a>" : "#" + esc(i.number);
+      }).join("") + "</em>" : "";
+      return tile(fmt(inc.length), label, "bad", href, nums);
+    }
     function draw() {
       var strip = [], pu = v("ping_up"), pt = v("ping_total"), na = rows("ufm_nonactive"), ld = rows("ufm_linkdown"), er = rows("ufm_errors"),
         srv = rows("ufm_servers"), gr = v("gnmi_ready"), gt = v("gnmi_targets"), hw = (rows("gnmi_psu_fan") || []).length + (rows("gnmi_psu_input") || []).length,
@@ -80,7 +99,7 @@
       if (gt != null || c("gnmi_targets")) strip.push(tile(gt == null ? "—" : fmt(gr) + " / " + fmt(gt), "gNMI sessions READY", gt == null ? "na" : gr < gt ? "warn" : ""));
       if (c("gnmi_psu_fan")) strip.push(tile(fmt(hw), "PSU / fan problems (gNMI)", hw ? "bad" : ""));
       if (c("snmp_total")) strip.push(tile(stt == null ? "—" : fmt(su) + " / " + fmt(stt), "SNMP targets up", stt == null ? "na" : su < stt ? "warn" : ""));
-      strip.push(tile(inc ? fmt(inc.length) : "—", "open PagerDuty incidents", inc == null ? "na" : inc.length ? "bad" : ""));
+      strip.push(pdTile(inc));
       root.querySelector("#nsrp-strip").innerHTML = strip.join("");
       var t = Math.max.apply(null, ["fabric", "switches", "reach", "events"].map(function (s) { return (data[s] && data[s].collected_at) || 0; }));
       if (t) root.querySelector("#nsrp-at").textContent = "updated " + new Date(t * 1000).toLocaleTimeString();

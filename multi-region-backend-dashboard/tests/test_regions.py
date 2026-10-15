@@ -14,6 +14,7 @@ import json
 import os
 import sys
 import threading
+import time
 import unittest
 from http.server import ThreadingHTTPServer
 from pathlib import Path
@@ -79,18 +80,18 @@ class Config(unittest.TestCase):
 class NsrClient(unittest.TestCase):
     def test_only_read_verbs_are_allowed(self):
         with self.assertRaises(ValueError):
-            Nsr(FAKE).run(("netbox", "raw"), "/api/dcim/devices/")
+            Nsr(FAKE, direct=False).run(("netbox", "raw"), "/api/dcim/devices/")
 
     def test_missing_binary_explains_install(self):
         with self.assertRaises(NsrError) as ctx:
-            Nsr("/nonexistent/nsr").query("up")
+            Nsr("/nonexistent/nsr", direct=False).query("up")
         self.assertIn("uv tool install", ctx.exception.hint)
 
     def test_failed_query_carries_hint(self):
         os.environ["FAKE_NSR_FAIL"] = "boom_metric"
         try:
             with self.assertRaises(NsrError) as ctx:
-                Nsr(FAKE).query("boom_metric")
+                Nsr(FAKE, direct=False).query("boom_metric")
             self.assertIn("400", str(ctx.exception))
         finally:
             del os.environ["FAKE_NSR_FAIL"]
@@ -99,7 +100,7 @@ class NsrClient(unittest.TestCase):
 class Overview(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        nsr = Nsr(FAKE)
+        nsr = Nsr(FAKE, direct=False)
         cls.data = checks.run_overview(nsr, CONFIG, checks.fetch_incidents(nsr, CONFIG))
         cls.by = {r["site"]: r for r in cls.data["regions"]}
 
@@ -126,10 +127,18 @@ class Overview(unittest.TestCase):
         self.assertEqual(len(self.by["ice2"]["incidents"]), 1)
         self.assertEqual(len(self.by["osl1"]["incidents"]), 0)
 
+    def test_incidents_carry_a_pagerduty_list_link(self):
+        incidents = checks.fetch_incidents(Nsr(FAKE, direct=False), CONFIG)
+        self.assertIn("/incidents", incidents["list_url"])
+        if CONFIG.get("pagerduty_service"):
+            self.assertIn(CONFIG["pagerduty_service"], incidents["list_url"])
+        region = checks.incidents_for(incidents, CONFIG["regions"][0])
+        self.assertEqual(region["list_url"], incidents["list_url"])  # the region view keeps it
+
     def test_a_failing_family_is_reported_not_hidden(self):
         os.environ["FAKE_NSR_FAIL"] = "probe_success"
         try:
-            data = checks.run_overview(Nsr(FAKE), CONFIG, {"state": "ok", "incidents": []})
+            data = checks.run_overview(Nsr(FAKE, direct=False), CONFIG, {"state": "ok", "incidents": []})
         finally:
             del os.environ["FAKE_NSR_FAIL"]
         self.assertTrue(any(e["key"].startswith("ping") for e in data["errors"]))
@@ -140,7 +149,7 @@ class Overview(unittest.TestCase):
 
 class Sections(unittest.TestCase):
     def test_fabric_offenders(self):
-        out = checks.run_section(Nsr(FAKE), region("ice2"), CONFIG, "fabric")
+        out = checks.run_section(Nsr(FAKE, direct=False), region("ice2"), CONFIG, "fabric")
         byid = {c["id"]: c for c in out["checks"]}
         self.assertEqual(byid["ufm_ports"]["value"], 9216)
         self.assertEqual(byid["ufm_nonactive"]["issues"], 2)
@@ -148,26 +157,26 @@ class Sections(unittest.TestCase):
         self.assertEqual(byid["ufm_xmit_wait"]["issues"], 0, "info checks never count as issues")
 
     def test_no_ufm_data_marks_offender_lists_no_data(self):
-        out = checks.run_section(Nsr(FAKE), region("sta1"), CONFIG, "fabric")
+        out = checks.run_section(Nsr(FAKE, direct=False), region("sta1"), CONFIG, "fabric")
         self.assertTrue(all(c["state"] == "no-data" for c in out["checks"]))
 
     def test_gnmi_only_where_collected(self):
-        self.assertFalse(checks.run_section(Nsr(FAKE), region("osl1"), CONFIG, "switches")["configured"])
-        out = checks.run_section(Nsr(FAKE), region("lon14"), CONFIG, "switches")
+        self.assertFalse(checks.run_section(Nsr(FAKE, direct=False), region("osl1"), CONFIG, "switches")["configured"])
+        out = checks.run_section(Nsr(FAKE, direct=False), region("lon14"), CONFIG, "switches")
         psu = next(c for c in out["checks"] if c["id"] == "gnmi_psu_fan")
         self.assertEqual(psu["rows"][0]["labels"]["component_name"], "PSU 2")
 
     def test_ufm_servers_flag_only_down_ones(self):
-        out = checks.run_section(Nsr(FAKE), region("osl1"), CONFIG, "reach")
+        out = checks.run_section(Nsr(FAKE, direct=False), region("osl1"), CONFIG, "reach")
         srv = next(c for c in out["checks"] if c["id"] == "ufm_servers")
         self.assertEqual((len(srv["rows"]), srv["issues"]), (2, 1))
 
     def test_events(self):
-        out = checks.run_events(Nsr(FAKE), region("sta1"), CONFIG)
+        out = checks.run_events(Nsr(FAKE, direct=False), region("sta1"), CONFIG)
         ufm = next(s for s in out["streams"] if s["id"] == "ufm_events")
         self.assertEqual(len(ufm["lines"]), 2)
         self.assertIn("Switch is down", ufm["lines"][0]["line"])  # newest first
-        self.assertFalse(checks.run_events(Nsr(FAKE), region("glo1"), CONFIG)["configured"])
+        self.assertFalse(checks.run_events(Nsr(FAKE, direct=False), region("glo1"), CONFIG)["configured"])
 
 
 class FabricModel(unittest.TestCase):
@@ -204,7 +213,7 @@ class FabricModel(unittest.TestCase):
 
     def test_live_overlay_matches_ports(self):
         r = region("osl1")
-        live = fabric.live_overlay(Nsr(FAKE), self.topo, r["sources"]["ufm"]["selector"], "infra-mimir", None, "infra-mimir")
+        live = fabric.live_overlay(Nsr(FAKE, direct=False), self.topo, r["sources"]["ufm"]["selector"], "infra-mimir", None, "infra-mimir")
         self.assertEqual(live["coverage"]["matched"], live["coverage"]["cables"])
         self.assertEqual(live["switches"]["sys2-osl1-p-ifs-bel3"]["nonactive"], 1)
 
@@ -267,7 +276,7 @@ class Http(unittest.TestCase):
     def setUpClass(cls):
         import tempfile
         dash.CACHE_DIR = Path(tempfile.mkdtemp(prefix="fabric-cache-"))
-        dash.Handler.app = dash.App(CONFIG, Nsr(FAKE), ttl=60, netbox_url=NB_URL, with_engines=False)
+        dash.Handler.app = dash.App(CONFIG, Nsr(FAKE, direct=False), ttl=60, netbox_url=NB_URL, with_engines=False)
         cls.server = ThreadingHTTPServer(("127.0.0.1", 0), dash.Handler)
         cls.port = cls.server.server_address[1]
         dash.Handler.port = cls.port
@@ -334,8 +343,32 @@ class Http(unittest.TestCase):
         before = app.nsr.calls
         self.get("/api/region/osl1/fabric")
         self.assertEqual(app.nsr.calls, before)
+        self.get("/api/region/osl1/fabric?refresh=1")  # Refresh within min_force: still shared
+        self.assertEqual(app.nsr.calls, before)
+        app.cache.min_force = 0
         self.get("/api/region/osl1/fabric?refresh=1")
         self.assertGreater(app.nsr.calls, before)
+
+    def test_stale_answer_served_while_one_background_refresh_runs(self):
+        from nsr_client import Cache
+        cache, computes, gate = Cache(ttl=0), [], threading.Event()
+
+        def compute():
+            computes.append(1)
+            if len(computes) > 1:
+                gate.wait(5)
+            return len(computes)
+
+        self.assertEqual(cache.get("k", compute), 1)                  # first request waits once
+        answers = [cache.get("k", compute) for _ in range(5)]          # five tabs, answer is stale
+        self.assertEqual(answers, [1] * 5)                             # all served at once
+        gate.set()
+        for _ in range(100):
+            if not cache.running:
+                break
+            time.sleep(0.02)
+        self.assertEqual(len(computes), 2)                             # one refresh for all of them
+        self.assertEqual(cache.items["k"][1], 2)                       # and it replaced the answer
 
 
 if __name__ == "__main__":
@@ -381,7 +414,7 @@ ThreadingHTTPServer(("127.0.0.1", port), H).serve_forever()
             free = sock.getsockname()[1]
         cls.engine = engines.Engine("ice2", {"dir": "eng", "port": free, "profile": "/nonexistent"}, root, NB_URL, root)
         cls.engine.start()
-        app = dash.App(CONFIG, Nsr(FAKE), ttl=60, netbox_url=NB_URL, with_engines=False)
+        app = dash.App(CONFIG, Nsr(FAKE, direct=False), ttl=60, netbox_url=NB_URL, with_engines=False)
         app.engines = {"ice2": cls.engine}
         dash.Handler.app = app
         cls.server = ThreadingHTTPServer(("127.0.0.1", 0), dash.Handler)
@@ -414,7 +447,8 @@ ThreadingHTTPServer(("127.0.0.1", port), H).serve_forever()
         self.assertIn('<script src="/assets/nsr_panel.js">', page, "added after the prefix rewrite, so served by this service")
         status, js = self.req("GET", "/assets/nsr_panel.js")
         self.assertEqual(status, 200)
-        self.assertIn(b"#2dd4bf", js)
+        import theme
+        self.assertIn(theme.light("#2dd4bf").encode(), js)  # served in the white theme by default
         self.assertEqual(self.req("GET", "/ice2")[0], 302)
 
     def test_api_and_post_pass_the_engine_guards(self):

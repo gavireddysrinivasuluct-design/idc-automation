@@ -46,6 +46,7 @@ sys.path.insert(0, str(ROOT))
 import checks  # noqa: E402
 import device_connect  # noqa: E402
 import engines  # noqa: E402
+import theme  # noqa: E402
 import ufm_access  # noqa: E402
 from fabric import FabricStore  # noqa: E402
 from nsr_client import Cache, Nsr  # noqa: E402
@@ -91,6 +92,7 @@ class App:
         def compute():
             data = checks.run_overview(self.nsr, self.config, self.incidents(force))
             data["nsr_calls"] = self.nsr.calls
+            data["grafana_direct_calls"] = self.nsr.direct_calls
             return data
         return self.cache.get("overview", compute, force)
 
@@ -123,12 +125,15 @@ class Handler(BaseHTTPRequestHandler):
     app: App
     port: int = 8765
     server_version = "backend-regions/1"
+    light = True  # serve pages in the white theme (theme.py); --dark serves them as written
 
     def log_message(self, fmt, *args):  # quiet: the page polls
         if args and str(args[1] if len(args) > 1 else "").startswith(("4", "5")):
             sys.stderr.write("[regions] " + fmt % args + "\n")
 
     def respond(self, code, body, content_type="application/json; charset=utf-8"):
+        if self.light and isinstance(body, str) and content_type.startswith(("text/html", "text/javascript")):
+            body = theme.apply(body)
         data = body.encode("utf-8") if isinstance(body, str) else json.dumps(body, default=str).encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", content_type)
@@ -184,7 +189,9 @@ class Handler(BaseHTTPRequestHandler):
                     return self.respond(HTTPStatus.OK, self.app.fabrics.jobs.get(parts[2] + ":" + parts[3]) or {"state": "idle"})
                 return self.respond(HTTPStatus.OK, self.app.fabrics.view(parts[2], force))
             if path == "/api/health":
-                return self.respond(HTTPStatus.OK, {"ok": True, "nsr_calls": self.app.nsr.calls})
+                return self.respond(HTTPStatus.OK, {"ok": True, "nsr_calls": self.app.nsr.calls,
+                                                     "grafana_direct_calls": self.app.nsr.direct_calls,
+                                                     "grafana_fallback": self.app.nsr.direct_error or None})
             return self.respond(HTTPStatus.NOT_FOUND, {"error": "not found"})
         except Exception as error:  # noqa: BLE001 - never leave the browser hanging
             return self.respond(HTTPStatus.INTERNAL_SERVER_ERROR, {"error": str(error)})
@@ -252,14 +259,19 @@ def main(argv=None) -> int:
     parser.add_argument("--no-engines", action="store_true", help="do not start the ICE2/LON14 engines")
     parser.add_argument("--nsr", default=None, help="path to nsr (default: PATH or ~/.local/bin/nsr)")
     parser.add_argument("--regions", default=str(ROOT / "regions.json"))
-    parser.add_argument("--cache-seconds", type=int, default=60, help="how long live answers are reused (default 60)")
+    parser.add_argument("--cache-seconds", type=int, default=120,
+                        help="how old a live answer may get before one background refresh (default 120)")
+    parser.add_argument("--dark", action="store_true", help="serve the pages in their original dark theme")
+    parser.add_argument("--no-direct", action="store_true",
+                        help="run every Grafana query through nsr (one process each) instead of in-process")
     parser.add_argument("--max-parallel", type=int, default=6, help="max simultaneous nsr processes (default 6)")
     parser.add_argument("--warm", action="store_true", help="load the overview once at start")
     args = parser.parse_args(argv)
     config = load_config(Path(args.regions))
-    nsr = Nsr(args.nsr, max_parallel=max(1, min(args.max_parallel, 12)))
+    nsr = Nsr(args.nsr, max_parallel=max(1, min(args.max_parallel, 12)), direct=not args.no_direct)
     app = App(config, nsr, args.cache_seconds, args.netbox_url, Path(args.device_profile), not args.no_engines)
     Handler.app, Handler.port = app, args.port
+    Handler.light = engines.LIGHT = not args.dark
     server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     server.daemon_threads = True
     print("Backend fabric dashboard: http://127.0.0.1:%d/   (nsr: %s; engines: %s)" % (

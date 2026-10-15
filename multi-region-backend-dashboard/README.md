@@ -85,6 +85,33 @@ The Teleport login is optional; empty uses your `tsh` default, as plain `tsh ssh
   matrix, the canvas with live status and miscabling, the inspector, **Cabling vs UFM**, the
   scalable units and the design checks.
 
+### White theme
+
+Every page (region pages, fabric views and the ICE2 / LON14 engine pages behind /ice2/ and
+/lon14/) is served on a white background. The pages are still written dark; `theme.py`
+rewrites their colours as they are served, keeping each colour's hue: near-black
+backgrounds become white, panels light grey, light text dark, and bright accents (rails,
+spines, status colours, the nsr teal) deeper so they read on white. White as a text colour (labels on coloured
+buttons, such as the selected tab) stays white. On the ICE2 / LON14 fabric drawing the switch
+and UFM tiles are an opaque light tint of their colour (spines and UFM purple, leaves their
+rail colour) with a full-colour border and dark, bold labels, and the spine-leaf cable mesh is
+drawn stronger so it shows on white. Start the service with `--dark` for the original dark look.
+
+### How live data is fetched (light on the laptop)
+
+- Grafana (Mimir, VictoriaMetrics, Loki) is queried inside the service, over kept-alive
+  HTTPS connections with the Teleport app certificate nsr uses (`tsh apps config
+  observability-grafana`; renewed with `tsh apps login` when it expires). No process is
+  started per query. If that path fails for a reason other than the query itself, the query
+  falls back to `nsr`. PagerDuty still goes through `nsr` (one call per refresh).
+  `--no-direct` sends every query through `nsr` as before.
+- Every answer is shared by all open tabs: a request gets the stored answer at once, and when
+  it is older than `--cache-seconds` (default 120) one background refresh runs. Nothing is
+  queried while no page is open. ⟳ Refresh recomputes at most once per 30 s.
+- The NetBox-vs-UFM comparison in the fabric view is rebuilt only when a NetBox or UFM
+  snapshot changes.
+- `/api/health` shows `grafana_direct_calls` and `nsr_calls` (processes started).
+
 ### nsr metrics inside every fabric page (teal)
 
 Every fabric page (the ICE2 and LON14 engines too) carries the nsr live metrics directly
@@ -93,7 +120,9 @@ they are never mistaken for NetBox / UFM / switch data: a teal stat strip (ping,
 UFM telemetry, ports not Active, link-downs and errors in 15 min, UFM servers, gNMI sessions,
 PSU/fan problems, SNMP, open PagerDuty incidents), then **Live issues (nsr)** ranked with
 the affected switches and ports, UFM event-log lines and the incidents. It refreshes every
-60 s or with its own ⟳ Refresh. In the NetBox-first view the nsr-derived values on the page
+60 s or with its own ⟳ Refresh. The *open PagerDuty incidents* tile links to the incident (one) or
+PagerDuty's open-incident list for the service (several), with each incident number linked
+under it. In the NetBox-first view the nsr-derived values on the page
 (per-cable live state, *Live status (nsr)* chip, *UFM · nsr* and *Ping · nsr* in the
 inspector) are teal as well.
 
@@ -261,6 +290,7 @@ editing.
 | `scripts/open_regions.command` | One-click start of the single service |
 | `device_connect.py` | Click-the-IP switch login: resolves the IP, opens Terminal |
 | `ufm_access.py` | UFM CLI (iTerm) and web UI (browser through nscaleproxy) |
+| `theme.py` | White theme: rewrites the pages' colours as they are served (`--dark` to skip) |
 | `scripts/connect_switch.exp` | Runs in that Terminal: jump host → switch, password from `op read` |
 | `tests/` | Offline tests with `fake_nsr.py` and `fake_netbox.py` (invented data) |
 
