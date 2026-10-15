@@ -120,9 +120,9 @@ they are never mistaken for NetBox / UFM / switch data: a teal stat strip (ping,
 UFM telemetry, ports not Active, link-downs and errors in 15 min, UFM servers, gNMI sessions,
 PSU/fan problems, SNMP, open PagerDuty incidents), then **Live issues (nsr)** ranked with
 the affected switches and ports, UFM event-log lines and the incidents. It refreshes every
-60 s or with its own ⟳ Refresh. The *open PagerDuty incidents* tile links to the incident (one) or
-PagerDuty's open-incident list for the service (several), with each incident number linked
-under it. In the NetBox-first view the nsr-derived values on the page
+60 s or with its own ⟳ Refresh. The *open PagerDuty incidents* tile opens the incident in PagerDuty when
+there is one, and jumps to this site's own incident list in the panel when there are several
+(PagerDuty's list can only filter by service, not site); each incident number is linked. In the NetBox-first view the nsr-derived values on the page
 (per-cable live state, *Live status (nsr)* chip, *UFM · nsr* and *Ping · nsr* in the
 inspector) are teal as well.
 

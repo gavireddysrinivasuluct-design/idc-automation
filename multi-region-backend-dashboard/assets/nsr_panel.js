@@ -60,6 +60,14 @@
       });
     }
     root.querySelector("#nsrp-ref").onclick = function () { load(true); };
+    root.addEventListener("click", function (e) {
+      var a = e.target.closest && e.target.closest("a[data-jump]");
+      if (!a) return;
+      e.preventDefault();
+      var box = root.querySelector("#nsrp-box"), list = root.querySelector("#nsrp-inc");
+      if (box) box.open = true;
+      if (list) { list.open = true; list.scrollIntoView({ behavior: "smooth", block: "center" }); }
+    });
     load(false);
     setInterval(function () { if (!document.hidden) load(false); }, 60000);
 
@@ -69,21 +77,24 @@
     function rows(id) { var x = c(id); return x && x.state === "ok" ? x.rows : null; }
     function sum(r) { return r ? r.reduce(function (a, x) { return a + (x.value || 0); }, 0) : null; }
 
-    function tile(val, label, cls, href, extra) {
-      var inner = '<b class="' + (cls || "") + '">' + val + "</b><span>" + esc(label) + (href ? " \u2197" : "") + "</span>";
-      return "<div" + (href ? ' class="lnk"' : "") + ">" + (href ? '<a href="' + esc(href) + '" target="_blank" rel="noopener" title="Open in PagerDuty">' + inner + "</a>" : inner) + (extra || "") + "</div>";
+    function tile(val, label, cls, href, extra, local) {
+      var inner = '<b class="' + (cls || "") + '">' + val + "</b><span>" + esc(label) + (href ? (local ? " \u2193" : " \u2197") : "") + "</span>";
+      var a = local ? '<a href="#nsrp-inc" data-jump="1" title="Show this site\'s incidents below">'
+                    : '<a href="' + esc(href) + '" target="_blank" rel="noopener" title="Open in PagerDuty">';
+      return "<div" + (href ? ' class="lnk"' : "") + ">" + (href ? a + inner + "</a>" : inner) + (extra || "") + "</div>";
     }
-    // PagerDuty tile: opens the incident (one) or PagerDuty's open-incident list for the service
-    // (several); each incident number underneath links to that incident.
+    // PagerDuty tile: one incident opens it in PagerDuty; several jump to this site's incident list
+    // below (PagerDuty's own list can only filter by service, not by site). Each incident number
+    // underneath links to that incident.
     function pdTile(inc) {
-      var label = "open PagerDuty incidents", list = data.incidents && data.incidents.list_url;
+      var label = "open PagerDuty incidents";
       if (inc == null) return tile("\u2014", label, "na");
-      if (!inc.length) return tile("0", label, "", list);
-      var href = inc.length === 1 && inc[0].url ? inc[0].url : list;
+      if (!inc.length) return tile("0", label, "");
+      var one = inc.length === 1 && inc[0].url, href = one || "#nsrp-inc";
       var nums = inc.length > 1 ? '<em class="pdl">' + inc.slice(0, 8).map(function (i) {
         return i.url ? '<a class="pdn" href="' + esc(i.url) + '" target="_blank" rel="noopener" title="' + esc(i.title) + '">#' + esc(i.number) + "</a>" : "#" + esc(i.number);
       }).join("") + "</em>" : "";
-      return tile(fmt(inc.length), label, "bad", href, nums);
+      return tile(fmt(inc.length), label, "bad", href, nums, !one);
     }
     function draw() {
       var strip = [], pu = v("ping_up"), pt = v("ping_total"), na = rows("ufm_nonactive"), ld = rows("ufm_linkdown"), er = rows("ufm_errors"),
@@ -115,7 +126,7 @@
       }).join("");
       if (ev && ev.lines && ev.lines.length) html += '<details class="iss"><summary><span class="sev major">major</span>UFM event log: critical / error / down events, last hour<span class="n">' + ev.lines.length + '</span></summary><div class="in"><div class="log">' +
         ev.lines.map(function (l) { return "<div><time>" + esc(new Date(l.ts * 1000).toISOString().slice(5, 19).replace("T", " ")) + "</time>" + esc(l.line) + "</div>"; }).join("") + "</div></div></details>";
-      if (inc && inc.length) html += '<details class="iss" open><summary><span class="sev critical">pagerduty</span>Open BackEnd Network incidents<span class="n">' + inc.length + "</span></summary><table><tr><th>#</th><th>Incident</th><th>Status</th></tr>" +
+      if (inc && inc.length) html += '<details class="iss" id="nsrp-inc" open><summary><span class="sev critical">pagerduty</span>Open BackEnd Network incidents<span class="n">' + inc.length + "</span></summary><table><tr><th>#</th><th>Incident</th><th>Status</th></tr>" +
         inc.map(function (i) { return "<tr><td>" + (i.url ? '<a style="color:var(--nsr)" target="_blank" rel="noopener" href="' + esc(i.url) + '">' + esc(i.number) + "</a>" : esc(i.number)) + "</td><td>" + esc(i.title) + "</td><td>" + esc(i.status) + "</td></tr>"; }).join("") + "</table></details>";
       var errs = checks().filter(function (x) { return x.state === "error"; });
       var loading = ["fabric", "switches", "reach", "events", "incidents"].some(function (s) { return !data[s]; });
