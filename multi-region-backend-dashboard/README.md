@@ -237,7 +237,8 @@ showed a healthy standby as down ("1 / 2"). Where the command exporter reports
 (`cmdexp-ufm-ha-cluster-status`: ICE2, LON14, OSL1, set as `ufm_ha` in `regions.json`), a UFM
 server counts as up when it holds an HA role, and is shown as *master (primary)* or *standby
 (secondary)*; *UFM HA pair* raises an issue when a node is offline or DRBD replication is not
-established. STA1 and GLO1, without the exporter, keep the monitoring-scrape check.
+established. STA1 and GLO1, without the exporter, keep the monitoring-scrape check. On the ICE2 / LON14 fabric drawings the
+UFM boxes' corner label shows the same role (● MASTER / STANDBY), refreshed with the nsr panel.
 
 ### How the NetBox-first view reads the fabric
 

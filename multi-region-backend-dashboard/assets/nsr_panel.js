@@ -75,6 +75,30 @@
     function c(id) { return checks().filter(function (x) { return x.id === id; })[0]; }
     function v(id) { var x = c(id); return x && x.kind === "value" ? x.value : null; }
     function rows(id) { var x = c(id); return x && x.state === "ok" ? x.rows : null; }
+    // UFM boxes on the page's fabric drawing (ICE2 / LON14): the corner label shows the server's
+    // HA role from the command exporter (MASTER / STANDBY), matched by the box's hostname line.
+    function markUfmRoles(srv) {
+      if (!srv) return;
+      var byName = {};
+      srv.forEach(function (r) { byName[r.labels.name || r.labels.instance] = r; });
+      document.querySelectorAll("g.tile.node").forEach(function (g) {
+        var host = g.querySelector("text.nh"), tag = g.querySelector("text.nv");
+        var r = host && tag && byName[host.textContent.trim()];
+        if (!r) return;
+        var role = r.labels.role || "", master = role.indexOf("master") === 0, standby = role.indexOf("standby") === 0;
+        var colour = master ? "#38d9a0" : standby ? "#4ea8ff" : r.value === 1 ? "#8b9db6" : "#ff5e78";
+        tag.textContent = master ? "\u25CF MASTER" : standby ? "STANDBY" : r.value === 1 ? "UP" : "NO HA ROLE";
+        tag.setAttribute("fill", colour);
+        tag.style.fontWeight = "800"; tag.style.fontSize = "11.5px"; tag.style.letterSpacing = ".1em";
+        // a pill behind the label so the role stands out on the box
+        var box = tag.getBBox(), pill = g.querySelector("rect.ha-pill");
+        if (!pill) { pill = document.createElementNS("http://www.w3.org/2000/svg", "rect"); pill.setAttribute("class", "ha-pill"); g.insertBefore(pill, tag); }
+        pill.setAttribute("x", box.x - 6); pill.setAttribute("y", box.y - 3); pill.setAttribute("width", box.width + 12); pill.setAttribute("height", box.height + 6);
+        pill.setAttribute("rx", 4); pill.setAttribute("fill", colour); pill.setAttribute("fill-opacity", ".16"); pill.setAttribute("stroke", colour); pill.setAttribute("stroke-opacity", ".6");
+        var title = tag.querySelector("title") || tag.appendChild(document.createElementNS("http://www.w3.org/2000/svg", "title"));
+        title.textContent = "UFM HA role (command exporter): " + (role || (r.value === 1 ? "up" : "no HA role"));
+      });
+    }
     function sum(r) { return r ? r.reduce(function (a, x) { return a + (x.value || 0); }, 0) : null; }
 
     function tile(val, label, cls, href, extra, local) {
@@ -112,6 +136,7 @@
       if (c("snmp_total")) strip.push(tile(stt == null ? "—" : fmt(su) + " / " + fmt(stt), "SNMP targets up", stt == null ? "na" : su < stt ? "warn" : ""));
       strip.push(pdTile(inc));
       root.querySelector("#nsrp-strip").innerHTML = strip.join("");
+      markUfmRoles(rows("ufm_servers"));
       var t = Math.max.apply(null, ["fabric", "switches", "reach", "events"].map(function (s) { return (data[s] && data[s].collected_at) || 0; }));
       if (t) root.querySelector("#nsrp-at").textContent = "updated " + new Date(t * 1000).toLocaleTimeString();
 
