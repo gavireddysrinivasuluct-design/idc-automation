@@ -443,8 +443,8 @@ class FabricStore:
             return {**base, "topology": None}
         src = region["sources"]
         ufm = src.get("ufm") or {}
-        from checks import ds_uid  # local import keeps fabric.py usable on its own
+        from checks import ds_uid, ufm_selector  # local import keeps fabric.py usable on its own
         live = self.live.get(site, lambda: live_overlay(
-            self.nsr, topo, ufm.get("selector"), ds_uid(self.config, ufm.get("datasource")),
+            self.nsr, topo, ufm_selector(ufm) if ufm.get("selector") else None, ds_uid(self.config, ufm.get("datasource")),
             (src.get("ping") or {}).get("selector"), ds_uid(self.config, "mimir")), force)
         return {**base, "topology": topo, "live": live, "cabling": self.ufm_compare(site, topo)}

@@ -19,6 +19,26 @@ from nsr_client import Nsr, NsrError
 
 MAX_ROWS = 200
 UFM_ACTIVE = 4  # UFM logical_state: 4 = Active
+
+
+# UFM HA (command exporter, job cmdexp-ufm-ha-cluster-status): one row per server, 1 when it
+# holds an HA role (Primary = master, Secondary = standby), 0 when it is listed but has none.
+UFM_HA_SERVERS = (
+    'label_replace(label_replace(max by (name, state) (ufm_ha_role{%s,who="self",state=~"Primary|Secondary"} == 1),'
+    ' "role", "master (primary)", "state", "Primary"), "role", "standby (secondary)", "state", "Secondary")'
+    ' or on (name) (max by (name) (ufm_ha_info{%s}) * 0)')
+UFM_HA_PROBLEMS = (
+    'label_replace(max by (name) (ufm_ha_both_nodes_online{%s} == 0), "problem", "peer node offline", "", "")'
+    ' or label_replace(max by (name) (ufm_ha_replication_established{%s} == 0), "problem", "replication not established", "", "")')
+
+
+def ufm_selector(src: dict) -> str:
+    """A region's UFM selector, without UFM's unnamed devices: the SHARP aggregation nodes
+    (node_desc "aggregation node", one per switch ASIC, empty device_name) are reported as
+    one-port switches and would otherwise count as an extra switch and extra ports."""
+    return src["selector"] + ',device_name!=""'
+
+
 ERROR_COUNTERS = ("SymbolErrorCounterExtended|PortRcvErrorsExtended|LocalLinkIntegrityErrorsExtended|"
                   "PortRcvRemotePhysicalErrorsExtended")
 DISCARD_COUNTERS = "PortXmitDiscardsExtended|VL15DroppedExtended|ExcessiveBufferOverrunErrorsExtended"
@@ -67,7 +87,7 @@ def fabric_checks(region: dict, config: dict) -> list[dict]:
     ufm = region["sources"].get("ufm")
     if not ufm:
         return []
-    s, ds = ufm["selector"], ds_uid(config, ufm.get("datasource"))
+    s, ds = ufm_selector(ufm), ds_uid(config, ufm.get("datasource"))
     state = "last_over_time(logical_state{%s}[6m])" % s
     return [
         {"id": "ufm_switches", "kind": "value", "title": "Switches reporting to UFM", "datasource": ds,
@@ -160,20 +180,33 @@ def reach_checks(region: dict, config: dict) -> list[dict]:
         ]
     if src.get("ufm_server"):
         u, ds = src["ufm_server"]["selector"], ds_uid(config, src["ufm_server"].get("datasource"))
+        if src.get("ufm_ha"):
+            # UFM runs as an HA pair: only the master answers the monitoring scrape, so up{} shows a
+            # healthy standby as down. The command exporter's HA cluster status says what each is.
+            h, hds = src["ufm_ha"]["selector"], ds_uid(config, src["ufm_ha"].get("datasource"))
+            out += [
+                {"id": "ufm_servers", "kind": "rows", "severity": "major", "datasource": hds, "all_rows": True,
+                 "title": "UFM servers (HA cluster status)", "columns": ["name", "role", "value:up"], "bad_when": "value==0",
+                 "action": "A UFM server with no HA role has left the cluster: check pacemaker (pcs status) on both nodes.",
+                 "promql": UFM_HA_SERVERS % (h, h)},
+                {"id": "ufm_ha_pair", "kind": "rows", "severity": "major", "datasource": hds,
+                 "title": "UFM HA pair: a node offline or replication broken", "columns": ["name", "problem"],
+                 "action": "Check pacemaker and DRBD on both UFM nodes (pcs status, drbdadm status) before a failover is needed.",
+                 "promql": UFM_HA_PROBLEMS % (h, h)},
+            ]
+        else:
+            out.append(
+                {"id": "ufm_servers", "kind": "rows", "severity": "major", "datasource": ds, "all_rows": True,
+                 "title": "UFM servers (monitoring scrape)", "columns": ["name", "value:up"], "bad_when": "value==0",
+                 "action": "A UFM server that stops answering loses its view of the fabric; check UFM HA and the monitoring account.",
+                 "promql": "up{%s}" % u})
         out += [
-            {"id": "ufm_servers", "kind": "rows", "severity": "major", "datasource": ds, "all_rows": True,
-             "title": "UFM servers (monitoring scrape)", "columns": ["name", "value:up"], "bad_when": "value==0",
-             "action": "A UFM server that stops answering loses its view of the fabric; check UFM HA and the monitoring account.",
-             "promql": "up{%s}" % u},
             {"id": "ufm_cpu", "kind": "rows", "severity": "info", "datasource": ds, "all_rows": True,
              "title": "UFM CPU %, last 5 min", "columns": ["name", "value:%"],
              "promql": 'max by (instance) (ufm_model_main_cpu_usage_percent_avg{%s,duration="Last 5 minutes"})' % u},
             {"id": "ufm_mem", "kind": "rows", "severity": "info", "datasource": ds, "all_rows": True,
              "title": "UFM memory %, last 5 min", "columns": ["name", "value:%"],
              "promql": 'max by (instance) (ufm_model_main_memory_usage_percent_avg{%s,duration="Last 5 minutes"})' % u},
-            {"id": "ufm_ha_role", "kind": "rows", "severity": "info", "datasource": mimir, "all_rows": True,
-             "title": "UFM HA role (command-exporter)", "columns": ["name", "role", "value:"],
-             "promql": 'max by (instance, ufm_node, role) (ufm_ha_role{cloud_region=~"%s"})' % cloud_regex(region)},
         ]
     return out
 
@@ -303,12 +336,12 @@ def overview_queries(config: dict) -> list[dict]:
     regions, mimir = config["regions"], ds_uid(config, "mimir")
     queries = []
 
-    def add(key, template, source, datasource_of=lambda src: mimir, wrap="count"):
+    def add(key, template, source, datasource_of=lambda src: mimir, wrap="count", only=lambda region: True):
         groups: dict[str, list[str]] = {}
         for region in regions:
             src = region["sources"].get(source)
-            if src:
-                groups.setdefault(datasource_of(src), []).append(src["selector"])
+            if src and only(region):
+                groups.setdefault(datasource_of(src), []).append(ufm_selector(src) if source == "ufm" else src["selector"])
         for ds, selectors in groups.items():
             queries.append({"key": key, "datasource": ds,
                             "promql": "%s by (cloud_region) (%s)" % (wrap, _union(template, selectors))})
@@ -318,8 +351,13 @@ def overview_queries(config: dict) -> list[dict]:
     add("ping_total", "probe_success{%s}", "ping")
     add("snmp_up", "up{%s}", "snmp", wrap="sum")
     add("snmp_total", "up{%s}", "snmp")
-    add("ufm_server_up", "up{%s}", "ufm_server", ufm_ds, wrap="sum")
-    add("ufm_server_total", "up{%s}", "ufm_server", ufm_ds)
+    # UFM servers: by HA cluster status where the command exporter covers the site (a healthy
+    # standby is not scraped, so up{} would count it down); by the monitoring scrape elsewhere.
+    no_ha = lambda region: not region["sources"].get("ufm_ha")  # noqa: E731
+    add("ufm_server_up", "up{%s}", "ufm_server", ufm_ds, wrap="sum", only=no_ha)
+    add("ufm_server_total", "up{%s}", "ufm_server", ufm_ds, only=no_ha)
+    add("ufm_server_up", 'ufm_ha_role{%s,who="self",state=~"Primary|Secondary"} == 1', "ufm_ha", ufm_ds)
+    add("ufm_server_total", "ufm_ha_info{%s}", "ufm_ha", ufm_ds)
     add("ufm_ports", "last_over_time(logical_state{%s}[6m])", "ufm", ufm_ds)
     add("ufm_nonactive", "last_over_time(logical_state{%%s}[6m]) != %d" % UFM_ACTIVE, "ufm", ufm_ds)
     add("ufm_linkdown_ports", "sum by (cloud_region, device_name, port_id) "

@@ -222,6 +222,23 @@ The UFMs come from nscaleproxy's host map (`netops-misc/nscaleproxy`, installed 
 Today: ICE2 ufm1/ufm2 (CLI via jmp0, web), OSL1 ufm0/ufm1 (CLI, web), STA1 ufm2 (CLI, web)
 and ufm4 (web only). LON14 and GLO1 have no UFM in the host map or Teleport.
 
+### UFM counts leave out SHARP aggregation nodes
+
+UFM also reports its SHARP aggregation nodes (in-network compute, one per switch ASIC: 400 on
+ICE2's 100 Q3400 switches) as one-port "switches" with no device name. Every UFM query adds
+`device_name!=""` (`checks.ufm_selector`), so *switches in UFM telemetry* and the port counts
+cover real switches only: ICE2 and LON14 100, OSL1 48, STA1 96 (UFM manages the 96 QM9700s, not
+the 24 Nokia switches).
+
+### UFM servers: HA role, not the monitoring scrape
+
+UFM runs as a pacemaker HA pair, and only the master answers the monitoring scrape, so `up{}`
+showed a healthy standby as down ("1 / 2"). Where the command exporter reports
+(`cmdexp-ufm-ha-cluster-status`: ICE2, LON14, OSL1, set as `ufm_ha` in `regions.json`), a UFM
+server counts as up when it holds an HA role, and is shown as *master (primary)* or *standby
+(secondary)*; *UFM HA pair* raises an issue when a node is offline or DRBD replication is not
+established. STA1 and GLO1, without the exporter, keep the monitoring-scrape check.
+
 ### How the NetBox-first view reads the fabric
 
 - Rails are the GPU NIC names used across the fabric (`ib0..ib7`, `mlx5_0..3`), in order; a

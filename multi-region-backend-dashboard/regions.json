@@ -41,6 +41,10 @@
         },
         "ufm_events": {
           "logql": "{host_name=~\"sys1-ice2-p-phy-ufm[0-9]+\"}"
+        },
+        "ufm_ha": {
+          "datasource": "mimir",
+          "selector": "job=\"cmdexp-ufm-ha-cluster-status\",cloud_region=\"is-sys1-ice2\""
         }
       },
       "grafana_dashboards": [
@@ -106,6 +110,10 @@
         },
         "ufm_events": {
           "logql": "{host_name=~\".*lon14.*ufm.*\"}"
+        },
+        "ufm_ha": {
+          "datasource": "mimir",
+          "selector": "job=\"cmdexp-ufm-ha-cluster-status\",cloud_region=\"gb-sys1-lon14\""
         }
       },
       "grafana_dashboards": [
@@ -185,6 +193,10 @@
         },
         "syslog": {
           "logql": "{cloud_region=\"no-sys2-osl1\", nscale_log_source=\"infra-collector-syslog\"}"
+        },
+        "ufm_ha": {
+          "datasource": "mimir",
+          "selector": "job=\"cmdexp-ufm-ha-cluster-status\",cloud_region=\"no-sys2-osl1\""
         }
       },
       "fabric_view": {

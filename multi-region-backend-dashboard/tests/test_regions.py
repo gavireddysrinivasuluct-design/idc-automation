@@ -171,6 +171,25 @@ class Sections(unittest.TestCase):
         srv = next(c for c in out["checks"] if c["id"] == "ufm_servers")
         self.assertEqual((len(srv["rows"]), srv["issues"]), (2, 1))
 
+    def test_ufm_servers_use_ha_roles_where_the_command_exporter_reports(self):
+        out = checks.run_section(Nsr(FAKE, direct=False), region("ice2"), CONFIG, "reach")
+        srv = next(c for c in out["checks"] if c["id"] == "ufm_servers")
+        self.assertIn("HA cluster status", srv["title"])
+        self.assertEqual(sorted(r["labels"]["role"] for r in srv["rows"]), ["master (primary)", "standby (secondary)"])
+        self.assertEqual(srv["issues"], 0)                          # a healthy standby is not "down"
+        pair = next(c for c in out["checks"] if c["id"] == "ufm_ha_pair")
+        self.assertEqual(pair["issues"], 0)
+        osl1 = checks.run_section(Nsr(FAKE, direct=False), region("osl1"), CONFIG, "reach")
+        self.assertEqual(next(c for c in osl1["checks"] if c["id"] == "ufm_ha_pair")["issues"], 1)
+        sta1 = checks.run_section(Nsr(FAKE, direct=False), region("sta1"), CONFIG, "reach")
+        self.assertIn("monitoring scrape", next(c for c in sta1["checks"] if c["id"] == "ufm_servers")["title"])
+
+    def test_overview_counts_ufm_servers_by_ha_role(self):
+        data = checks.run_overview(Nsr(FAKE, direct=False), CONFIG, {"state": "ok", "incidents": []})
+        by = {r["site"]: r["metrics"] for r in data["regions"]}
+        self.assertEqual((by["ice2"]["ufm_server_up"], by["ice2"]["ufm_server_total"]), (2, 2))
+        self.assertEqual((by["osl1"]["ufm_server_up"], by["osl1"]["ufm_server_total"]), (1, 2))
+
     def test_events(self):
         out = checks.run_events(Nsr(FAKE, direct=False), region("sta1"), CONFIG)
         ufm = next(s for s in out["streams"] if s["id"] == "ufm_events")

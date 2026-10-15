@@ -23,17 +23,22 @@ SITES = {
         "linkdown": [("sys1-ice2-p-swi-bel31", "2801cd0300784c80_85", 3)],
         "errors": [("sys1-ice2-p-swi-bel19", "2801cd0300783860_15", 1210)],
         "gnmi": (100, 100), "netbox_site": "ice2", "optics_hot": {"sys1-ice2-p-swi-bel44": 1},
+        "ufm_ha": {"sys1-ice2-p-phy-ufm1": "Primary", "sys1-ice2-p-phy-ufm2": "Secondary"},
     },
     "gb-sys1-lon14": {
         "ping": (99, 100), "ping_down": ["sys1-lon14-p-swi-bel12"], "snmp": (100, 100),
         "ufm_srv": {"10.2.10.11": 1, "10.2.10.12": 1}, "ufm_ports": 7168, "ufm_switches": 100,
         "nonactive": {}, "linkdown": [], "errors": [], "gnmi": (100, 100), "netbox_site": "lon14",
         "psu": [("sys1-lon14-p-swi-bes3", "PSU 2", "INACTIVE")],
+        "ufm_ha": {"sys1-lon14-p-phy-ufm1": "Primary", "sys1-lon14-p-phy-ufm2": "Secondary"},
     },
     "no-sys2-osl1": {
         "ping": (48, 48), "snmp": (48, 48), "ufm_srv": {"sys2-osl1-p-phy-ufm0": 1, "sys2-osl1-p-phy-ufm1": 0},
         "ufm_ports": 3144, "ufm_switches": 48, "nonactive": {"sys2-osl1-p-ifs-bel3": 1},
         "linkdown": [("sys2-osl1-p-ifs-bel5", "b8cef60300000005_3", 2)], "errors": [("sys2-osl1-p-ifs-bes9", "b8cef6030012ab40_33", 42)],
+        # ufm1 is listed in the HA cluster but holds no role; the pair reports the peer offline
+        "ufm_ha": {"sys2-osl1-p-phy-ufm0": "Primary", "sys2-osl1-p-phy-ufm1": None},
+        "ufm_ha_problems": [("sys2-osl1-p-phy-ufm0", "peer node offline")],
     },
     "no-sys2-sta1": {
         "ping": (95, 96), "ping_down": ["ifs378"], "ufm_srv": {"sta1-p-phy-ufm2": 0, "sta1-p-phy-ufm4": 0},
@@ -112,6 +117,10 @@ def site_value(cr, q):
     d = SITES[cr]
     if "probe_success" in q:
         return d.get("ping", (None, None))[0 if q.startswith("sum") else 1]
+    if "ufm_ha_role" in q:   # overview: servers holding an HA role
+        return sum(1 for r in d.get("ufm_ha", {}).values() if r) or None if "ufm_ha" in d else None
+    if "ufm_ha_info" in q:   # overview: servers in the HA cluster
+        return len(d["ufm_ha"]) if "ufm_ha" in d else None
     if "ufm-system-monitoring" in q:
         if "ufm_srv" not in d:
             return None
@@ -187,8 +196,12 @@ def per_site(q):
         if "ping" not in d:
             return vec([])
         return vec([({}, d["ping"][0] if q.startswith("sum") else d["ping"][1])])
-    if "ufm_ha_role" in q:
-        return vec([({"instance": "ufm1", "role": "master"}, 1)] if cr == "is-sys1-ice2" else [])
+    if "ufm_ha_role" in q:   # per-server HA role (checks.UFM_HA_SERVERS)
+        names = {"Primary": "master (primary)", "Secondary": "standby (secondary)"}
+        return vec([({"name": n, "state": r, "role": names[r]}, 1) if r else ({"name": n}, 0)
+                    for n, r in d.get("ufm_ha", {}).items()])
+    if "ufm_ha_both_nodes_online" in q:   # checks.UFM_HA_PROBLEMS
+        return vec([({"name": n, "problem": why}, 0) for n, why in d.get("ufm_ha_problems", [])])
     if "cpu_usage" in q or "memory_usage" in q:
         return vec([({"instance": k}, 37.5) for k, v in d.get("ufm_srv", {}).items() if v])
     if "ufm-system-monitoring" in q:
