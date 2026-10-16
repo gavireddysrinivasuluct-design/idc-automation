@@ -47,6 +47,12 @@ class Handler(BaseHTTPRequestHandler):
                                  "cable": {"id": c["cable"]}, "connected_endpoints_reachable": True,
                                  "connected_endpoints": [{"name": c["remote_interface"], "device": {"name": c["remote_device"]}}]})
             return self.send({"count": len(rows), "next": None, "results": rows})
+        if url.path == "/api/dcim/cables/":  # one leaf cable is still planned
+            ids = {int(i) for i in q.get("device_id", [])}
+            names = {BY_ID[i]["name"] for i in ids if i in BY_ID}
+            first = next((c for c in fake_nsr.osl1_cables() if c["device"] in names), None)
+            rows = [{"id": first["cable"], "status": {"value": "planned", "label": "Planned"}}] if first and q.get("status__n") == ["connected"] else []
+            return self.send({"count": len(rows), "next": None, "results": rows})
         return self.send({"detail": "not found"}, 404)
 
 

@@ -121,6 +121,18 @@ def pull_fabric(nb: NetBox, fabric: dict, progress=lambda text: None) -> dict:
                 "state": "connected" if reachable else ("path-down" if ends else "no-path"),
                 "cable": (iface.get("cable") or {}).get("id"),
             })
+    # NetBox record problems (the cable flags gemelo's snapshot pages use): a cable with no
+    # far end, and leaf cables NetBox does not mark connected (planned, decommissioning)
+    one_ended = [{"device": c["device"], "interface": c["interface"], "cable": c["cable"]} for c in cables if not c["remote_device"]]
+    ours = {c["cable"] for c in cables if c["cable"]}
+    not_connected = {}
+    for start in range(0, len(ids), 20):
+        progress("NetBox: leaf cables not marked connected (%d of %d leaves)" % (min(start + 20, len(ids)), len(ids)))
+        for c in nb.paged("/api/dcim/cables/", {"device_id": ids[start:start + 20], "status__n": "connected", "fields": "id,status"}):
+            if c.get("id") in ours:
+                not_connected[c["id"]] = {"cable": c["id"], "status": ((c.get("status") or {}).get("value") if isinstance(c.get("status"), dict) else c.get("status")) or "no status"}
+    not_connected = sorted(not_connected.values(), key=lambda x: x["cable"])
     cables = [c for c in cables if c["remote_device"]]
     return {"site": site, "cluster": cluster, "collected_at": time.time(), "source": "netbox " + nb.url,
-            "devices": devices, "cables": cables, "api_calls": nb.calls}
+            "devices": devices, "cables": cables, "api_calls": nb.calls,
+            "quality": {"one_ended": one_ended, "not_connected": not_connected}}

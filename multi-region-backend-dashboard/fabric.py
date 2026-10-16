@@ -15,6 +15,8 @@ Structure is inferred, not hard-coded:
   a leaf's rail is the rail most of its GPU links arrive on;
 * scalable units (SU): GPU nodes that use exactly the same set of leaves;
 * UFM servers and anything with fewer than half the rails are "other endpoints".
+* cross-check (fabric_structure, gemelo's method): planes and SU slices worked out from
+  the links alone, from NetBox and from UFM's links, against the SUs above.
 
 UFM numbers ports by GUID_port; NetBox names them (`swNpM`, `IB1/17/2`, `17`). The map
 between the two is a convention, so how many cables it matched is reported, never hidden.
@@ -29,11 +31,13 @@ import time
 from collections import Counter, defaultdict
 from pathlib import Path
 
+import fabric_structure
 import netbox_source
 import ufm_direct
 from nsr_client import Cache, Nsr, NsrError
 
 SPINE, LEAF = "be-spine-switch", "be-leaf-switch"
+MGMT_PORT = re.compile(r"^(mgmt\d*|eth0)$", re.I)  # a switch's out-of-band management port
 UFM_ACTIVE = 4
 
 
@@ -80,7 +84,7 @@ def build_topology(snapshot: dict, scheme: str = "auto") -> dict:
     spines = sorted((n for n, r in roles.items() if r == SPINE), key=natural)
     leaves = sorted((n for n, r in roles.items() if r == LEAF), key=natural)
 
-    uplinks, endpoint_links = [], defaultdict(list)
+    uplinks, endpoint_links, mgmt_links = [], defaultdict(list), defaultdict(list)
     for c in cables:
         leaf, far = c["device"], c["remote_device"]
         if roles.get(far) == SPINE:
@@ -89,6 +93,10 @@ def build_topology(snapshot: dict, scheme: str = "auto") -> dict:
         elif roles.get(far) == LEAF:
             uplinks.append({"leaf": leaf, "leaf_port": c["interface"], "spine": far, "spine_port": c["remote_interface"],
                             "cable": c["cable"], "state": c["state"], "leaf_to_leaf": True})
+        elif MGMT_PORT.match(c["interface"] or ""):
+            # a leaf's management port (out-of-band switch): not the fabric, never a GPU node
+            mgmt_links[far].append({"leaf": leaf, "leaf_port": c["interface"], "iface": c["remote_interface"] or "?",
+                                    "cable": c["cable"], "state": c["state"], "rail": None})
         else:
             endpoint_links[far].append({"leaf": leaf, "leaf_port": c["interface"], "iface": c["remote_interface"] or "?",
                                         "cable": c["cable"], "state": c["state"]})
@@ -165,6 +173,7 @@ def build_topology(snapshot: dict, scheme: str = "auto") -> dict:
         "nodes": [{"name": n, "short": short_name(n), "su": node_su.get(n), "links": gpu_nodes[n]}
                   for n in sorted(gpu_nodes, key=natural)],
         "others": [{"name": n, "links": others[n]} for n in sorted(others, key=natural)],
+        "management": [{"name": n, "links": mgmt_links[n]} for n in sorted(mgmt_links, key=natural)],
     }
     for link in topo["uplinks"]:
         link["leaf_portnum"] = port_number(link["leaf_port"], scheme)
@@ -172,8 +181,50 @@ def build_topology(snapshot: dict, scheme: str = "auto") -> dict:
     for node in topo["nodes"]:
         for link in node["links"]:
             link["leaf_portnum"] = port_number(link["leaf_port"], scheme)
+    topo["structure"] = netbox_structure(topo)
+    topo["quality"] = snapshot.get("quality")
     topo["checks"] = design_checks(topo)
     return topo
+
+
+def _cross_check(topo: dict, uplinks: dict, hosts: dict) -> dict:
+    """Planes and SU slices from leaf -> spines and leaf -> hosts, against the SUs NetBox's
+    cabling gives (topo["sus"]); leaves by short name."""
+    leaves = [l["short"] for l in topo["leaves"]]
+    st = fabric_structure.infer(leaves, uplinks, hosts)
+    st["check"] = fabric_structure.compare(st, {su["name"]: [short_name(l) for l in su["leaves"]] for su in topo["sus"]})
+    st["summary"] = fabric_structure.summary(st, st["check"]).replace("the SU slice rule", "NetBox's SUs")
+    return st
+
+
+def netbox_structure(topo: dict) -> dict:
+    up, hosts = defaultdict(set), defaultdict(set)
+    for u in topo["uplinks"]:
+        if not u.get("leaf_to_leaf"):
+            up[short_name(u["leaf"])].add(short_name(u["spine"]))
+    for n in topo["nodes"]:
+        for l in n["links"]:
+            hosts[short_name(l["leaf"])].add(n["name"])
+    return _cross_check(topo, up, hosts)
+
+
+def ufm_structure(topo: dict, actual: dict) -> dict:
+    """The same from UFM's links ({"leaf|port": {"peer": ...}}): what is really cabled."""
+    leaves = {l["name"] for l in topo["leaves"]}
+    spines = [s["name"] for s in topo["spines"]]
+    switches = {short_name(n) for n in leaves} | {short_name(n) for n in spines}
+    up, hosts = defaultdict(set), defaultdict(set)
+    for key, got in actual.items():
+        leaf, _, _ = key.partition("|")
+        peer = got.get("peer") or ""
+        if leaf not in leaves or not peer:
+            continue
+        spine = next((sp for sp in spines if ufm_direct.same_device(sp, peer)), None)
+        if spine:
+            up[short_name(leaf)].add(short_name(spine))
+        elif short_name(peer) not in switches and "ufm" not in peer.lower() and not any(ufm_direct.same_device(l, peer) for l in leaves):
+            hosts[short_name(leaf)].add(peer)
+    return _cross_check(topo, up, hosts)
 
 
 def design_checks(t: dict) -> list[dict]:
@@ -213,6 +264,22 @@ def design_checks(t: dict) -> list[dict]:
             out.append({"level": "info" if mixed else "ok",
                         "text": ("%d node(s) use different leaf ports on different rails (slot numbering differs per rail)." % len(mixed))
                         if mixed else "Each node uses the same leaf port on every rail."})
+    q = t.get("quality")
+    if q is not None:
+        bad = [("%d cable(s) with no far end" % len(q["one_ended"]), ["%s %s (#%s)" % (short_name(x["device"]), x["interface"], x["cable"]) for x in q["one_ended"]]),
+               ("%d leaf cable(s) not marked connected" % len(q["not_connected"]), ["#%s %s" % (x["cable"], x["status"]) for x in q["not_connected"]])]
+        bad = [(what, ev) for what, ev in bad if ev]
+        out.append({"level": "warn" if bad else "ok", "text": ("NetBox cable records: " + "; ".join("%s: %s%s" % (what, ", ".join(ev[:6]), " …" if len(ev) > 6 else "") for what, ev in bad) + ".")
+                    if bad else "NetBox cable records: every leaf cable has two ends and is marked connected."})
+    st = t.get("structure")
+    if st and t["nodes"]:
+        bad = st["check"]["differ"] or len(st["planes"]) > 1 or st["straddling"] or st["spineless"]
+        notes = ["%s: NetBox's SU is %s, the cabling forms %s" % (d["label"], "/".join(d["expected"]), " + ".join("/".join(x) for x in d["inferred"]))
+                 for d in st["check"]["differ"][:4]]
+        notes += ["leaves on more than one plane: " + ", ".join(st["straddling"][:8])] if st["straddling"] else []
+        notes += ["%d GPU node(s) cabled into two SUs: %s" % (len(st["stray"]), ", ".join(short_name(x) for x in st["stray"][:6]))] if st["stray"] else []
+        out.append({"level": "bad" if bad else ("warn" if st["stray"] else "ok"),
+                    "text": "Cabling cross-check (NetBox links only, gemelo's method): %s.%s" % (st["summary"], (" " + "; ".join(notes) + ".") if notes else "")})
     states = Counter(u["state"] for u in t["uplinks"]) + Counter(l["state"] for n in t["nodes"] for l in n["links"])
     odd = {k: v for k, v in states.items() if k != "connected"}
     if odd:
@@ -221,6 +288,9 @@ def design_checks(t: dict) -> list[dict]:
     if uplinks_only:
         out.append({"level": "info", "text": "%d leaf/leaves have spine uplinks but no GPU cables in NetBox: %s." % (
             len(uplinks_only), ", ".join(uplinks_only[:10]) + (" …" if len(uplinks_only) > 10 else ""))})
+    if t.get("management"):
+        out.append({"level": "info", "text": "%d out-of-band management switch(es) on the leaves' management ports, left out of the fabric: %s." % (
+            len(t["management"]), ", ".join(short_name(m["name"]) for m in t["management"][:6]))})
     if t["others"]:
         out.append({"level": "info", "text": "Other endpoints on the leaves: %s." % ", ".join(
             "%s (%d)" % (o["name"], len(o["links"])) for o in t["others"][:6])})
@@ -429,6 +499,8 @@ class FabricStore:
         switches = {s["name"] for s in topo["spines"]} | {l["name"] for l in topo["leaves"]}
         actual = ufm_direct.links_by_switch_port(snap.get("links"), switches)
         result = compare_with_ufm(topo, actual)
+        if actual:
+            result["structure"] = ufm_structure(topo, actual)
         result.update(host=snap.get("host"), at=snap.get("at"), collected_at=snap.get("collected_at"),
                       links=len(snap.get("links") or []), switch_ports=len(actual))
         return result

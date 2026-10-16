@@ -12,7 +12,7 @@ Severity (see README 6.3):
   critical  fabric-wide or many-GPU impact now: a spine or leaf cut off, a big share
             of uplink capacity gone, no UFM data
   major     a real fault that hurts jobs or routing: topology-changing miscabling,
-            a GPU tray on the wrong rail/SU or offline, a leaf or spine losing
+            a GPU tray on the wrong rail/SU slice or offline, a leaf or spine losing
             many links, an unreachable switch, UFM's own link down
   minor     single links down/Init/degraded, port swaps with no fabric impact
   info      documentation and data hygiene: NetBox differs, unnamed adapters, old data
@@ -25,6 +25,8 @@ import json
 import re
 from datetime import datetime, timezone
 from pathlib import Path
+
+from fabric_structure import summary as _structure_summary
 
 ORDER = {"critical": 0, "major": 1, "minor": 2, "info": 3}
 LEAF = re.compile(r"-bel(\d+)$")
@@ -99,7 +101,8 @@ def update_tray_history(path: Path, report: dict) -> dict:
     return keep
 
 
-def detect(report: dict | None, live: dict | None = None, history: dict | None = None, fetch: dict | None = None) -> dict:
+def detect(report: dict | None, live: dict | None = None, history: dict | None = None, fetch: dict | None = None,
+           config: dict | None = None) -> dict:
     out = Incidents()
     if not report:
         out.add("critical", "data", "No UFM data loaded", "The cabling and fabric checks cannot run, so incidents in the fabric would go unnoticed.",
@@ -110,7 +113,58 @@ def detect(report: dict | None, live: dict | None = None, history: dict | None =
         data_age(out, report, fetch)
     if live:
         switches(out, live)
+        netbox_records(out, live.get("netbox"))
+    if config:
+        config_drift(out, config)
     return out.result()
+
+
+def config_drift(out: Incidents, c: dict) -> None:
+    """Switches whose running config differs from the standard network-deployment renders."""
+    std = c.get("standard")
+    if not std or not c.get("running"):
+        return
+    drift = sorted((h, v) for h, v in c["switches"].items() if v["state"] == "drift")
+    if drift:
+        def sample(v):
+            rows = [("+", p) for p, _ in v["added"][:2]] + [("−", p) for p, _ in v["removed"][:2]] + [("~", p) for p, *_ in v["changed"][:2]]
+            return "; ".join("%s %s" % r for r in rows)
+        out.add("minor", "configuration", n(len(drift), "switch") + " whose running config differs from the network-deployment standard",
+                "Changes made by hand (or a render not deployed yet) are lost on the next deploy, or the next deploy changes "
+                "the switch in ways nobody reviewed.",
+                "Review the differences on the Config tab: deploy the standard, or put the change into network-deployment.",
+                evidence=["%s: +%d −%d ~%d (%s)" % (short(h), v["counts"]["added"], v["counts"]["removed"], v["counts"]["changed"], sample(v))
+                          for h, v in drift[:40]] + ["Standard: %s @ %s, rendered %s" % (std["branch"], std["commit"][:10], std["rendered_at"])],
+                tab="config")
+    unread = sorted(h for h, v in c["switches"].items() if v["state"] in ("no-running", "unreadable"))
+    if unread:
+        out.add("info", "configuration", n(len(unread), "switch") + " whose running config could not be read",
+                "The config check does not cover them.", "Check the switch login, then collect configs again.",
+                evidence=[short(h) for h in unread[:40]], tab="config")
+
+
+def netbox_records(out: Incidents, nb: dict | None) -> None:
+    """NetBox cable records with problems, from the last NetBox refresh: a changed end, a
+    status other than connected, a port two cables claim, a cable gone from NetBox."""
+    if not nb:
+        return
+    q = nb.get("quality") or {}
+    kinds = [
+        # malformed ends are the "unusable terminations" incident already
+        ("end changed", ["#%s: now %s %s ⟷ %s %s" % (m[0], *m[1:5]) for m in nb.get("mismatches") or [] if m[5] == "endpoint changed"]),
+        ("not marked connected", ["#%s is %s (%s %s ⟷ %s %s)" % (c[0], c[1], *c[2:6]) for c in q.get("not_connected") or []]),
+        ("port claimed by more than one cable", ["%s %s: cables %s" % (d, p, ", ".join("#%s" % i for i in ids)) for d, p, ids in q.get("shared_ports") or []]),
+        ("missing from NetBox", ["#%s" % c for c in nb.get("missing") or []]),
+    ]
+    found = [(what, ev) for what, ev in kinds if ev]
+    if not found:
+        return
+    total = sum(len(ev) for _, ev in found)
+    out.add("minor", "documentation", n(total, "NetBox cable record") + " with problems (%s)" % ", ".join("%d %s" % (len(ev), what) for what, ev in found),
+            "NetBox is the cabling record the checks and other tools (gemelo, network-deployment) read; a wrong or planned "
+            "record hides real faults and misleads anyone tracing a cable.",
+            "Correct the cables in NetBox, then Refresh NetBox.",
+            evidence=[e for what, ev in found for e in ["%s:" % what.capitalize()] + ev[:25] + (["… and %d more" % (len(ev) - 25)] if len(ev) > 25 else [])])
 
 
 def fabric(out: Incidents, r: dict) -> None:
@@ -270,14 +324,14 @@ def gpu(out: Incidents, r: dict, history: dict) -> None:
     for su in r["sus"]:
         for t in su["trays"]:
             name = t["host"].replace("sys1-lon14-p-phy-", "") or t["code"]
-            label = "SU%d slot %s %s" % (su["su"], t["slot"], t["code"]) + (" (%s)" % name if name != t["code"] else "")
+            label = "%s slot %s %s" % (su.get("label") or "SU slice %d" % su["su"], t["slot"], t["code"]) + (" (%s)" % name if name != t["code"] else "")
             if t["status"] == "error":
                 errors.append((label, t))
             elif t["status"] == "incomplete":
                 incomplete.append((label, t))
-    wiring = [(l, t) for l, t in errors if any(k in i for i in t["issues"] for k in ("rail", "different SUs", "same port", "not a GPU port"))]
+    wiring = [(l, t) for l, t in errors if any(k in i for i in t["issues"] for k in ("rail", "different SU slices", "same port", "not a GPU port"))]
     if wiring:
-        out.add("major", "gpu", n(len(wiring), "GPU tray") + " cabled to the wrong rail, SU or slot",
+        out.add("major", "gpu", n(len(wiring), "GPU tray") + " cabled to the wrong rail, SU slice or slot",
                 "Rail-optimised collectives (NCCL) on these GPUs cross the spines or hit the wrong leaf: slower jobs and congestion for neighbours.",
                 "Re-patch the tray's adapters to the design (Cabling vs UFM, trays needing attention).",
                 evidence=["%s: %s" % (l, "; ".join(i for i in t["issues"] if "NetBox" not in i)) for l, t in wiring])
@@ -292,14 +346,14 @@ def gpu(out: Incidents, r: dict, history: dict) -> None:
         out.add("minor", "gpu", n(len(planes), "GPU tray") + " with links not fully active", "Reduced bandwidth on one or more adapters.",
                 "Check the listed adapter ports.", evidence=["%s: %s" % (l, "; ".join(t["issues"])) for l, t in planes])
 
-    # NVL72 racks: 4 per SU, 18 trays each (slots 1-18, 19-36, 37-54, 55-72)
-    racks = [(su["su"], rk) for su in r["sus"] for rk in su.get("racks", [])]
-    rname = lambda su, rk: "SU%d rack %d%s" % (su, rk["pos"], " (%s)" % rk["name"] if rk["name"] else "")
+    # NVL72 racks: 4 per SU slice, 18 trays each (slots 1-18, 19-36, 37-54, 55-72)
+    racks = [(su.get("label") or "SU slice %d" % su["su"], rk) for su in r["sus"] for rk in su.get("racks", [])]
+    rname = lambda su, rk: "%s rack %d%s" % (su, rk["pos"], " (%s)" % rk["name"] if rk["name"] else "")
     split = [(su, rk) for su, rk in racks if rk["state"] == "split"]
     if split:
         out.add("major", "gpu", n(len(split), "NVL72 rack position") + " holding trays of more than one rack",
-                "A rack's 18 trays share one NVLink domain and should land on one rack position of one SU. Split racks put "
-                "NVLink peers on different leaves or SUs, so rail-local traffic crosses the spines.",
+                "A rack's 18 trays share one NVLink domain and should land on one rack position of one SU slice. Split racks put "
+                "NVLink peers on different leaves or slices, so rail-local traffic crosses the spines.",
                 "Re-patch the trays to their rack's position (Cabling vs UFM, trays needing attention).",
                 evidence=["%s: %s" % (rname(su, rk), "; ".join(rk["issues"])) for su, rk in split])
     dark = [(su, rk) for su, rk in racks if rk["off"] >= 9]
@@ -314,6 +368,24 @@ def gpu(out: Incidents, r: dict, history: dict) -> None:
                 "Every adapter in the rack position is up but has no node description, so the rack and its trays cannot be identified.",
                 "Set the node description on these hosts and refetch from UFM.",
                 evidence=["%s: %d unnamed trays · design hosts %s" % (rname(su, rk), rk["unnamed"], "–".join(rk["hosts"])) for su, rk in nameless])
+
+    # the cabling's own structure (planes and SU slices from UFM's links) against the rules
+    st = r.get("structure")
+    if st:
+        diff = st["check"]["differ"]
+        if diff:
+            out.add("major", "cabling", n(len(diff), "SU slice") + " whose cabling does not form the slice the design expects",
+                    "Trays meant to share four rail leaves land on other leaves, so rail-local traffic of those trays crosses the spines.",
+                    "Compare the slice's trays and leaves in Cabling vs UFM and re-patch to the design.",
+                    evidence=["%s: expected %s, the links form %s" % (d["label"], "/".join(d["expected"]),
+                              " + ".join("/".join(x) for x in d["inferred"]) or "nothing") for d in diff])
+        odd = [("linked to spines of more than one plane", st["straddling"]), ("linked to no spine", st["spineless"])]
+        if len(st["planes"]) > 1 or any(found for _, found in odd):
+            out.add("major", "cabling", "Leaf–spine cabling splits the fabric into %d planes" % len(st["planes"]) if len(st["planes"]) > 1
+                    else "Leaves outside the leaf–spine mesh",
+                    "The design is one plane: every leaf on every spine. A split or a leaf without spines cuts bandwidth between the parts.",
+                    "Check the leaves named below in Cabling vs UFM.",
+                    evidence=["%s: %s" % (what, ", ".join(found)) for what, found in odd if found] + [_structure_summary(st)])
 
     # trays that disappeared since they were last seen
     now = r["source"]["scanned_at"]

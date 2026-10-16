@@ -7,13 +7,14 @@ them on every one of its 4,608 leaf-spine and 4,608 leaf-GPU cables. Re-run afte
 
     python3 scripts/build_expected_topology.py
 
-Rules (LON14 sys1 InfiniBand backend, 36 Q3400 spines x 64 Q3400 leaves, 16 scalable units):
+Rules (LON14 sys1 InfiniBand backend, 36 Q3400 spines x 64 Q3400 leaves, 16 SU slices in 8 scalable units):
   L1  Leaf-spine full mesh, two cables per pair, lanes crossed:
       leaf j port sw(73-i)p(3-M)  <->  spine i port sw(j)pM      (i=1..36, j=1..64, M=1,2)
-  G1  A scalable unit is four consecutive leaves, one per rail:
-      SU k = leaves 4(k-1)+1 .. 4k; rail r = leaf 4(k-1)+r.  4 pods of 4 SUs (16 leaves).
-  G2  Leaf downlink swNpM (N=1..36) is tray slot 2(N-1)+M of that leaf's SU; every host
-      uses the same slot (port) on all four leaves of its SU (gpuN: SU ceil(N/72), slot (N-1)%72+1).
+  G1  An SU slice is four consecutive leaves, one per rail:
+      slice k = leaves 4(k-1)+1 .. 4k; rail r = leaf 4(k-1)+r.  An SU is two slices
+      (8 leaves, app/ufm_cabling.py SU_RULE); a row holds 4 slices (16 leaves).
+  G2  Leaf downlink swNpM (N=1..36) is tray slot 2(N-1)+M of that leaf's slice; every host
+      uses the same slot (port) on all four leaves of its slice (gpuN: slice ceil(N/72), slot (N-1)%72+1).
   G3  Rail r reaches the host's adapter mlx5_(r-1) (RDMA r).
 """
 import csv
@@ -23,8 +24,8 @@ HOST = "sys1-lon14-p-swi-"
 OUT = Path(__file__).resolve().parent.parent / "assets" / "expected_topology.csv"
 
 
-def su_of_leaf(leaf: int):
-    """(su 1..16, pod 1..4, rail 1..4) for leaf 1..64."""
+def slice_of_leaf(leaf: int):
+    """(SU slice 1..16, row 1..4, rail 1..4) for leaf 1..64."""
     su, rail = divmod(leaf - 1, 4)
     return su + 1, su // 4 + 1, rail + 1
 
@@ -35,11 +36,11 @@ def rows():
             for m in (1, 2):
                 yield ["leaf-spine", HOST + "bel%d" % j, "sw%dp%d" % (73 - i, 3 - m), HOST + "bes%d" % i, "sw%dp%d" % (j, m), "L1"]
     for j in range(1, 65):
-        su, pod, rail = su_of_leaf(j)
+        n_slice, pod, rail = slice_of_leaf(j)
         for n in range(1, 37):
             for m in (1, 2):
                 slot = 2 * (n - 1) + m
-                yield ["leaf-gpu", HOST + "bel%d" % j, "sw%dp%d" % (n, m), "SU%d slot %d" % (su, slot), "mlx5_%d" % (rail - 1), "G1-G3"]
+                yield ["leaf-gpu", HOST + "bel%d" % j, "sw%dp%d" % (n, m), "slice%d slot %d" % (n_slice, slot), "mlx5_%d" % (rail - 1), "G1-G3"]
 
 
 def main() -> int:

@@ -130,13 +130,13 @@ footer{font-size:12.5px;color:var(--muted);border-top:1px solid var(--line);padd
 <div class="wrap">
 <header>
   <div class="eyebrow">LON14 · London14 · sys1-lon14 backend RDMA fabric · InfiniBand XDR</div>
-  <div class="hero-line"><h1>Where a GPU's bytes go <span>/ rack · rail · SU · pod</span></h1></div>
+  <div class="hero-line"><h1>Where a GPU's bytes go <span>/ rack · rail · SU slice · SU</span></h1></div>
   <p class="lede">Every GPU in LON14 has its own 800G network port. Which <b>rail</b> it is on decides which <b>leaf</b> it plugs into. Every leaf has two cables to every one of the 36 <b>spines</b>, so the spines have no rails at all. Pick a pair of GPUs below and watch the path.</p>
   <div class="facts">
     <div><b>4,608</b><span>GPUs · 4 per tray</span></div>
     <div><b>1,152</b><span>compute trays</span></div>
-    <div><b>16</b><span>scalable units (SU) · 72 trays each</span></div>
-    <div><b>4</b><span>pods · 4 SUs each</span></div>
+    <div><b>16</b><span>SU slices · 72 trays each</span></div>
+    <div><b>8</b><span>scalable units (SU) · 8 leaves · 576 GPUs each</span></div>
     <div><b>64</b><span>leaves BEL1–64</span></div>
     <div><b>36</b><span>spines BES1–36</span></div>
     <div><b>4</b><span>rails · 4 planes</span></div>
@@ -148,9 +148,9 @@ footer{font-size:12.5px;color:var(--muted);border-top:1px solid var(--line);padd
   <div class="presets" id="presets" role="group" aria-label="Example paths"></div>
   <div class="picker">
     <fieldset><legend>From</legend>
-      <select id="sSu" aria-label="Source SU"></select><select id="sRack" aria-label="Source rack"></select><select id="sTray" aria-label="Source tray"></select><select id="sGpu" aria-label="Source GPU"></select></fieldset>
+      <select id="sSu" aria-label="Source SU slice"></select><select id="sRack" aria-label="Source rack"></select><select id="sTray" aria-label="Source tray"></select><select id="sGpu" aria-label="Source GPU"></select></fieldset>
     <fieldset><legend>To</legend>
-      <select id="dSu" aria-label="Destination SU"></select><select id="dRack" aria-label="Destination rack"></select><select id="dTray" aria-label="Destination tray"></select><select id="dGpu" aria-label="Destination GPU"></select></fieldset>
+      <select id="dSu" aria-label="Destination SU slice"></select><select id="dRack" aria-label="Destination rack"></select><select id="dTray" aria-label="Destination tray"></select><select id="dGpu" aria-label="Destination GPU"></select></fieldset>
     <span class="mono" id="leafnote" style="font-size:12px;color:var(--muted)"></span>
     <label class="toggle"><input type="checkbox" id="pxn" checked> NCCL PXN (rail-align over NVLink first)</label>
   </div>
@@ -175,10 +175,10 @@ footer{font-size:12.5px;color:var(--muted);border-top:1px solid var(--line);padd
     <thead><tr><th>Source and destination</th><th>Path</th><th>InfiniBand switch hops</th><th>Shares the path with</th></tr></thead>
     <tbody>
       <tr><td><b>Same NVL72 rack</b><br><span class="note">any tray, any GPU</span></td><td>GPU → NVSwitch → GPU. The backend network is not used.</td><td class="num">0</td><td>Nothing on InfiniBand</td></tr>
-      <tr><td><b>Same SU, same rail</b><br><span class="note">different racks</span></td><td>GPU → its rail's leaf → GPU</td><td class="num">1</td><td>The 72 trays on that leaf</td></tr>
-      <tr><td><b>Same SU, different rail</b></td><td>With PXN: NVLink to the tray-mate on the destination's rail, then 1 leaf hop. Without: leaf → spine → leaf.</td><td class="num">1 or 3</td><td>Leaf uplinks when PXN is off</td></tr>
-      <tr><td><b>Different SU, same pod</b></td><td>Leaf → any of 36 spines → leaf</td><td class="num">3</td><td>72 equal uplinks per leaf</td></tr>
-      <tr><td><b>Different pod</b></td><td>Leaf → any of 36 spines → leaf (the same as across SUs; there is no super-spine)</td><td class="num">3</td><td>72 equal uplinks per leaf</td></tr>
+      <tr><td><b>Same SU slice, same rail</b><br><span class="note">different racks</span></td><td>GPU → its rail's leaf → GPU</td><td class="num">1</td><td>The 72 trays on that leaf</td></tr>
+      <tr><td><b>Same SU slice, different rail</b></td><td>With PXN: NVLink to the tray-mate on the destination's rail, then 1 leaf hop. Without: leaf → spine → leaf.</td><td class="num">1 or 3</td><td>Leaf uplinks when PXN is off</td></tr>
+      <tr><td><b>Different slice, same SU</b></td><td>Leaf → any of 36 spines → leaf</td><td class="num">3</td><td>72 equal uplinks per leaf</td></tr>
+      <tr><td><b>Different SU</b></td><td>Leaf → any of 36 spines → leaf (the same as across slices; there is no super-spine)</td><td class="num">3</td><td>72 equal uplinks per leaf</td></tr>
     </tbody>
   </table></div>
 </section>
@@ -200,7 +200,8 @@ const spineX = i => SX0 + (i - 0.5) * SW / 36;
 const PODW = (SW - 3 * 28) / 4, BLK = 8, LW = (PODW - 3 * BLK) / 16;
 const leafX = j => { const p = Math.floor((j - 1) / 16), w = (j - 1) % 16, b = Math.floor(w / 4); return SX0 + p * (PODW + 28) + b * BLK + (w + .5) * LW; };
 const LY = 292, LH = 36;
-// LON14: SU k owns BEL4k-3..4k; rail r of SU k is BEL4(k-1)+r (pods group 4 SUs = 16 leaves)
+// LON14: SU slice k owns BEL4k-3..4k; rail r of slice k is BEL4(k-1)+r; SU = 2 slices = 8 leaves (registry rule)
+const SLN = n => `SU${Math.ceil(n / 2)} slice ${(n - 1) % 2 + 1}`;
 const leafOf = (su, rail) => 4 * (su - 1) + rail;
 const railOfLeaf = j => (j - 1) % 4 + 1;
 const suOfLeaf = j => Math.ceil(j / 4);
@@ -214,15 +215,15 @@ for (let i = 1; i <= 36; i++) { const x = spineX(i), w = SW / 36 - 6;
   tx(gNodes, {x, y:SPY + 19, class:'s-txt', 'text-anchor':'middle'}, i); }
 for (let j = 1; j <= 64; j++) for (let i = 1; i <= 36; i++) el('line', {x1:leafX(j), y1:LY, x2:spineX(i), y2:SPY + SPH, class:'s-mesh'}, gMesh);
 for (let p = 1; p <= 4; p++) { const x0 = SX0 + (p - 1) * (PODW + 28);
-  tx(gNodes, {x:x0, y:LY - 30, class:'s-lbl'}, `POD ${p} · BEL${16 * (p - 1) + 1}–${16 * p}`);
-  // LON14: each block of four leaves is one SU (rails 1-4 side by side)
+  tx(gNodes, {x:x0, y:LY - 30, class:'s-lbl'}, `SU${2 * p - 1}–SU${2 * p} · BEL${16 * (p - 1) + 1}–${16 * p}`);
+  // LON14: each block of four leaves is one SU slice, two blocks one SU (rails 1-4 side by side)
   for (let k = 1; k <= 4; k++) { const bx = x0 + (k - 1) * (4 * LW + BLK);
     for (let r = 1; r <= 4; r++) el('rect', {x:bx + (r - 1) * LW + 1, y:LY - 18, width:LW - 2, height:3, rx:1.5, fill:RC[r - 1]}, gNodes);
-    tx(gNodes, {x:bx + 2 * LW, y:LY + LH + 14, class:'s-txt', 'text-anchor':'middle'}, 'SU' + (4 * (p - 1) + k)); } }
+    tx(gNodes, {x:bx + 2 * LW, y:LY + LH + 14, class:'s-txt', 'text-anchor':'middle'}, SLN(4 * (p - 1) + k)); } }
 for (let j = 1; j <= 64; j++) { const x = leafX(j);
   leaves[j] = el('rect', {x:x - LW / 2 + 1.2, y:LY, width:LW - 2.4, height:LH, rx:3, class:'s-leaf', stroke:RC[railOfLeaf(j) - 1]}, gNodes); }
 
-// SU detail panels
+// SU slice detail panels
 const PY = 420, PH = 350, RACKW = 92, TRH = 13, TRG = 3.4;
 let panels = {};
 function drawPanels(sus) {
@@ -231,9 +232,9 @@ function drawPanels(sus) {
   sus.forEach((su, idx) => {
     const x = x0 + idx * (pw + gap), pod = Math.ceil(su / 4);
     el('rect', {x, y:PY, width:pw, height:PH, rx:14, class:'s-panel'}, gSU);
-    tx(gSU, {x:x + 16, y:PY + 24, class:'s-big'}, `SU${su}`);
-    tx(gSU, {x:x + 60, y:PY + 23, class:'s-txt'}, `pod ${pod} · leaves ${[1,2,3,4].map(r => 'BEL' + leafOf(su, r)).join(' · ')} · 72 trays · 288 GPUs`);
-    for (let r = 1; r <= 4; r++) { const j = leafOf(su, r);  // the SU's four leaves drop to the panel
+    tx(gSU, {x:x + 16, y:PY + 24, class:'s-big'}, SLN(su));
+    tx(gSU, {x:x + 150, y:PY + 23, class:'s-txt'}, `leaves ${[1,2,3,4].map(r => 'BEL' + leafOf(su, r)).join(' · ')} · 72 trays · 288 GPUs`);
+    for (let r = 1; r <= 4; r++) { const j = leafOf(su, r);  // the slice's four leaves drop to the panel
       el('path', {d:`M${leafX(j)},${LY + LH} C${leafX(j)},${PY - 30} ${x + pw / 2 + (r - 2.5) * 40},${PY - 40} ${x + pw / 2 + (r - 2.5) * 40},${PY}`, fill:'none', stroke:RC[r - 1], 'stroke-width':1.2, opacity:.35}, gSU); }
     const racks = [];
     for (let k = 0; k < 4; k++) {
@@ -260,7 +261,7 @@ function route(s, d, pxn) {
   const gp = o => panels[o.su].racks[o.rack].trays[o.tray].gp[o.gpu];
   const nvx = o => panels[o.su].racks[o.rack].nvx;
   const leafTop = j => [leafX(j), LY], leafBot = j => [leafX(j), LY + LH];
-  const lbl = o => `SU${o.su} rack ${RN(o.rack)} tray ${o.tray + 1} GPU ${o.gpu + 1}`;
+  const lbl = o => `${SLN(o.su)} rack ${RN(o.rack)} tray ${o.tray + 1} GPU ${o.gpu + 1}`;
   if (s.su === d.su && s.rack === d.rack && s.tray === d.tray && s.gpu === d.gpu) return {kind:'same GPU', hops:0, steps:[{c:'var(--muted)', t:'Pick a different destination', n:'Source and destination are the same GPU.'}], segs:[], why:''};
   if (same) {
     const a = gp(s), b = gp(d), x = nvx(s);
@@ -280,25 +281,25 @@ function route(s, d, pxn) {
   else steps.push({c:RC[rs - 1], t:lbl(s), n:`Sends from its own port, mlx5_${rs - 1} (rail ${rs}).`});
   const a = gp(src), lt = leafBot(L1);
   segs.push({c:RC[rs - 1], d:`M${a[0]},${a[1]} C${a[0]},${PY - 60} ${lt[0]},${PY - 40} ${lt[0]},${lt[1]}`});
-  steps.push({c:RC[rs - 1], t:`BEL${L1}`, h:`sys1-lon14-p-swi-bel${L1}`, n:`Rail ${rs} leaf of SU${src.su}. All 72 trays of SU${src.su} put their GPU ${rs} on this leaf.`});
+  steps.push({c:RC[rs - 1], t:`BEL${L1}`, h:`sys1-lon14-p-swi-bel${L1}`, n:`Rail ${rs} leaf of ${SLN(src.su)}. All 72 trays of ${SLN(src.su)} put their GPU ${rs} on this leaf.`});
   let spine = null, hops = 1, kind;
-  if (L1 === L2) { kind = 'same SU · same rail'; }
+  if (L1 === L2) { kind = 'same slice · same rail'; }
   else {
     spine = 1 + ((L1 * 7 + L2 * 13 + s.tray * 5 + d.tray * 3) % 36); hops = 3;
     const p1 = leafTop(L1), p2 = leafTop(L2), sp = [spineX(spine), SPY + SPH];
     segs.push({c:'var(--spine)', d:`M${p1[0]},${p1[1]} L${sp[0]},${sp[1]}`}, {c:'var(--spine)', d:`M${sp[0]},${sp[1]} L${p2[0]},${p2[1]}`});
     steps.push({c:'var(--spine)', t:`BES${spine} (or any of the 36)`, h:`sys1-lon14-p-swi-bes${spine}`, n:`Uplink BEL${L1} sw${73 - spine}p2/p1 → BES${spine} sw${L1}p1/p2. UFM's adaptive routing spreads flows over all 72 uplinks.`},
-               {c:RC[rd - 1], t:`BEL${L2}`, h:`sys1-lon14-p-swi-bel${L2}`, n:`Down on BES${spine} sw${L2}p1/p2 to the rail ${rd} leaf of SU${d.su}.`});
-    kind = s.su === d.su ? 'same SU · different rail' : Math.ceil(s.su / 4) === Math.ceil(d.su / 4) ? 'different SU · same pod' : 'different pod';
+               {c:RC[rd - 1], t:`BEL${L2}`, h:`sys1-lon14-p-swi-bel${L2}`, n:`Down on BES${spine} sw${L2}p1/p2 to the rail ${rd} leaf of ${SLN(d.su)}.`});
+    kind = s.su === d.su ? 'same slice · different rail' : Math.ceil(s.su / 2) === Math.ceil(d.su / 2) ? 'different slice · same SU' : 'different SU';
   }
   const b = gp(d), lb = leafBot(L2);
   segs.push({c:RC[rd - 1], d:`M${lb[0]},${lb[1]} C${lb[0]},${PY - 40} ${b[0]},${PY - 60} ${b[0]},${b[1]}`});
   steps.push({c:RC[rd - 1], t:lbl(d), n:`Receives on mlx5_${rd - 1}.`});
   const whyMap = {
-    'same SU · same rail':'<b>Why one hop:</b> all 72 trays of an SU put their rail-' + rd + ' GPU on the same leaf, BEL' + L1 + '. Traffic between them turns around inside that leaf and never touches a spine.',
-    'same SU · different rail':'<b>Why three hops:</b> each rail of an SU has its own leaf and leaves only meet at the spines. Turn PXN on to see NCCL avoid this by changing rail over NVLink first.',
-    'different SU · same pod':'<b>Why three hops:</b> SUs have separate leaves, so traffic goes up to a spine and down. Every leaf has 2 cables to every spine, giving 72 equal paths.',
-    'different pod':'<b>Same cost as across SUs:</b> pods only group leaves. There is no super-spine; any two of the 64 leaves are one spine apart.'};
+    'same slice · same rail':'<b>Why one hop:</b> all 72 trays of a slice put their rail-' + rd + ' GPU on the same leaf, BEL' + L1 + '. Traffic between them turns around inside that leaf and never touches a spine.',
+    'same slice · different rail':'<b>Why three hops:</b> each rail of a slice has its own leaf and leaves only meet at the spines. Turn PXN on to see NCCL avoid this by changing rail over NVLink first.',
+    'different slice · same SU':'<b>Why three hops:</b> slices have separate leaves, so traffic goes up to a spine and down. Every leaf has 2 cables to every spine, giving 72 equal paths.',
+    'different SU':'<b>Same cost as across slices:</b> an SU only groups leaves. There is no super-spine; any two of the 64 leaves are one spine apart.'};
   const label = viaNv ? kind.replace('same rail', 'different rail') + ' · via PXN' : kind;
   return {ends:[gp(s), b], kind:label, kc:hops === 1 ? RC[rd - 1] : 'var(--spine)', hops, hopsTxt: hops === 1 ? 'InfiniBand switch hop (the leaf only)' : 'InfiniBand switch hops: leaf, spine, leaf', steps, segs, leaves:[L1, L2], spine, why:whyMap[kind] + (viaNv ? ' <b>PXN</b> added a short NVLink step inside the source tray so both ends use rail ' + rd + '.' : '')};
 }
@@ -306,16 +307,16 @@ function route(s, d, pxn) {
 // UI state
 const $ = id => document.getElementById(id);
 const fill = (sel, n, f) => { sel.innerHTML = ''; for (let i = 0; i < n; i++) { const o = document.createElement('option'); o.value = i; o.textContent = f(i); sel.appendChild(o); } };
-['sSu','dSu'].forEach(id => fill($(id), 16, i => 'SU' + (i + 1)));
+['sSu','dSu'].forEach(id => fill($(id), 16, i => SLN(i + 1)));
 ['sRack','dRack'].forEach(id => fill($(id), 4, i => 'rack ' + RACKS[i]));
 ['sTray','dTray'].forEach(id => fill($(id), 18, i => 'tray ' + (i + 1)));
 ['sGpu','dGpu'].forEach(id => fill($(id), 4, i => 'GPU ' + (i + 1) + ' · rail ' + (i + 1)));
 const PRESETS = [
   {n:'Same rack', k:'0 hops', s:[1,0,2,0], d:[1,0,14,2]},
-  {n:'Same SU, same rail', k:'1 hop', s:[1,0,3,1], d:[1,2,10,1]},
-  {n:'Same SU, other rail', k:'1 or 3', s:[1,0,3,0], d:[1,3,8,2]},
-  {n:'Other SU, same pod', k:'3 hops', s:[1,1,5,1], d:[3,2,11,1]},
-  {n:'Other pod', k:'3 hops', s:[1,0,6,3], d:[14,1,12,3]}];
+  {n:'Same slice, same rail', k:'1 hop', s:[1,0,3,1], d:[1,2,10,1]},
+  {n:'Same slice, other rail', k:'1 or 3', s:[1,0,3,0], d:[1,3,8,2]},
+  {n:'Other slice, same SU', k:'3 hops', s:[1,1,5,1], d:[2,2,11,1]},
+  {n:'Other SU', k:'3 hops', s:[1,0,6,3], d:[14,1,12,3]}];
 const pb = $('presets');
 PRESETS.forEach((p, i) => { const b = document.createElement('button'); b.type = 'button'; b.innerHTML = `${p.n} <i>${p.k}</i>`; b.onclick = () => setPreset(i); pb.appendChild(b); });
 function setPreset(i) { const p = PRESETS[i];

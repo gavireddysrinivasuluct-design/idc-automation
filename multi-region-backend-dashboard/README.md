@@ -254,6 +254,19 @@ UFM boxes' corner label shows the same role (● MASTER / STANDBY), refreshed wi
   missing rails, NICs on a leaf of another rail, uneven port use, NetBox cable states,
   switches without UFM telemetry or ping.
 
+### Cabling cross-check and NetBox cable records
+
+- **Planes and SU slices from the links alone.** `fabric_structure.py` (the method of nscaledev/gemelo's `acquire/planes.py`) groups spines that share at least two leaves into planes, and leaves that share at least two GPU nodes into SU slices.
+  - It runs on NetBox's cabling and, when a UFM link snapshot is loaded, on UFM's links.
+  - The result is compared with the SUs NetBox's cabling gives. It shows as a line under **Design checks**, naming any leaf on two planes or GPU node cabled into two SUs.
+  - The same file is in the ICE2 and LON14 dashboards, and a test keeps the three copies identical.
+- **Management ports are not the fabric.** Out-of-band switches cabled to a leaf's `mgmt0` / `eth0` used to be counted as GPU nodes and placed in SUs (OSL1 `obl8`/`obl9`, STA1 `swi669`). They are now listed apart under `management` and in one info check. OSL1 shows its 111 GPU servers in SUs of 15/32/32/32, as NetBox records.
+- **NetBox cable records.** A NetBox refresh also lists:
+  - leaf cables with no far end (these used to be dropped silently);
+  - leaf cables NetBox does not mark connected: planned, decommissioning, or no status (OSL1 had 32 with no status on 2026-10-16).
+
+  Both appear as a Design check.
+
 ## What each site has (checked 2026-10-08, netops-misc observability compendium)
 
 | Site | gNMI | UFM telemetry | SNMP | Ping | UFM servers | Logs (Loki) |

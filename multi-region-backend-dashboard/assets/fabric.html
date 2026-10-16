@@ -236,6 +236,13 @@ function checks(T, L){
   } else out.push({level:"info", text:"No UFM telemetry for this fabric right now: the drawing shows NetBox cabling only."});
   const down = [...T.spines, ...T.leaves].filter(s => L.switches[s.name] && L.switches[s.name].ping === 0).map(s => s.short);
   if(down.length) out.push({level:"bad", text:`Not answering management ping: ${down.join(", ")}`});
+  // the real cabling's structure (planes and SU slices from UFM's links alone, gemelo's method) against NetBox's SUs
+  const st = D.cabling && D.cabling.structure;
+  if(st){ const c = st.check, bad = c.differ.length || st.planes.length > 1 || st.straddling.length || st.spineless.length;
+    const notes = c.differ.slice(0, 4).map(d => `${d.label}: NetBox's SU is ${d.expected.join("/")}, UFM's links form ${d.inferred.map(x => x.join("/")).join(" + ") || "nothing"}`)
+      .concat(st.straddling.length ? [`leaves on more than one plane: ${st.straddling.slice(0, 8).join(", ")}`] : [])
+      .concat(st.stray.length ? [`${st.stray.length} GPU node(s) cabled into two SUs: ${st.stray.slice(0, 6).join(", ")}`] : []);
+    out.push({level: bad ? "bad" : st.stray.length ? "warn" : "ok", text:`Cabling cross-check (UFM links only, gemelo's method): ${st.summary}.${notes.length ? " " + notes.join("; ") + "." : ""}`}); }
   return out;
 }
 

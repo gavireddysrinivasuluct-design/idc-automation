@@ -1,0 +1,3 @@
+# Read-only. The switch's applied configuration as JSON, for the check against the
+# standard network-deployment renders (app/config_drift.py).
+nv config show --output json

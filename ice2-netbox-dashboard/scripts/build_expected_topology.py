@@ -7,13 +7,14 @@ rules below, or edit the CSV directly for one-off exceptions, and re-run:
 
     python3 scripts/build_expected_topology.py
 
-Rules (ICE2 backend, 36 spines x 64 leaves, 16 scalable units):
+Rules (ICE2 backend, 36 spines x 64 leaves, 16 SU slices in 4 scalable units):
   L1  Leaf-spine full mesh, two cables per pair:
       leaf j port sw(36+i)pM  <->  spine i port sw(j)pM      (i=1..36, j=1..64, M=1,2)
-  G1  4 pods of 16 leaves; within a pod, rail r = leaves 4(r-1)+1..4r; scalable unit k
-      takes the k-th leaf of every rail:  SU = 4*(pod-1)+k.
-  G2  Leaf downlink swNpM (N=1..36) is tray slot 2(N-1)+M of that leaf's SU; every tray
-      uses the same slot (port) on all four leaves of its SU.
+  G1  4 rows of 16 leaves; within a row, rail r = leaves 4(r-1)+1..4r; SU slice k
+      takes the k-th leaf of every rail:  slice = 4*(row-1)+k. (The scalable unit is
+      the row, from NetBox: see app/ufm_cabling.py.)
+  G2  Leaf downlink swNpM (N=1..36) is tray slot 2(N-1)+M of that leaf's slice; every
+      tray uses the same slot (port) on all four leaves of its slice.
   G3  Rail r reaches the tray's adapter mlx5_(r-1) (RDMA r).
 """
 import csv
@@ -23,7 +24,7 @@ HOST = "sys1-ice2-p-swi-"
 OUT = Path(__file__).resolve().parent.parent / "assets" / "expected_topology.csv"
 
 
-def su_of_leaf(leaf: int):
+def slice_of_leaf(leaf: int):
     pod, offset = divmod(leaf - 1, 16)
     rail, k = divmod(offset, 4)
     return pod * 4 + k + 1, pod + 1, rail + 1
@@ -35,11 +36,11 @@ def rows():
             for m in (1, 2):
                 yield ["leaf-spine", HOST + "bel%d" % j, "sw%dp%d" % (36 + i, m), HOST + "bes%d" % i, "sw%dp%d" % (j, m), "L1"]
     for j in range(1, 65):
-        su, pod, rail = su_of_leaf(j)
+        n_slice, pod, rail = slice_of_leaf(j)
         for n in range(1, 37):
             for m in (1, 2):
                 slot = 2 * (n - 1) + m
-                yield ["leaf-gpu", HOST + "bel%d" % j, "sw%dp%d" % (n, m), "SU%d slot %d" % (su, slot), "mlx5_%d" % (rail - 1), "G1-G3"]
+                yield ["leaf-gpu", HOST + "bel%d" % j, "sw%dp%d" % (n, m), "slice%d slot %d" % (n_slice, slot), "mlx5_%d" % (rail - 1), "G1-G3"]
 
 
 def main() -> int:

@@ -261,17 +261,25 @@ class RequestProtection(unittest.TestCase):
 
 
 class Lon14Rules(unittest.TestCase):
-    """The LON14 numbering: SU k = BEL4k-3..4k, rail r = BEL4(k-1)+r, pod = 4 SUs."""
+    """The LON14 numbering: SU slice k = BEL4k-3..4k, rail r = BEL4(k-1)+r; SU = 8 leaves (2 slices)."""
 
     def test_su_and_rail_of_leaf(self):
-        self.assertEqual(ufm_cabling.su_of_leaf(1), (1, 1, 1))
-        self.assertEqual(ufm_cabling.su_of_leaf(6), (2, 1, 2))
-        self.assertEqual(ufm_cabling.su_of_leaf(16), (4, 1, 4))
-        self.assertEqual(ufm_cabling.su_of_leaf(17), (5, 2, 1))
-        self.assertEqual(ufm_cabling.su_of_leaf(64), (16, 4, 4))
+        self.assertEqual(ufm_cabling.slice_of_leaf(1), (1, 1, 1))
+        self.assertEqual(ufm_cabling.slice_of_leaf(6), (2, 1, 2))
+        self.assertEqual(ufm_cabling.slice_of_leaf(16), (4, 1, 4))
+        self.assertEqual(ufm_cabling.slice_of_leaf(17), (5, 2, 1))
+        self.assertEqual(ufm_cabling.slice_of_leaf(64), (16, 4, 4))
         for su in range(1, 17):
-            self.assertEqual([ufm_cabling.su_of_leaf(l)[0] for l in ufm_cabling.su_leaves(su)], [su] * 4)
-            self.assertEqual([ufm_cabling.su_of_leaf(l)[2] for l in ufm_cabling.su_leaves(su)], [1, 2, 3, 4])
+            self.assertEqual([ufm_cabling.slice_of_leaf(l)[0] for l in ufm_cabling.slice_leaves(su)], [su] * 4)
+            self.assertEqual([ufm_cabling.slice_of_leaf(l)[2] for l in ufm_cabling.slice_leaves(su)], [1, 2, 3, 4])
+
+    def test_scalable_units_are_8_leaf_blocks(self):
+        # registry rule (leaf-block, size 8): SU k = BEL 8k-7 .. 8k, two slices each
+        self.assertEqual([ufm_cabling.su_of_leaf(l) for l in (1, 8, 9, 57, 64)], [1, 1, 2, 8, 8])
+        slices = {n: {"su": n, "leaves": ufm_cabling.slice_leaves(n)} for n in range(1, 17)}
+        ufm_cabling.assign_units(slices)
+        self.assertEqual([slices[n]["label"] for n in (1, 2, 3, 16)], ["SU1 slice 1", "SU1 slice 2", "SU2 slice 1", "SU8 slice 2"])
+        self.assertEqual({s["unit"] for s in slices.values()}, set(range(1, 9)))
 
     def test_tray_names(self):
         self.assertEqual(ufm_cabling.TRAY.match("nvl72d031-T14 mlx5_2").groups(), ("nvl72d031-T14", "mlx5_2"))

@@ -4,8 +4,9 @@
 >
 > | | LON14 (this dashboard) | ICE2 |
 > | --- | --- | --- |
-> | Fabric | `sys1-lon14` InfiniBand: 64 BEL + 36 BES (Q3400), 1,152 GB300 NVL72 trays, all 16 SUs cabled | 64 BEL + 36 BES, 4 SUs populated |
-> | SU → leaves | SU *k* = BEL4*k*−3 … 4*k* (consecutive); rail *r* = BEL4(*k*−1)+*r* | SU *k* = *k*-th leaf of each rail block |
+> | Fabric | `sys1-lon14` InfiniBand: 64 BEL + 36 BES (Q3400), 1,152 GB300 NVL72 trays, all 8 SUs (16 SU slices) cabled | 64 BEL + 36 BES, 4 SUs (16 SU slices) |
+> | SU | SU *k* = BEL8*k*−7 … 8*k* (8 leaves, NVIDIA's GB300 NVL72 SU) | SU = NetBox row of the leaves (Row A–D, 16 leaves) |
+> | SU slice → leaves | slice *k* = BEL4*k*−3 … 4*k* (consecutive); rail *r* = BEL4(*k*−1)+*r* | slice *k* = *k*-th leaf of each rail block |
 > | Leaf uplink | leaf *j* `sw(73−i)p(3−M)` ⟷ spine *i* `sw(j)pM` | leaf *j* `sw(36+i)pM` ⟷ spine *i* `sw(j)pM` |
 > | UFM | `sys1-lon14-p-phy-ufm1/2` 10.2.64.75 / .76 (ib0/ib1 → BEL16/32 and BEL12/28 `fnm1`) | 10.1.67.190 / .191 |
 > | Jump host | `lon14deploy1` (Teleport node) | `jmp0` |
@@ -451,9 +452,50 @@ From a terminal: `python3 app/ufm_cabling.py local-inputs/ufm/ibdiagnet2.lst.gz`
 | Rule | Expected connection |
 | --- | --- |
 | L1 | Leaf *j* port `sw(73−i)p(3−M)` ⟷ spine *i* port `sw(j)pM` (two cables per leaf–spine pair; all 4,608 NetBox cables follow it) |
-| G1 | Scalable unit *k* owns four consecutive leaves BEL4*k*−3 … BEL4*k*; rail *r* is BEL4(*k*−1)+*r*. Four SUs make a pod (pod *p* = SU4*p*−3 … 4*p* = BEL16(*p*−1)+1 … 16*p*). |
-| G2 | Leaf port `swNpM` (N ≤ 36) is tray slot 2·(N−1)+M of that SU. A tray uses the same slot on all four of its leaves. |
+| G1 | SU slice *k* owns four consecutive leaves BEL4*k*−3 … BEL4*k*; rail *r* is BEL4(*k*−1)+*r*. Two slices make an SU (SU *k* = BEL8*k*−7 … 8*k*); a data-hall row holds two SUs (16 leaves). |
+| G2 | Leaf port `swNpM` (N ≤ 36) is tray slot 2·(N−1)+M of that slice. A tray uses the same slot on all four of its leaves. |
 | G3 | Rail *r* reaches the tray's adapter `mlx5_(r−1)` (RDMA *r*) — assumed as on ICE2; confirm on a LON14 host |
+
+**Scalable units (SUs) and SU slices.** The cabling can only show an **SU slice**: the 4 leaves that serve the same 72 trays (4 NVL72 racks). It cannot show an SU, because every leaf reaches every spine. LON14's SUs follow the network team's reviewed rule in `nscaledev/network-inventory-compiler` (`registries/scalable_units.yaml`, 2026-10-07, `leaf-block` size 8), taken from the LON14 design page's table (derived from the fabric link map): **SU *k* = BEL8*k*−7 … BEL8*k***, NVIDIA's GB300 NVL72 SU of 8 racks, 144 trays and 576 GPUs, so 8 SUs of two slices each. Slices are labelled within their SU: `SU1 slice 1` is BEL1–4, `SU1 slice 2` is BEL5–8, `SU2 slice 1` is BEL9–12, and so on. NetBox's rows (A, B, D, E) each hold two SUs.
+
+**Cabling cross-check (planes and SU slices from the links alone).** Independently of the rules above, `app/fabric_structure.py` works out the fabric's planes and SU slices from UFM's links only, with the method nscaledev/gemelo uses for backend fabrics (`src/gemelo/acquire/planes.py`, written again here):
+- **Planes:** spines that share at least two leaves form a plane.
+- **SU slices:** leaves that share at least two trays form a slice.
+- **One stray cable never merges two groups.** It is named instead: a leaf on two planes, a leaf with no spine, or a tray cabled into two slices.
+
+The Scalable units card shows the result as one line (on 2026-10-16: *1 plane (64 leaves × 36 spines); 16 SU slices; 16 of 16 agree with the SU slice rule*). A slice whose cabling forms something else, or a fabric split into planes, is a major incident. The same file is in the multi-region dashboard.
+
+**NetBox cable records.** Each **Refresh NetBox** also reads every backend cable's NetBox status. Besides the changed or malformed ends it already reported, it flags:
+- cables NetBox does not mark *connected* (planned, decommissioning);
+- switch ports that more than one cable claims;
+- cable IDs missing from NetBox.
+
+**Config vs standard (the Config vs standard tab).** Each backend leaf and spine's running configuration is compared with the configuration network-deployment renders for it, the trusted standard (`app/config_drift.py`).
+
+- **The standard**: **Render standard from main** renders `sys1-lon14`'s `backend_network` hosts at the newest commit of network-deployment's `main`. It uses exactly the command the repo's own ZTP target uses: `ansible-playbook playbooks/sys1-lon14.yml --tags compile_configs --check --limit backend_network`.
+  - The render writes `compiled/<host>/startup-proposed.yaml` (roles/nscale_nvos) on this machine and contacts no switch.
+  - It runs in a separate clone under `~/.cache/idc-automation/network-deployment`, with its own uv environment and Ansible collections. Your own network-deployment clone is never used or changed.
+  - Each render is kept under `.netbox-live-sync/config-standard/sys1-lon14/<commit>/`, with a manifest: the commit, its date, when it was rendered, and a sha256 per host.
+  - A commit already rendered is never rendered again, and nothing edits the store. The last 3 commits are kept.
+- **The vault password** comes from 1Password on every render, never stored. Add the reference to the device profile:
+
+  ```ini
+  [config_standard]
+  vault_op_ref = op://<vault>/<item>/<field>
+  ```
+
+- **Running configs**: **Collect running configs** runs `nv config show --output json` on every switch in the device inventory. It uses the same read-only collector as the live view, and `assets/config_commands.txt` may only hold `nv show` / `nv config show` commands. The last 5 collections are kept.
+- **The diff** merges each side's NVUE `set` parts, flattens them to setting paths, and lists per switch:
+  - settings **on the switch only** (added by hand);
+  - settings **missing from the switch** (removed, or never deployed);
+  - settings **changed**.
+
+  A key the standard sets with no value (`{}`) and the switch sets further shows only the extra settings.
+- **Secrets the switch hides**: `nv config show` prints every secret as `*` (users' hashed passwords, the TACACS key, SSH keys). For those, only the setting's presence is checked, never its value. A secret missing altogether is still reported.
+- **Private**: rendered configs hold vault secrets, so the store and the collections are 0700/0600 and the page never serves a config. Values under password, secret, key, community, token or private paths are masked as `••••••`.
+- **Incidents**: switches that differ are one minor *configuration* incident, and switches whose config could not be read are an info one. Both link to the tab.
+
+They appear on the NetBox line of the sync status and as one minor documentation incident. These are the cable flags gemelo's NetBox snapshot pages use. The status is read from the next NetBox refresh on.
 
 If the design changes, replace `nscale_Compute.topo` with the new approved file. For the rules, edit them and run `python3 scripts/build_expected_topology.py`. The dashboard picks up either change automatically.
 
@@ -518,7 +560,7 @@ The command uses `local-inputs/ufm/nscale_Compute.topo` automatically when the f
 
 **What changes on the dashboard when a scan is loaded:**
 
-- **GPU area, redrawn from UFM, one pod at a time.** The **POD 1–4** buttons switch pods and show how many trays are on the fabric, designed but off, and needing attention. Each pod shows its 4 scalable units with 72 tray slots each, and the rail-coloured bundles from its 16 leaves: a bundle is thicker the more trays on that rail are Active, and dashed when none are. Each tile is labelled with the last two digits of the slot's **designed host** from `nscale_Compute.topo` (`56` = gpu1256), and sits in the slot where UFM actually sees a tray. Tile colours:
+- **GPU area, redrawn from UFM, two SUs (one row of 16 leaves) at a time.** The **SU1–SU2 … SU7–SU8** buttons switch rows and show how many trays are on the fabric, designed but off, and needing attention. Each row shows its 4 SU slices with 72 tray slots each, and the rail-coloured bundles from its 16 leaves: a bundle is thicker the more trays on that rail are Active, and dashed when none are. Each tile is labelled with the last two digits of the slot's **designed host** from `nscale_Compute.topo` (`56` = gpu1256), and sits in the slot where UFM actually sees a tray. Tile colours:
 
   | Tile | Meaning |
   | --- | --- |
@@ -531,15 +573,15 @@ The command uses `local-inputs/ufm/nscale_Compute.topo` automatically when the f
   | Faint | Empty slot (no design host, nothing seen) |
 
   The four small bars in each tile are the tray's rails 1–4. Click a tray to see its four links, adapter by adapter, with the NetBox cable for each. UFM-only details stay grey so they are clearly distinct from the NetBox cabling record.
-- **NVL72 racks.** Each SU's 72 slots are 4 NVL72 racks of 18 trays: rack 1 is slots 1–18, rack 2 is 19–36, rack 3 is 37–54 and rack 4 is 55–72. UFM's tray names (`<rack>-T<n>`) confirm it: each of the 63 named racks sits in exactly one rack position. In the pod view each SU's tiles are grouped into its 4 racks (3 × 6 tiles each), headed with the rack name and how many of its 18 trays are on the fabric (`d031 · 18/18`; `+18?` counts unnamed adapters). Click a rack header, or search for a rack (`nvl72d031`, `d031`, `su8 rack 1`), to see all 18 trays with their design host, NetBox host and state. The tray inspector names its rack, its position in the rack and its NVLink peers.
+- **NVL72 racks.** Each SU slice's 72 slots are 4 NVL72 racks of 18 trays: rack 1 is slots 1–18, rack 2 is 19–36, rack 3 is 37–54 and rack 4 is 55–72. UFM's tray names (`<rack>-T<n>`) confirm it: each of the 63 named racks sits in exactly one rack position. In the SU view each slice's tiles are grouped into its 4 racks (3 × 6 tiles each), headed with the rack name and how many of its 18 trays are on the fabric (`d031 · 18/18`; `+18?` counts unnamed adapters). Click a rack header, or search for a rack (`nvl72d031`, `d031`, `su8 rack 1` for slice 8, or `su4 slice 2`), to see all 18 trays with their design host, NetBox host and state. The tray inspector names its rack, its position in the rack and its NVLink peers.
 
-  A rack is one NVLink domain: its 72 GPUs talk over NVSwitch and never use InfiniBand. Racks in the same SU reach each other through the SU's four leaves (one switch hop, rail to rail). Racks in different SUs or pods go leaf → spine → leaf. The Incidents tab flags a rack position that holds trays of more than one rack, or a rack whose trays sit in two positions (major), a rack with 9 or more designed trays off the fabric (major), and a rack UFM cannot name (info; today SU8 rack 1, design hosts gpu1760–gpu1777, whose adapters have no node description).
-- **Traffic paths tab** (also the **How traffic flows** button in the header, or `/traffic-paths.html` on its own): an interactive page that animates the path between any two GPUs (same rack over NVLink, same SU and rail through one leaf, other SUs and pods through a spine, and NCCL PXN changing rail over NVLink first). It also works offline: open `assets/traffic-paths.html` in a browser.
+  A rack is one NVLink domain: its 72 GPUs talk over NVSwitch and never use InfiniBand. Racks in the same SU slice reach each other through the slice's four leaves (one switch hop, rail to rail). Racks in different slices or SUs go leaf → spine → leaf. The Incidents tab flags a rack position that holds trays of more than one rack, or a rack whose trays sit in two positions (major), a rack with 9 or more designed trays off the fabric (major), and a rack UFM cannot name (info; today SU4 slice 2 rack 1, design hosts gpu1760–gpu1777, whose adapters have no node description).
+- **Traffic paths tab** (also the **How traffic flows** button in the header, or `/traffic-paths.html` on its own): an interactive page that animates the path between any two GPUs (same rack over NVLink, same SU slice and rail through one leaf, other slices and SUs through a spine, and NCCL PXN changing rail over NVLink first). It also works offline: open `assets/traffic-paths.html` in a browser.
 - **Leaves** take their rail colour; documented GPU downlinks are rail-coloured, and UFM-only GPU discoveries are grey.
 - **Miscabled leaf–spine cables** are drawn in **magenta** on the mesh, and both switches get a ◆ marker. The **Miscabling** chip turns the layer on or off.
 - **Cabling vs UFM tab**, in six sections:
   1. Miscabled cables, grouped per leaf. Each one shows the **Current** connection (UFM), the **Expected** connection (design) and the **Master** connection, end to end. It also gives the re-patch instruction, the impact (*port swap · no fabric impact* or *topology change*, see [6.2](#62-incidents)) and whether NetBox agrees with the design.
-  2. GPU trays per scalable unit, with each SU's four NVL72 racks (click one to open it).
+  2. GPU trays per SU slice, with each slice's four NVL72 racks (click one to open it).
   3. Trays needing attention.
   4. Links not fully Active, or where NetBox differs from the design.
   5. Adapters without a name.
@@ -758,7 +800,7 @@ stays in Keychain for now.
 | Fetch from UFM: `Permission denied` | Wrong or changed UFM password | `./scripts/configure_ufm_access.sh` with the current password |
 | Fetch from UFM: `Host key verification failed` | Your `lon14deploy1` account does not yet trust the UFM host key, or the key changed | From `lon14deploy1`, run `ssh <login>@10.2.64.75 hostname` once and check the fingerprint ([4.9](#49-optional-let-the-dashboard-fetch-from-ufm)) |
 | `fetch_ufm_scan.sh`: "No UFM host returned a fabric scan" | Wrong UFM password, both UFM hosts unreachable from `lon14deploy1`, or UFM not running | Check `ssh root@10.2.64.75` from `lon14deploy1` works. Set `UFM_HOSTS` if the UFM addresses changed. |
-| GPU area still shows the NetBox drawing (4 SUs) | No UFM scan loaded, or the page was opened as a file | Fetch a scan and open `http://127.0.0.1:8766/` |
+| GPU area still shows the NetBox drawing (4 SU slices) | No UFM scan loaded, or the page was opened as a file | Fetch a scan and open `http://127.0.0.1:8766/` |
 | Page shows `SNAPSHOT` and Sync says "needs the local service" | Opened as a file, or from a published copy | Open `http://127.0.0.1:8766/` |
 | `Address already in use` | The service is already running | Use it, stop it with `pkill -f app/netbox_live_sync.py`, or pass `--port 8766` |
 
@@ -815,7 +857,7 @@ Also revoke the NetBox API token in NetBox (**API Tokens → delete**).
 | Method and path | Purpose |
 | --- | --- |
 | `GET /` | Dashboard |
-| `GET /traffic-paths.html` | How traffic flows (rack, rail, SU and pod paths) |
+| `GET /traffic-paths.html` | How traffic flows (rack, rail, SU slice and SU paths) |
 | `GET /api/live` | Live link state for every designed link in use, plus sync, UFM-fetch and incident summaries (ETag and gzip; `304` when unchanged) |
 | `POST /api/sync` · `GET /api/sync/<run>` | Start a fabric sync (switches, UFM, and NetBox when due; `?switches=ssh` logs in to every switch for this run), or check its progress and per-phase timings |
 | `POST /api/netbox/refresh` | NetBox inventory only (progress at `GET /api/sync/<run>`) |
@@ -848,7 +890,7 @@ Also revoke the NetBox API token in NetBox (**API Tokens → delete**).
 | `app/incidents.py` | Incident rules: severity, impact and action for each problem found ([6.2](#62-incidents)) |
 | `collector/run_ntp_audit.py` | Read-only collector (local and jump-host fan-out) |
 | `assets/dashboard.html` | Dashboard |
-| `assets/traffic-paths.html` | How traffic flows: interactive rack / rail / SU / pod path explainer (served at `/traffic-paths.html`) |
+| `assets/traffic-paths.html` | How traffic flows: interactive rack / rail / SU slice / SU path explainer (served at `/traffic-paths.html`) |
 | `assets/connections.csv` | NetBox cable export (9,216 cables): the diagram and the NetBox comparison. Regenerate with `scripts/build_site_data.py` |
 | `assets/devices.csv` | 100 backend switches with site and NetBox role |
 | `assets/read_only_commands.txt` | The only command run on switches |

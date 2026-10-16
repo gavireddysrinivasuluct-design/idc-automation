@@ -59,6 +59,7 @@ import gzip
 import hashlib
 import os
 import json
+import re
 import secrets
 import shutil
 import socket
@@ -88,12 +89,17 @@ DEVICE_CACHE = STATE_DIR / "netbox-devices.json"
 TRAY_HISTORY = STATE_DIR / "tray-history.json"
 BUNDLE_DIR = STATE_DIR / "bundles"     # immutable comparison results (report + metadata only, never credentials)
 BUNDLE_KEEP = 200
+# Running config vs the standard network-deployment renders (app/config_drift.py)
+CONFIG_CLUSTER = "sys1-lon14"
+CONFIG_STORE = STATE_DIR / "config-standard"  # rendered standards, pinned by commit (private: 0700)
+CONFIG_RUNS = STATE_DIR / "config-runs"  # `nv config show --output json` per switch, per collection
+CONFIG_COMMANDS = ASSETS_DIR / "config_commands.txt"
 FABRIC = "sys1"   # "sys2" (Ethernet, SN5610): no UFM, switch states over SSH, its own state folder
 
 
 def set_state_dir(path: Path) -> None:
     """Point every runtime file at another folder (one per fabric service, so two can run side by side)."""
-    global STATE_DIR, LATEST, ADDRESS_CACHE, CABLE_CACHE, DEVICE_CACHE, TRAY_HISTORY, BUNDLE_DIR
+    global STATE_DIR, LATEST, ADDRESS_CACHE, CABLE_CACHE, DEVICE_CACHE, TRAY_HISTORY, BUNDLE_DIR, CONFIG_STORE, CONFIG_RUNS
     STATE_DIR = Path(path)
     LATEST = STATE_DIR / "latest-live.json"
     ADDRESS_CACHE = STATE_DIR / "management-addresses.csv"
@@ -101,6 +107,7 @@ def set_state_dir(path: Path) -> None:
     DEVICE_CACHE = STATE_DIR / "netbox-devices.json"
     TRAY_HISTORY = STATE_DIR / "tray-history.json"
     BUNDLE_DIR = STATE_DIR / "bundles"
+    CONFIG_STORE, CONFIG_RUNS = STATE_DIR / "config-standard", STATE_DIR / "config-runs"
 
 
 def ethernet_state(info: dict) -> str | None:
@@ -128,7 +135,7 @@ DEFAULT_UFM_MASTER = PROJECT_ROOT / "local-inputs" / "ufm" / "master.topo.gz"
 DEFAULT_DESIGN_TOPO = PROJECT_ROOT / "local-inputs" / "ufm" / "nscale_Compute.topo"
 DEFAULT_UFM_REPORT = PROJECT_ROOT / "local-inputs" / "ufm" / "topology-compare.json.gz"
 DEVICE_FIELDS = "name,primary_ip4,primary_ip,device_type,status"
-CABLE_FIELDS = "id,a_terminations,b_terminations"
+CABLE_FIELDS = "id,status,a_terminations,b_terminations"
 BASELINE_COLLECTED_AT = "not-collected"
 
 
@@ -172,6 +179,29 @@ def termination_problem(cable: dict) -> str:
         if not (obj.get("device") or {}).get("name") or not obj.get("name"):
             return "malformed %s-side termination" % side.upper()
     return ""
+
+
+def cable_status(cable: dict) -> str:
+    """NetBox's cable status value (connected, planned, decommissioning), '' if not given."""
+    status = cable.get("status")
+    return str((status.get("value") if isinstance(status, dict) else status) or "")
+
+
+def cable_quality(baseline: dict, cables: dict, status: dict) -> dict:
+    """NetBox cable records with problems besides a changed end (the flags gemelo's NetBox
+    snapshot pages use): cables NetBox does not mark connected (planned, decommissioning),
+    and switch ports more than one cable claims. Ends that are not one interface each
+    side are already listed as mismatches."""
+    not_connected, claims = [], collections.defaultdict(list)
+    for cid in baseline:
+        ends = cables.get(cid)
+        if status.get(cid) not in (None, "", "connected"):
+            not_connected.append([int(cid), status[cid]] + (list(ends[:4]) if ends and len(ends) == 4 else ["", "", "", ""]))
+        if ends and len(ends) == 4:
+            for end in ((ends[0], ends[1]), (ends[2], ends[3])):
+                claims[end].append(int(cid))
+    shared = [[dev, port, sorted(ids)] for (dev, port), ids in claims.items() if len(ids) > 1]
+    return {"not_connected": sorted(not_connected), "shared_ports": sorted(shared)}
 
 
 def cable_endpoints(cable: dict) -> list | None:
@@ -271,6 +301,9 @@ class SyncState:
         self.evidence_note = ""
         self.fields_ok: bool | None = None          # NetBox `fields=` support, learned on first use
         self.nb_cables: dict[str, list | None] = {}  # cable id -> [a_dev, a_port, b_dev, b_port]
+        self.nb_status: dict[str, str] = {}  # cable id -> NetBox status (connected, planned, ...)
+        self.config_jobs: dict[str, dict] = {}
+        self._config: tuple | None = None
         self.nb_full_at: str | None = None
         self.nb_synced_at: str | None = None        # start time of the last successful cable sync
         self.version = 0
@@ -384,6 +417,7 @@ class SyncState:
         try:
             saved = json.loads(CABLE_CACHE.read_text(encoding="utf-8"))
             self.nb_cables = saved.get("cables", {})
+            self.nb_status = saved.get("status", {})
             self.nb_full_at, self.nb_synced_at = saved.get("full_at"), saved.get("synced_at")
             self.netbox_sync = saved.get("result")
         except (OSError, ValueError) as error:
@@ -436,7 +470,7 @@ class SyncState:
         STATE_DIR.mkdir(exist_ok=True)
         partial = CABLE_CACHE.with_suffix(".part")
         partial.write_text(json.dumps({"full_at": self.nb_full_at, "synced_at": self.nb_synced_at,
-                                       "cables": self.nb_cables, "result": self.netbox_sync}), encoding="utf-8")
+                                       "cables": self.nb_cables, "status": self.nb_status, "result": self.netbox_sync}), encoding="utf-8")
         partial.replace(CABLE_CACHE)
 
     # ---------- NetBox ----------
@@ -773,6 +807,117 @@ class SyncState:
                 return candidate
         return None
 
+    # ---------- running config vs the network-deployment standard ----------
+    def _config_job(self, kind: str, work) -> dict:
+        if FABRIC != "sys1":
+            raise RuntimeError("The config check covers the sys1 InfiniBand fabric (rendered by network-deployment's nscale_nvos).")
+        with self.lock:
+            if any(j["state"] == "running" for j in self.config_jobs.values()):
+                raise RuntimeError("A config render or collection is already running.")
+            job_id = secrets.token_hex(6)
+            job = self.config_jobs[job_id] = {"id": job_id, "kind": kind, "state": "running", "step": "starting", "started_at": now_iso()}
+            self.bump()
+
+        def run() -> None:
+            try:
+                job.update(work(lambda text: job.update(step=text)) or {}, state="done", finished_at=now_iso())
+            except Exception as error:  # reported on the page; never a traceback with secrets
+                job.update(state="failed", error=str(error)[:600], finished_at=now_iso())
+            with self.lock:
+                self._config = None
+                self.bump()
+        threading.Thread(target=run, daemon=True).start()
+        return {"run_id": job_id, "state": "running"}
+
+    def start_config_render(self) -> dict:
+        """Render the standard from network-deployment main (compile-only; no switch is contacted)."""
+        _sys.path.insert(0, str(APP_DIR))
+        import config_drift  # noqa: E402
+        password = config_drift.vault_password(self.device_profile)  # fails fast, before the job starts
+        CONFIG_STORE.mkdir(parents=True, exist_ok=True)
+        CONFIG_STORE.chmod(0o700)
+
+        def work(progress):
+            manifest = config_drift.render(CONFIG_CLUSTER, CONFIG_STORE, password, progress)
+            return {"commit": manifest["commit"], "hosts": len(manifest["hosts"])}
+        return self._config_job("render", work)
+
+    def start_config_collect(self) -> dict:
+        """Read each backend switch's running config with `nv config show --output json` (read-only)."""
+        required = {"bundled collector": COLLECTOR, "device profile": self.device_profile, "device inventory": self.devices,
+                    "approved host-key file": self.known_hosts, "config command file": CONFIG_COMMANDS}
+        missing = [label for label, path in required.items() if not path or not Path(path).is_file()]
+        if missing:
+            raise RuntimeError("Missing for the config collection: %s." % ", ".join(missing))
+        if any(item.get("state") == "running" for item in self.refreshes.values()):
+            raise RuntimeError("A live device collection is running; collect configs when it has finished.")
+        lines = [l.strip() for l in CONFIG_COMMANDS.read_text(encoding="utf-8").splitlines() if l.strip() and not l.lstrip().startswith("#")]
+        if not lines or any(not re.match(r"^nv (config )?show( [\w./-]+)*( --output json)?$", l) for l in lines):
+            raise RuntimeError("%s may only hold read-only `nv show` / `nv config show` commands." % CONFIG_COMMANDS.name)
+
+        def work(progress):
+            run_dir = CONFIG_RUNS / datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            run_dir.mkdir(parents=True)
+            CONFIG_RUNS.chmod(0o700)
+            progress("management addresses")
+            addresses = run_dir / "management_addresses.csv"
+            self.management_addresses(addresses)
+            progress("nv config show on %d switches" % self.device_count())
+            command = [sys.executable, str(COLLECTOR), "--profile", str(self.device_profile), "--devices", str(self.devices),
+                       "--addresses", str(addresses), "--known-hosts", str(self.known_hosts), "--commands-file", str(CONFIG_COMMANDS),
+                       "--report-format", "none", "--parallel", str(self.device_parallel), "--fanout", self.fanout, "--output-dir", str(run_dir)]
+            with (run_dir / "collector.log").open("w", encoding="utf-8") as log:
+                code = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, timeout=3600).returncode
+            raw = sorted((run_dir / "raw").glob("*.txt")) if (run_dir / "raw").is_dir() else []
+            got = sum(1 for f in raw if f.stat().st_size)
+            if not got:
+                raise RuntimeError("No switch returned its config (collector exit %d); see %s" % (code, run_dir / "collector.log"))
+            for f in raw:
+                f.chmod(0o600)
+            (run_dir / "done").write_text(now_iso())
+            for old in sorted(p for p in CONFIG_RUNS.iterdir() if p.is_dir())[:-5]:
+                shutil.rmtree(old, ignore_errors=True)
+            return {"switches": got, "run": run_dir.name}
+        return self._config_job("collect", work)
+
+    def config_job(self, job_id: str) -> dict:
+        job = self.config_jobs.get(job_id)
+        if not job:
+            raise RuntimeError("Unknown config job.")
+        return job
+
+    def config_report(self) -> dict:
+        """Each backend switch's running config against the current standard (cached on the files)."""
+        if FABRIC != "sys1":
+            raise RuntimeError("The config check covers the sys1 InfiniBand fabric only.")
+        _sys.path.insert(0, str(APP_DIR))
+        import config_drift  # noqa: E402
+        runs = sorted(p for p in CONFIG_RUNS.iterdir() if (p / "done").is_file()) if CONFIG_RUNS.is_dir() else []
+        current = CONFIG_STORE / CONFIG_CLUSTER / "current.json"
+        key = (current.stat().st_mtime_ns if current.is_file() else 0, runs[-1].name if runs else "")
+        with self.lock:
+            if self._config and self._config[0] == key:
+                return dict(self._config[1], jobs=list(self.config_jobs.values())[-4:])
+        manifest, want = config_drift.standard(CONFIG_STORE, CONFIG_CLUSTER)
+        have: dict = {}
+        if runs:
+            for f in (runs[-1] / "raw").glob("*.txt"):
+                have[f.stem] = config_drift.parse_running(f.read_text(encoding="utf-8", errors="replace")) if f.stat().st_size else None
+        try:
+            with self.devices.open(newline="", encoding="utf-8-sig") as handle:  # type: ignore[union-attr]
+                hosts = [r["hostname"].strip() for r in csv.DictReader(handle) if (r.get("hostname") or "").strip()]
+        except (OSError, AttributeError):
+            hosts = sorted(want)
+        switches = config_drift.compare(want, have, hosts)
+        counts = collections.Counter(v["state"] for v in switches.values())
+        report = {"cluster": CONFIG_CLUSTER, "standard": {k: manifest[k] for k in ("commit", "committed_at", "rendered_at", "repo", "branch", "how", "not_rendered")}
+                  if manifest else None, "standard_only": sorted(set(want) - set(hosts)),
+                  "running": {"run": runs[-1].name, "collected_at": (runs[-1] / "done").read_text().strip()} if runs else None,
+                  "counts": dict(counts), "switches": switches}
+        with self.lock:
+            self._config = (key, report)
+        return dict(report, jobs=list(self.config_jobs.values())[-4:])
+
     def cabling(self) -> dict | None:
         """The UFM-vs-NetBox cabling report, rebuilt only when the scan file changes."""
         path = self.ufm_scan_path()
@@ -858,7 +1003,8 @@ class SyncState:
             report = None
             print("[netbox-live-sync] cabling report unavailable for incidents:", error)
         key = (self._cabling[0] if self._cabling else None, live.get("collected_at"), len(live.get("exceptions") or []), json.dumps(live.get("freshness"), sort_keys=True),
-               json.dumps((self.ufm_fetch_state().get("last") or {}).get("state")), int(time.time() // 900))
+               json.dumps((self.ufm_fetch_state().get("last") or {}).get("state")), int(time.time() // 900),
+               self._config[0] if self._config else None)
         cached = getattr(self, "_incidents", None)
         if cached and cached[0] == key:
             return cached[1]
@@ -870,7 +1016,12 @@ class SyncState:
                 history = json.loads(TRAY_HISTORY.read_text())
             except (OSError, ValueError):
                 history = {}
-        result = incidents.detect(report, live, history, self.ufm_fetch_state())
+        try:
+            config = self.config_report()
+        except Exception as error:  # the config check is optional
+            config = None
+            print("[netbox-live-sync] config report unavailable for incidents:", error)
+        result = incidents.detect(report, live, history, self.ufm_fetch_state(), config)
         self._incidents = (key, result)
         return result
 
@@ -1321,12 +1472,15 @@ class SyncState:
                 for cid in relevant:
                     if cid in found:
                         self.nb_cables[cid] = cable_endpoints(found[cid])
+                        self.nb_status[cid] = cable_status(found[cid])
                     else:
                         self.nb_cables.pop(cid, None)
+                        self.nb_status.pop(cid, None)
                 changed = len(relevant)
         if mode == "full":
             cables = self.fetch_cables(progress)
             self.nb_cables = {cid: cable_endpoints(c) for cid, c in cables.items()}
+            self.nb_status = {cid: cable_status(c) for cid, c in cables.items()}
             self.nb_full_at = started
         mismatches, missing = [], []
         for cable_id, row in self.baseline.items():
@@ -1347,7 +1501,8 @@ class SyncState:
                   "mismatches": mismatches, "extra_in_range": len([c for c in self.nb_cables if c not in self.baseline]),
                   "mode": mode, "changed": changed, "full_at": self.nb_full_at,
                   "seconds": round(time.monotonic() - t0, 2), "requests": getattr(self, "netbox_requests", 0) - requests_before,
-                  "fields_trimmed": bool(self.fields_ok)}
+                  "fields_trimmed": bool(self.fields_ok),
+                  "quality": cable_quality(self.baseline, self.nb_cables, self.nb_status)}
         with self.lock:
             self.netbox_sync = result
             self.nb_synced_at = started
@@ -1432,7 +1587,8 @@ class SyncState:
                 nb = self.sync_netbox(record["netbox"])
                 record["netbox"] = {"state": "complete", "checked": nb["checked"], "mismatches": len(nb["mismatches"]),
                                     "missing": len(nb["missing"]), "mode": nb["mode"], "changed": nb["changed"],
-                                    "requests": nb["requests"], "fields_trimmed": nb["fields_trimmed"]}
+                                    "requests": nb["requests"], "fields_trimmed": nb["fields_trimmed"],
+                                    "not_connected": len(nb["quality"]["not_connected"]), "shared_ports": len(nb["quality"]["shared_ports"])}
             except Exception as error:
                 record["netbox"] = {"state": "failed", "error": str(error), "synced_at": self.nb_synced_at}
             timings["netbox_s"] = round(time.monotonic() - start, 1)
@@ -1895,6 +2051,10 @@ class Handler(BaseHTTPRequestHandler):
                 self.respond(HTTPStatus.OK, self.state.refresh_status(unquote(path.rsplit("/", 1)[-1])))
             elif path.startswith("/api/cabling/fetch/"):
                 self.respond(HTTPStatus.OK, self.state.ufm_fetch_status(unquote(path.rsplit("/", 1)[-1])))
+            elif path == "/api/config":
+                self.respond(HTTPStatus.OK, self.state.config_report())
+            elif path.startswith("/api/config/job/"):
+                self.respond(HTTPStatus.OK, self.state.config_job(unquote(path.rsplit("/", 1)[-1])))
             elif path.startswith("/api/sync/"):
                 self.respond(HTTPStatus.OK, self.state.sync_status(unquote(path.rsplit("/", 1)[-1])))
             else:
@@ -1916,6 +2076,7 @@ class Handler(BaseHTTPRequestHandler):
         query = {k: unquote(v) for k, v in (part.split("=", 1) for part in urlparse(self.path).query.split("&") if "=" in part)}
         actions = {"/api/refresh": self.state.start_refresh, "/api/sync": lambda: self.state.start_sync("fabric", query.get("switches") or None),
                    "/api/cabling/fetch": self.state.start_ufm_fetch,
+                   "/api/config/render": self.state.start_config_render, "/api/config/collect": self.state.start_config_collect,
                    "/api/netbox/refresh": lambda: self.state.start_sync("netbox"),
                    "/api/design/approve": lambda: self.state.approve_design(query.get("sha256", ""), query.get("note", ""))}
         if path not in actions:

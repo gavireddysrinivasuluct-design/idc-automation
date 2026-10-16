@@ -15,9 +15,16 @@ Facts about the LON14 InfiniBand fabric (sys1-lon14) this relies on:
   `<rack>-T<tray>` (for example `nvl72d031-T14 mlx5_2`), otherwise a hostname. The
   NetBox hostname of a tray is learned from the NetBox cables that end on its adapters.
 * LON14 numbering (checked against NetBox: 4608/4608 leaf-spine cables follow it):
-  scalable unit k uses four consecutive leaves BEL 4k-3 .. 4k, one per rail
-  (rail r = leaf 4(k-1)+r); 4 SUs make a pod. A tray uses the same port on all four
-  leaves of its SU. Leaf j port sw(73-i)p(3-M) goes to spine i port sw(j)pM.
+  SU slice k uses four consecutive leaves BEL 4k-3 .. 4k, one per rail
+  (rail r = leaf 4(k-1)+r); 4 slices make a row. A tray uses the same port on all
+  four leaves of its slice. Leaf j port sw(73-i)p(3-M) goes to spine i port sw(j)pM.
+  A slice is the set of leaves that serve the same trays (4 NVL72 racks), all the
+  cabling can show.
+* Scalable units (SUs) follow NVIDIA's GB300 NVL72 definition (8 racks, 144 trays,
+  8 leaves): SU k = BEL 8k-7 .. 8k, two slices each, 8 SUs. This is the network
+  team's reviewed rule (nscaledev/network-inventory-compiler
+  registries/scalable_units.yaml, 2026-10-07, `leaf-block` size 8), from the LON14
+  design page's table derived from the fabric link map.
 """
 
 from __future__ import annotations
@@ -31,6 +38,8 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 
+import fabric_structure
+
 END = re.compile(r"\{ (SW|CA) Ports:[0-9a-fA-F]+ .*?\{([^}]*)\} LID:[0-9a-fA-F]+ PN:([0-9a-fA-F]+) \}")
 SWITCH = re.compile(r"^(?:MF\d+;)?([A-Za-z0-9._-]+):[^/]*/U(\d+)$")
 TRAY = re.compile(r"^(?!localhost\s)(\S+)\s+(mlx5_\d+)$")  # "<node> mlx5_N" (node = <rack>-T<tray> or a hostname)
@@ -39,7 +48,7 @@ UFM_HOST = re.compile(r"-ufm\d", re.I)
 LEAF = re.compile(r"-bel(\d+)$")
 SPINE = re.compile(r"-bes(\d+)$")
 PLANES = 4
-RACK_TRAYS = 18  # NVL72: 18 compute trays per rack, 4 racks per SU
+RACK_TRAYS = 18  # NVL72: 18 compute trays per rack, 4 racks per SU slice
 
 
 def port_label(number: int) -> str:
@@ -59,14 +68,38 @@ def leaf_no(name: str) -> int | None:
     return int(m.group(1)) if m else None
 
 
-def su_of_leaf(leaf: int) -> tuple[int, int, int]:
-    """(su 1..16, pod 1..4, rail 1..4) for leaf 1..64. LON14: SU k = leaves 4k-3..4k."""
-    su, rail = divmod(leaf - 1, 4)
-    return su + 1, su // 4 + 1, rail + 1
+def slice_of_leaf(leaf: int) -> tuple[int, int, int]:
+    """(SU slice 1..16, row 1..4, rail 1..4) for leaf 1..64. LON14: slice k = leaves 4k-3..4k."""
+    n, rail = divmod(leaf - 1, 4)
+    return n + 1, n // 4 + 1, rail + 1
 
 
-def su_leaves(su: int) -> list[int]:
-    return [4 * (su - 1) + r for r in range(1, 5)]
+def slice_leaves(n: int) -> list[int]:
+    return [4 * (n - 1) + r for r in range(1, 5)]
+
+
+# The SU rule (see the module docstring): blocks of 8 consecutive leaves.
+SU_LEAVES = 8
+SU_RULE = {"method": "leaf-block", "size": SU_LEAVES, "reviewed": "2026-10-07", "status": "recorded",
+           "source": "nscaledev/network-inventory-compiler registries/scalable_units.yaml",
+           "text": "SU k = BEL%d(k-1)+1 .. BEL%dk (NVIDIA GB300 NVL72 SU: 8 racks, 144 trays)" % (SU_LEAVES, SU_LEAVES)}
+
+
+def su_of_leaf(leaf: int) -> int:
+    """The scalable unit (1..8) of leaf 1..64."""
+    return (leaf - 1) // SU_LEAVES + 1
+
+
+def assign_units(slices: dict[int, dict]) -> None:
+    """Give every slice its SU (`unit`), its place in that SU and a display `label`."""
+    per = SU_LEAVES // 4
+    for n, sl in slices.items():
+        units = {su_of_leaf(l) for l in sl["leaves"]}
+        sl["slice"] = n
+        sl["unit"] = units.pop() if len(units) == 1 else None
+        sl["slice_of_unit"] = (n - 1) % per + 1
+        sl["unit_problem"] = "" if sl["unit"] else "leaves in more than one SU"
+        sl["label"] = "SU%d slice %d" % (sl["unit"], sl["slice_of_unit"]) if sl["unit"] else "SU slice %d" % n
 
 
 def short(name: str) -> str:
@@ -550,7 +583,7 @@ def analyse(scan: Path, baseline: list[dict], expected: list[dict] | None = None
                 trays[m.group(1)].append({"leaf": leaf, "port": label, "hca": m.group(2), "planes": len(item["planes"]), "state": health(item),
                                            "nb": nb_gpu.get((dev, label))})
             else:
-                su, pod, rail = su_of_leaf(leaf)
+                su, pod, rail = slice_of_leaf(leaf)
                 known = master["gpu"].get((dev, label)) if master else None
                 unnamed.append({"su": su, "rail": rail, "leaf": leaf, "port": label, "slot": slot_of(label), "adapter": desc,
                                 "state": health(item), "nb": nb_gpu.get((dev, label)),
@@ -559,7 +592,7 @@ def analyse(scan: Path, baseline: list[dict], expected: list[dict] | None = None
     hca_votes = collections.defaultdict(collections.Counter)
     for code, ads in trays.items():
         for ad in ads:
-            hca_votes[su_of_leaf(ad["leaf"])[2]][ad["hca"]] += 1
+            hca_votes[slice_of_leaf(ad["leaf"])[2]][ad["hca"]] += 1
     rail_hca = {rail: votes.most_common(1)[0][0] for rail, votes in hca_votes.items()}
     rdma_votes = collections.defaultdict(collections.Counter)
     for code, ads in trays.items():
@@ -569,7 +602,10 @@ def analyse(scan: Path, baseline: list[dict], expected: list[dict] | None = None
     rdma_hca = {rdma: votes.most_common(1)[0][0] for rdma, votes in rdma_votes.items()}
     hca_rdma = {hca: rdma for rdma, hca in rdma_hca.items()}
 
-    sus = {su: {"su": su, "pod": (su - 1) // 4 + 1, "leaves": su_leaves(su), "trays": [], "unnamed": []} for su in range(1, 17)}
+    # "sus" holds the 16 SU slices; "su" stays the slice number (the page's ids use it),
+    # "unit" is the scalable unit (SU_RULE) and "label" how a slice is shown.
+    sus = {su: {"su": su, "pod": (su - 1) // 4 + 1, "leaves": slice_leaves(su), "trays": [], "unnamed": []} for su in range(1, 17)}
+    assign_units(sus)
     gpu_counts = collections.Counter()
     host_of_tray = {}
     for code, ads in trays.items():
@@ -581,16 +617,16 @@ def analyse(scan: Path, baseline: list[dict], expected: list[dict] | None = None
         master_host = m_hosts.most_common(1)[0][0] if m_hosts else ""
         issues = []
         leaves = sorted({ad["leaf"] for ad in ads})
-        su_set = {su_of_leaf(l)[0] for l in leaves}
+        su_set = {slice_of_leaf(l)[0] for l in leaves}
         slots = {slot_of(ad["port"]) for ad in ads}
-        su = collections.Counter(su_of_leaf(ad["leaf"])[0] for ad in ads).most_common(1)[0][0]
+        su = collections.Counter(slice_of_leaf(ad["leaf"])[0] for ad in ads).most_common(1)[0][0]
         slot = collections.Counter(slot_of(ad["port"]) for ad in ads).most_common(1)[0][0]
         if len(su_set) > 1:
-            issues.append("adapters on leaves of different SUs")
+            issues.append("adapters on leaves of different SU slices")
         if len(slots) > 1:
             issues.append("not on the same port of all four leaves")
         for ad in ads:
-            rail = su_of_leaf(ad["leaf"])[2]
+            rail = slice_of_leaf(ad["leaf"])[2]
             design = None if netbox_ref and not combined else exp_gpu.get(("sys1-lon14-p-swi-bel%d" % ad["leaf"], ad["port"]))
             want = design[1] if design else rail_hca.get(rail)
             if netbox_ref and not combined:
@@ -600,7 +636,7 @@ def analyse(scan: Path, baseline: list[dict], expected: list[dict] | None = None
                 issues.append("BEL%d %s is not a GPU port in the design" % (ad["leaf"], ad["port"]))
             elif want and ad["hca"] != want:
                 issues.append("%s on rail %d leaf BEL%d (design expects %s)" % (ad["hca"], rail, ad["leaf"], want))
-        rails_seen = {su_of_leaf(ad["leaf"])[2] for ad in ads}
+        rails_seen = {slice_of_leaf(ad["leaf"])[2] for ad in ads}
         missing_rails = [r for r in range(1, 5) if r not in rails_seen]
         if missing_rails:
             issues.append("no link on rail %s" % ", ".join(map(str, missing_rails)))
@@ -633,8 +669,8 @@ def analyse(scan: Path, baseline: list[dict], expected: list[dict] | None = None
             "slot": slot, "code": code, "host": host, "doc": doc, "status": status, "issues": issues,
             "master_host": master_host if "-phy-" in master_host else "", "in_master": bool(m_hosts),
             "design_host": next((exp_gpu[k][0] for k in (("sys1-lon14-p-swi-bel%d" % ad["leaf"], ad["port"]) for ad in ads)
-                                 if k in exp_gpu and not exp_gpu[k][0].startswith("SU")), ""),
-            "adapters": sorted(([su_of_leaf(ad["leaf"])[2], ad["leaf"], ad["port"], ad["hca"], ad["planes"], ad["state"],
+                                 if k in exp_gpu and not exp_gpu[k][0].startswith(("SU", "slice"))), ""),
+            "adapters": sorted(([slice_of_leaf(ad["leaf"])[2], ad["leaf"], ad["port"], ad["hca"], ad["planes"], ad["state"],
                                  ad["nb"][2] if ad["nb"] else "", hca_rdma.get(ad["hca"], "")] for ad in ads)),
         })
     for item in unnamed:
@@ -645,14 +681,14 @@ def analyse(scan: Path, baseline: list[dict], expected: list[dict] | None = None
         for slot in range(72):
             label = "sw%dp%d" % (slot // 2 + 1, slot % 2 + 1)
             hosts = [exp_gpu.get(("sys1-lon14-p-swi-bel%d" % l, label), ("",))[0] for l in su["leaves"]]
-            named = [h for h in hosts if h and not h.startswith("SU")]
+            named = [h for h in hosts if h and not h.startswith(("SU", "slice"))]
             design.append(named[0] if named else "")
         su["design"] = design
         su["trays"].sort(key=lambda t: (t["slot"] if t["slot"] is not None else 99, t["code"]))
         su["unnamed"].sort(key=lambda u: (u[0] if u[0] is not None else 99, u[1]))
-    # ---- NVL72 racks: each SU's 72 slots are 4 racks of 18 (slots 1-18, 19-36, 37-54, 55-72).
+    # ---- NVL72 racks: each SU slice's 72 slots are 4 racks of 18 (slots 1-18, 19-36, 37-54, 55-72).
     # UFM names trays <rack>-T<n>; a rack whose trays sit in two blocks, or a block holding
-    # trays of two racks, is a cabling error (the rack's GPUs would span SUs or rails).
+    # trays of two racks, is a cabling error (the rack's GPUs would span slices or rails).
     rack_blocks = collections.defaultdict(set)
     for su in sus.values():
         for t in su["trays"]:
@@ -675,13 +711,24 @@ def analyse(scan: Path, baseline: list[dict], expected: list[dict] | None = None
             if len(names) > 1:
                 issues.append("trays of %d racks in one rack position: %s" % (len(names), ", ".join("%s (%d)" % kv for kv in names.most_common())))
             if name and len(rack_blocks[name]) > 1:
-                issues.append("%s also has trays in %s" % (name, ", ".join("SU%d rack %d" % (a, b + 1) for a, b in sorted(rack_blocks[name]) if (a, b) != (su["su"], pos))))
+                issues.append("%s also has trays in %s" % (name, ", ".join("%s rack %d" % (sus[a]["label"], b + 1) for a, b in sorted(rack_blocks[name]) if (a, b) != (su["su"], pos))))
             state = "split" if issues else "empty" if not trs and not n_unnamed else "unnamed" if not trs else "ok"
             rack_counts["racks-" + state] += 1
             su["racks"].append({"pos": pos + 1, "name": name, "slots": [lo, hi - 1], "trays": len(trs), "unnamed": n_unnamed,
                                 "off": off, "attention": sum(1 for t in trs if t["status"] != "ok"),
                                 "documented": sum(1 for t in trs if t["doc"] == "documented"),
                                 "hosts": [hosts[0], hosts[-1]] if hosts else [], "state": state, "issues": issues})
+    # ---- cross-check: planes and SU slices worked out from UFM's links alone (fabric_structure)
+    up_links, tray_links = collections.defaultdict(set), collections.defaultdict(set)
+    for (dev, spine) in cur_adj:
+        up_links["BEL%d" % leaf_no(dev)].add(SPINE.search(spine).group(0).lstrip("-").upper())
+    for code, ads in trays.items():
+        for ad in ads:
+            tray_links["BEL%d" % ad["leaf"]].add(code)
+    structure = fabric_structure.infer(["BEL%d" % l for l in range(1, 65)], up_links, tray_links)
+    structure["check"] = fabric_structure.compare(structure, {sl["label"]: ["BEL%d" % l for l in sl["leaves"]] for sl in sus.values()})
+    structure["summary"] = fabric_structure.summary(structure, structure["check"])
+
     gpu_not_seen = []
     seen_ports = {(f"sys1-lon14-p-swi-bel{ad['leaf']}", ad["port"]) for ads in trays.values() for ad in ads}
     seen_ports |= {(f"sys1-lon14-p-swi-bel{u['leaf']}", u["port"]) for u in unnamed}
@@ -708,6 +755,8 @@ def analyse(scan: Path, baseline: list[dict], expected: list[dict] | None = None
         "netbox_gpu_cables": len(nb_gpu),
         "racks_named": len(rack_blocks), "rack_positions": 16 * 4, "racks_split": rack_counts["racks-split"],
         "racks_unnamed": rack_counts["racks-unnamed"], "racks_empty": rack_counts["racks-empty"],
+        "scalable_units": len({sl["unit"] for sl in sus.values() if sl["unit"]}),
+        "slices_without_su": sum(1 for sl in sus.values() if not sl["unit"]),
     }
     master_summary = None
     if master:
@@ -732,6 +781,8 @@ def analyse(scan: Path, baseline: list[dict], expected: list[dict] | None = None
         "switch_findings": sorted(switch_findings, key=lambda f: ({"miscabled": 0, "not-seen": 1, "down": 2, "init": 3, "degraded": 4, "netbox-differs": 5, "changed-since-master": 6}.get(f["status"], 9), f["leaf"])),
         "switch_undocumented": sorted(undocumented_switch, key=lambda x: x["a"]),
         "sus": [sus[k] for k in sorted(sus)],
+        "su_rule": SU_RULE,
+        "structure": structure,
         "gpu_not_seen": gpu_not_seen,
         "ufm_links": sorted(ufm_links, key=lambda x: (x["leaf"], x["port"])),
         "rail_adapter": {str(k): v for k, v in sorted(rail_hca.items())},
@@ -777,7 +828,7 @@ def findings_csv(report: dict) -> str:
                 if t["status"] == "ok" and cid:
                     continue
                 finding = "gpu-link-not-in-netbox" if not cid else "gpu-" + t["status"]
-                expected = "SU%d slot %d %s" % (su["su"], t["slot"] + 1, "mlx5_%d" % (rail - 1)) if t["slot"] is not None else ""
+                expected = "%s slot %d %s" % (su["label"], t["slot"] + 1, "mlx5_%d" % (rail - 1)) if t["slot"] is not None else ""
                 w.writerow([finding, cid, "sys1-lon14-p-swi-bel%d" % leaf, port, expected, "%s %s" % (t["code"], hca), planes, state,
                             ("sys1-lon14-p-swi-bel%d %s <-> %s" % (leaf, port, expected)) if expected else "",
                             "sys1-lon14-p-swi-bel%d %s <-> %s %s" % (leaf, port, t["code"], hca),
